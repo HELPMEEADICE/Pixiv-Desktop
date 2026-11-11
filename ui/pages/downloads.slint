@@ -69,7 +69,9 @@ component TaskRow inherits Rectangle {
         VerticalLayout {
             spacing: 3px;
             horizontal-stretch: 1;
-            alignment: center;
+            // Left-aligned like every other list row: `alignment: center` would
+            // centre each line in the column instead of aligning it to the edge.
+            alignment: start;
 
             Text {
                 text: root.entry.title;
@@ -155,7 +157,7 @@ export component DownloadsPage inherits Rectangle {
         spacing: Theme.space-3;
 
         // ---- header ----
-        VerticalLayout {
+        header-block := VerticalLayout {
             spacing: Theme.space-1;
             padding-top: Theme.space-1;
 
@@ -182,7 +184,7 @@ export component DownloadsPage inherits Rectangle {
         }
 
         // ---- command bar ----
-        HorizontalLayout {
+        command-bar := HorizontalLayout {
             spacing: Theme.space-2;
             alignment: start;
 
@@ -213,7 +215,7 @@ export component DownloadsPage inherits Rectangle {
         }
 
         // ---- destination ----
-        SettingsCard {
+        destination-card := SettingsCard {
             title: "保存位置";
             description: "仅用于个人离线浏览你在账号内已经可以查看的作品。";
 
@@ -234,8 +236,19 @@ export component DownloadsPage inherits Rectangle {
             }
         }
 
+        // The empty state absorbs whatever the blocks above it did not use. It is
+        // derived from their *measured* heights rather than a guessed constant, so
+        // it stays centred at every window size and when a block changes height.
         if root.rows.length == 0 : Rectangle {
-            height: max(220px, page.viewport-height - 420px);
+            height: max(
+                200px,
+                page.viewport-height
+                    - header-block.preferred-height
+                    - command-bar.preferred-height
+                    - destination-card.preferred-height
+                    - page.spacing * 3
+                    - page.padding-y * 2
+            );
 
             StateView {
                 width: parent.width;

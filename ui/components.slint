@@ -619,14 +619,23 @@ export component StateView inherits Rectangle {
         padding-left: Theme.space-4;
         padding-right: Theme.space-4;
 
-        FluentGlyph {
-            name: (root.kind == StateKind.Loading) ? "refresh"
-                : (root.kind == StateKind.Error) ? "warning"
-                : (root.kind == StateKind.Locked) ? "key"
-                : "image-off";
-            width: 28px;
-            height: 28px;
-            tint: root.kind == StateKind.Error ? Theme.danger : Theme.text-tertiary;
+        // A layout's `alignment` does not centre a fixed-width child on the cross
+        // axis: a glyph stays at the start of the line while its Text siblings
+        // centre their own content, which is why the empty-state icon sat alone at
+        // the left edge. Two stretch spacers centre it for real.
+        HorizontalLayout {
+            width: 100%;
+            Rectangle { horizontal-stretch: 1; }
+            FluentGlyph {
+                name: (root.kind == StateKind.Loading) ? "refresh"
+                    : (root.kind == StateKind.Error) ? "warning"
+                    : (root.kind == StateKind.Locked) ? "key"
+                    : "image-off";
+                width: 28px;
+                height: 28px;
+                tint: root.kind == StateKind.Error ? Theme.danger : Theme.text-tertiary;
+            }
+            Rectangle { horizontal-stretch: 1; }
         }
 
         Text {
@@ -647,14 +656,19 @@ export component StateView inherits Rectangle {
             max-width: 420px;
         }
 
-        if root.action-label != "" : AppButton {
-            label: root.action-label;
-            kind: (root.kind == StateKind.Locked) ? ButtonKind.Primary : ButtonKind.Secondary;
-            icon: (root.kind == StateKind.Error) ? "refresh" : ((root.kind == StateKind.Locked) ? "key" : "");
-            clicked => {
-                if (root.kind == StateKind.Error) { root.retry(); }
-                else { root.action(); }
+        if root.action-label != "" : HorizontalLayout {
+            width: 100%;
+            Rectangle { horizontal-stretch: 1; }
+            AppButton {
+                label: root.action-label;
+                kind: (root.kind == StateKind.Locked) ? ButtonKind.Primary : ButtonKind.Secondary;
+                icon: (root.kind == StateKind.Error) ? "refresh" : ((root.kind == StateKind.Locked) ? "key" : "");
+                clicked => {
+                    if (root.kind == StateKind.Error) { root.retry(); }
+                    else { root.action(); }
+                }
             }
+            Rectangle { horizontal-stretch: 1; }
         }
     }
 }
@@ -977,8 +991,13 @@ export component SettingsCard inherits Rectangle {
     background: Theme.layer;
     border-width: 1px;
     border-color: Theme.border;
+    // A card is exactly as tall as its rows. Without this the card is the only
+    // flexible child of a page body that is stretched to the viewport, so it
+    // silently absorbs all the leftover space and two lines of text end up
+    // floating in a 280px-tall box.
+    height: card-body.preferred-height;
 
-    VerticalLayout {
+    card-body := VerticalLayout {
         padding-top: Theme.space-3;
         padding-bottom: Theme.space-3;
         padding-left: Theme.space-4;
@@ -1038,12 +1057,20 @@ export component SettingsRow inherits Rectangle {
 
     row-layout := HorizontalLayout {
         spacing: Theme.space-3;
-        alignment: center;
+        // No `alignment` here on purpose. Setting it on a horizontal layout makes
+        // the row pack its children at their preferred widths, which drops the
+        // stretch of the label column and parks the control in the middle of the
+        // card instead of at its right edge. Unset, the label column stretches and
+        // the control sits where a settings row should.
 
         VerticalLayout {
             spacing: 2px;
-            alignment: center;
+            alignment: start;
             horizontal-stretch: 1;
+            // `alignment: center` here would be *cross-axis* centering: each Text
+            // would shrink to its own width and float in the middle of the label
+            // column, which is what put settings labels ~180px in from the card
+            // edge. Labels are left-aligned; only their inline box is centred.
             Text {
                 text: root.label;
                 color: Theme.text;

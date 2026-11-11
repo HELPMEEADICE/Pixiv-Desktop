@@ -75,14 +75,24 @@ export component ZoomViewer inherits Rectangle {
     }
 
     // Non-image states must never look like a broken image.
+    // `width: 100%` plus paired stretch spacers is what actually centres these
+    // blocks: a layout's own `alignment` only orders children, it does not centre
+    // a fixed-width child, and a bare layout inside a Rectangle shrinks to its
+    // preferred width and hugs the left edge.
     if root.page.failed : VerticalLayout {
+        width: 100%;
         alignment: center;
         spacing: Theme.space-2;
-        FluentGlyph {
-            name: "warning";
-            width: 28px;
-            height: 28px;
-            tint: Theme.danger;
+        HorizontalLayout {
+            width: 100%;
+            Rectangle { horizontal-stretch: 1; }
+            FluentGlyph {
+                name: "warning";
+                width: 28px;
+                height: 28px;
+                tint: Theme.danger;
+            }
+            Rectangle { horizontal-stretch: 1; }
         }
         Text {
             text: "图片加载失败";
@@ -90,16 +100,27 @@ export component ZoomViewer inherits Rectangle {
             font-size: Theme.font-body;
             horizontal-alignment: center;
         }
-        AppButton {
-            label: "重新载入";
-            icon: "refresh";
-            clicked => { root.request-toggle-zoom(0px / 1px, 0px / 1px); }
+        HorizontalLayout {
+            width: 100%;
+            Rectangle { horizontal-stretch: 1; }
+            AppButton {
+                label: "重新载入";
+                icon: "refresh";
+                clicked => { root.request-toggle-zoom(0px / 1px, 0px / 1px); }
+            }
+            Rectangle { horizontal-stretch: 1; }
         }
     }
     if !root.page.loaded && !root.page.failed : VerticalLayout {
+        width: 100%;
         alignment: center;
         spacing: Theme.space-2;
-        Skeleton { width: 96px; height: 6px; radius: Theme.radius-pill; }
+        HorizontalLayout {
+            width: 100%;
+            Rectangle { horizontal-stretch: 1; }
+            Skeleton { width: 96px; height: 6px; radius: Theme.radius-pill; }
+            Rectangle { horizontal-stretch: 1; }
+        }
         Text {
             text: "正在载入图片…";
             color: Theme.text-tertiary;
