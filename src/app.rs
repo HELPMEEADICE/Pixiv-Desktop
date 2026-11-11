@@ -277,9 +277,14 @@ impl App {
             Err(_) => (None, Mode::Demo),
         };
 
-        let dark = persisted(&store, "theme")
-            .map(|value| value == "dark")
-            .unwrap_or(false);
+        let dark = std::env::var("PIXIV_DESKTOP_THEME")
+            .ok()
+            .map(|theme| theme == "dark")
+            .unwrap_or_else(|| {
+                persisted(&store, "theme")
+                    .map(|value| value == "dark")
+                    .unwrap_or(false)
+            });
         let follow_system = persisted(&store, "follow_system_theme")
             .map(|value| value != "false")
             .unwrap_or(true);

@@ -134,8 +134,11 @@ export component ZoomViewer inherits Rectangle {
         mouse-cursor: root.fit-mode ? MouseCursor.default : MouseCursor.grab;
     }
 
-    // Floating control bar, as in WinUI's media surfaces.
+    // Floating control bar, as in WinUI's media surfaces. Width is explicit:
+    // a child Rectangle without one fills its parent, which turned this pill into
+    // a full-width strip across the middle of the image.
     if root.show-controls : Rectangle {
+        width: controls.preferred-width;
         x: (root.width - self.width) / 2;
         y: root.height - self.height - Theme.space-3;
         height: 36px;
@@ -147,7 +150,7 @@ export component ZoomViewer inherits Rectangle {
         drop-shadow-color: Theme.shadow-2;
         drop-shadow-offset-y: 2px;
 
-        HorizontalLayout {
+        controls := HorizontalLayout {
             padding-left: Theme.space-1;
             padding-right: Theme.space-1;
             spacing: 0px;
@@ -309,6 +312,7 @@ export component InfoPanel inherits Rectangle {
         // ---- primary actions ----
         HorizontalLayout {
             spacing: Theme.space-2;
+            alignment: start;
 
             AppButton {
                 label: root.bookmarked ? "已收藏" : "收藏";
@@ -326,6 +330,7 @@ export component InfoPanel inherits Rectangle {
 
         HorizontalLayout {
             spacing: Theme.space-2;
+            alignment: start;
             AppButton {
                 label: root.page-count > 1 ? ("下载全部 " + root.page-count) : "下载";
                 icon: "downloads";

@@ -113,7 +113,9 @@ export component GalleryPage inherits Rectangle {
 
             HorizontalLayout {
                 spacing: Theme.space-3;
-                alignment: end;
+                // space-between and *not* end: with nd the title shrank to its
+                // preferred width and the whole header drifted to the right edge.
+                alignment: space-between;
 
                 Text {
                     text: root.title;
@@ -122,7 +124,6 @@ export component GalleryPage inherits Rectangle {
                     font-weight: Type.semibold;
                     vertical-alignment: center;
                     overflow: elide;
-                    horizontal-stretch: 1;
                 }
 
                 if root.count-label != "" : Text {

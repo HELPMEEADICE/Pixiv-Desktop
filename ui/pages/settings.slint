@@ -200,6 +200,7 @@ export component SettingsPage inherits Rectangle {
                 AppButton {
                     label: "保存会话";
                     icon: "check";
+                    horizontal-stretch: 0;
                     enabled: root.cookie-input != "" && !root.busy;
                     clicked => { root.submit-cookie(); }
                 }
@@ -314,6 +315,7 @@ export component SettingsPage inherits Rectangle {
                     AppButton {
                         label: "应用";
                         icon: "check";
+                        horizontal-stretch: 0;
                         enabled: root.template-input != "";
                         clicked => { root.apply-template(root.template-input); }
                     }

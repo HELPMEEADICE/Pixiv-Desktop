@@ -811,140 +811,140 @@ export component IllustCard inherits Rectangle {
             : Math.max(0.55, Math.min(1.6, root.item.height * 1.0 / (root.item.width * 1.0)));
 
     out property <length> cover-height: Math.max(48px, root.column-width * root.clamped-aspect);
-
     width: root.column-width;
     height: root.cover-height + Theme.card-caption-height;
 
-    // ---- cover ----
-    cover-box := Rectangle {
-        width: 100%;
-        height: root.cover-height;
-        border-radius: Theme.radius-lg;
-        clip: true;
-        background: Theme.layer-alt;
+    // One layout, no absolute siblings that participate in it: mixing a layout
+    // child with absolutely positioned siblings is what silently shifted the
+    // cover ~24px below the card's top edge (the rank/type badges, positioned at
+    // y: 6, ended up straddling the card border instead of sitting on the image).
+    VerticalLayout {
+        spacing: 0px;
 
-        Image {
-            source: root.item.cover;
-            image-fit: cover;
-            width: 100%;
-            height: 100%;
-        }
-    }
+        cover_box := Rectangle {
+            height: root.cover-height;
+            border-radius: Theme.radius-lg;
+            clip: true;
+            background: Theme.layer-alt;
 
-    // Loading / failure overlays so a card is never an empty hole.
-    if root.item.state == 1 : Rectangle {
-        width: cover-box.width;
-        height: cover-box.height;
-        border-radius: Theme.radius-lg;
-        background: Theme.layer-alt;
+            Image {
+                source: root.item.cover;
+                image-fit: cover;
+                width: 100%;
+                height: 100%;
+            }
 
-        VerticalLayout {
-            alignment: center;
-            spacing: Theme.space-1;
-            FluentGlyph {
-                name: "image-off";
-                width: Theme.icon-size-lg;
-                height: Theme.icon-size-lg;
-                tint: Theme.text-disabled;
+            // Loading / failure overlays so a card is never an empty hole.
+            if root.item.state == 1 : Rectangle {
+                background: Theme.layer-alt;
+                VerticalLayout {
+                    alignment: center;
+                    FluentGlyph {
+                        name: "image-off";
+                        width: Theme.icon-size-lg;
+                        height: Theme.icon-size-lg;
+                        tint: Theme.text-disabled;
+                    }
+                }
+            }
+            if root.item.state == 2 : Rectangle {
+                background: Theme.layer-alt;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: Theme.space-1;
+                    FluentGlyph {
+                        name: "warning";
+                        width: Theme.icon-size-lg;
+                        height: Theme.icon-size-lg;
+                        tint: Theme.text-tertiary;
+                    }
+                    Text {
+                        text: "加载失败";
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // Ranking position, top-left, only where it means something.
+            if root.item.rank > 0 : Rectangle {
+                x: 6px;
+                y: 6px;
+                width: rank-label.width + 10px;
+                height: 20px;
+                border-radius: Theme.radius-sm;
+                background: root.item.rank <= 3 ? Theme.accent : #a6000000;
+
+                rank-label := Text {
+                    x: 5px;
+                    y: 2px;
+                    text: "#" + root.item.rank;
+                    color: #ffffff;
+                    font-size: Theme.font-caption;
+                    font-weight: Type.semibold;
+                }
+            }
+
+            // Type badge, top-right: only for multi-page, manga and ugoira.
+            if root.item.page-count > 1 || root.item.kind != 0 : Rectangle {
+                x: parent.width - self.width - 6px;
+                y: 6px;
+                width: type-label.width + 10px;
+                height: 20px;
+                border-radius: Theme.radius-sm;
+                background: #a6000000;
+
+                type-label := Text {
+                    x: 5px;
+                    y: 2px;
+                    text: (root.item.kind == 1) ? "漫画"
+                        : (root.item.kind == 2) ? "动图"
+                        : ("共" + root.item.page-count + "张");
+                    color: #ffffff;
+                    font-size: Theme.font-caption;
+                    font-weight: Type.medium;
+                }
+            }
+
+            // Bookmark affordance, bottom-right of the cover. Inside the cover, so
+            // it is hit-tested above the open() TouchArea and never reflows.
+            BookmarkPill {
+                x: parent.width - self.width - 8px;
+                y: parent.height - self.height - 8px;
+                marked: root.item.bookmarked;
+                clicked => { root.toggle-bookmark(); }
             }
         }
-    }
-    if root.item.state == 2 : Rectangle {
-        width: cover-box.width;
-        height: cover-box.height;
-        border-radius: Theme.radius-lg;
-        background: Theme.layer-alt;
 
-        VerticalLayout {
-            alignment: center;
-            spacing: Theme.space-1;
-            FluentGlyph {
-                name: "warning";
-                width: Theme.icon-size-lg;
-                height: Theme.icon-size-lg;
-                tint: Theme.text-tertiary;
-            }
+        // Caption band: a fixed 44px, which is exactly what `card_height()` in
+        // src/layout.rs assumes when balancing the columns.
+        Rectangle {
+            height: Theme.card-caption-height;
+
             Text {
-                text: "加载失败";
+                x: 0px;
+                y: 5px;
+                width: parent.width;
+                height: 17px;
+                text: root.item.title;
+                color: Theme.text;
+                font-size: Theme.font-small;
+                font-weight: Type.medium;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.show-author : Text {
+                x: 0px;
+                y: 23px;
+                width: parent.width;
+                height: 15px;
+                text: root.item.author;
                 color: Theme.text-tertiary;
                 font-size: Theme.font-caption;
-                horizontal-alignment: center;
+                overflow: elide;
+                vertical-alignment: center;
             }
-        }
-    }
-
-    // Ranking position, top-left, only where it means something.
-    if root.item.rank > 0 : Rectangle {
-        x: 6px;
-        y: 6px;
-        width: rank-label.width + 10px;
-        height: 20px;
-        border-radius: Theme.radius-sm;
-        background: root.item.rank <= 3 ? Theme.accent : #a6000000;
-
-        rank-label := Text {
-            x: 5px;
-            y: 3px;
-            text: "#" + root.item.rank;
-            color: #ffffff;
-            font-size: Theme.font-caption;
-            font-weight: Type.semibold;
-        }
-    }
-
-    // Type badge, top-right: only for multi-page, manga and ugoira.
-    if root.item.page-count > 1 || root.item.kind != 0 : Rectangle {
-        x: parent.width - self.width - 6px;
-        y: 6px;
-        width: type-label.width + 10px;
-        height: 20px;
-        border-radius: Theme.radius-sm;
-        background: #a6000000;
-
-        type-label := Text {
-            x: 5px;
-            y: 3px;
-            text: (root.item.kind == 1) ? "漫画"
-                : (root.item.kind == 2) ? "动图"
-                : ("共" + root.item.page-count + "张");
-            color: #ffffff;
-            font-size: Theme.font-caption;
-            font-weight: Type.medium;
-        }
-    }
-
-    // Bookmark affordance, bottom-right of the cover. Absolutely positioned and
-    // hit-tested on top of the open() TouchArea, so toggling it never reflows.
-    BookmarkPill {
-        x: parent.width - self.width - 8px;
-        y: root.cover-height - self.height - 8px;
-        marked: root.item.bookmarked;
-        clicked => { root.toggle-bookmark(); }
-    }
-
-    // ---- caption ----
-    VerticalLayout {
-        y: root.cover-height + 6px;
-        height: Theme.card-caption-height - 6px;
-        width: parent.width;
-        spacing: 1px;
-
-        Text {
-            text: root.item.title;
-            color: Theme.text;
-            font-size: Theme.font-small;
-            font-weight: Type.medium;
-            overflow: elide;
-            vertical-alignment: center;
-            width: parent.width;
-        }
-        if root.show-author : Text {
-            text: root.item.author;
-            color: Theme.text-tertiary;
-            font-size: Theme.font-caption;
-            overflow: elide;
-            vertical-alignment: center;
-            width: parent.width;
         }
     }
 
