@@ -1,68 +1,100 @@
 // Design tokens for Pixiv Desktop.
 //
-// The visual brief is 70% Pixiv web layout + 30% WinUI 3 / Fluent Design.
-// Concretely that means:
-//   * Pixiv's blue accent, white canvas, and dense information layout survive;
-//   * Fluent contributes layered surfaces, thin borders, 8px radii, tighter
-//     control heights and a real light/dark pairing.
+// Visual brief: 70% Pixiv artwork-browsing experience + 30% Windows 11 / WinUI 3
+// desktop chrome. Concretely:
+//   * Pixiv's blue accent and artwork-first density survive;
+//   * Fluent 2 supplies layered neutral surfaces, 1px low-contrast strokes,
+//     4px control radius / 8px card radius, 32px control heights, a real
+//     light+dark pairing and a 12/13/14/16/20/24 type ramp.
 //
-// Everything is a token here. No page is allowed to hard-code a colour, a radius
-// or a spacing value: switching `Theme.dark` must restyle the entire app without
-// touching any page file.
+// Rules this file exists to enforce:
+//   * No page hard-codes a colour, radius, spacing or control size.
+//   * Flipping `Theme.dark` restyles the whole app without touching a page.
+//   * Every length that two files must agree on (card width bounds, scrollbar
+//     gutter, caption height) is defined here *once* and mirrored by the Rust
+//     layout model in `src/layout.rs`.
 
 export global Theme {
-    // Flipped by the app at start-up (system preference) and by the top-bar toggle.
+    // Flipped by the system preference at start-up and by the top-bar toggle.
+    // `in-out` because the settings page and the title-bar button both write it.
     in-out property <bool> dark: false;
 
     // ---- brand ---------------------------------------------------------
-    // Pixiv's signature blue. Kept exact in light mode; lifted slightly in dark
-    // mode so it stays legible against the darker canvas.
-    out property <color> accent: dark ? #4aa8e8 : #0096fa;
-    out property <color> accent-hover: dark ? #63b7ee : #1ba3fb;
-    out property <color> accent-pressed: dark ? #3a90c9 : #0082dc;
-    // 10% accent wash for selection and hover backgrounds.
-    out property <color> accent-subtle: dark ? #1e3a4d : #e6f4ff;
+    // Pixiv's signature blue. Kept exact in light mode; lifted in dark mode so
+    // it still clears the 4.5:1 contrast bar against the darker canvas.
+    out property <color> accent: dark ? #4cb0f5 : #0096fa;
+    out property <color> accent-hover: dark ? #63bcf7 : #12a2ff;
+    out property <color> accent-pressed: dark ? #3d96d0 : #0081db;
+    // ~10% accent wash for selection, chips and informational banners.
+    out property <color> accent-subtle: dark ? #1d3b4f : #e6f4ff;
+    out property <color> accent-subtle-hover: dark ? #24475f : #d6ecff;
     out property <color> on-accent: #ffffff;
+    // Legible accent for text drawn on the accent-subtle wash.
+    out property <color> accent-ink: dark ? #8ecdf7 : #0a6fb5;
 
     // ---- surfaces ------------------------------------------------------
-    // `canvas` is the page floor, `layer` a card, `chrome` the title bar and rail.
-    out property <color> canvas: dark ? #1a1a1c : #ffffff;
-    out property <color> layer: dark ? #212125 : #ffffff;
-    out property <color> layer-alt: dark ? #26262b : #f7f8fa;
-    out property <color> chrome: dark ? #17171a : #fafbfc;
-    out property <color> overlay: dark ? #b3000000 : #66000000;
+    // `canvas` is the page floor (Win11 #f3f3f3 / #202020); `layer` is a card;
+    // `chrome` is the top bar / navigation rail; `flyout` floats above all.
+    out property <color> canvas: dark ? #202020 : #f3f3f3;
+    out property <color> layer: dark ? #2b2b2b : #ffffff;
+    out property <color> layer-alt: dark ? #323232 : #f7f8f9;
+    out property <color> layer-sunken: dark ? #1a1a1a : #ececee;
+    out property <color> chrome: dark ? #272727 : #f3f3f3;
+    out property <color> flyout: dark ? #2f2f2f : #fbfbfb;
+    out property <color> scrim: dark ? #b3050505 : #66000000;
 
-    // ---- lines ---------------------------------------------------------
-    out property <color> border: dark ? #33333a : #e3e6ea;
-    out property <color> border-strong: dark ? #45454e : #cdd3da;
+    // ---- strokes -------------------------------------------------------
+    // Fluent leans on 1px strokes instead of heavy borders or drop shadows.
+    out property <color> border: dark ? #3d3d3d : #e3e3e3;
+    out property <color> border-strong: dark ? #4f4f4f : #cfcfcf;
+    out property <color> border-subtle: dark ? #303030 : #ededed;
 
     // ---- text ----------------------------------------------------------
-    out property <color> text: dark ? #ededef : #1a1a1a;
-    out property <color> text-secondary: dark ? #a2a2aa : #6b7280;
-    out property <color> text-tertiary: dark ? #74747c : #9aa3ae;
+    out property <color> text: dark ? #ffffff : #1a1a1a;
+    out property <color> text-secondary: dark ? #c5c5c5 : #5d5d5d;
+    out property <color> text-tertiary: dark ? #9a9a9a : #8a8a8a;
+    out property <color> text-disabled: dark ? #5c5c5c : #b3b3b3;
 
-    // ---- state ---------------------------------------------------------
-    out property <color> danger: dark ? #ff7b7b : #d13438;
-    out property <color> success: dark ? #56d364 : #107c10;
+    // ---- semantic state ------------------------------------------------
+    out property <color> danger: dark ? #ff99a4 : #c42b1c;
+    out property <color> danger-subtle: dark ? #42201f : #fdebe9;
+    out property <color> success: dark ? #6ccf8a : #0f7b0f;
+    out property <color> success-subtle: dark ? #1b3226 : #e9f6ec;
     out property <color> warning: dark ? #f0b429 : #9d5d00;
-    // Transparent fills used for hover/press so cards never jump in size.
-    out property <color> hover: dark ? #18ffffff : #0a000000;
-    out property <color> pressed: dark ? #24ffffff : #14000000;
+    out property <color> warning-subtle: dark ? #3d2f10 : #fff4ce;
+
+    // Transparent overlays for hover/press so nothing ever resizes on hover.
+    out property <color> hover: dark ? #14ffffff : #0a000000;
+    out property <color> pressed: dark ? #1fffffff : #14000000;
+    out property <color> focus-ring: dark ? #7ac0f0 : #0a84d8;
 
     // ---- elevation -----------------------------------------------------
-    // Fluent leans on 1px borders with a whisper of shadow rather than big blur.
-    out property <color> shadow: dark ? #40000000 : #14000000;
-    out property <color> focus-ring: dark ? #7ac0f0 : #0096fa;
+    // Slint has no blur, so elevation is emulated with a low-alpha offset
+    // rectangle behind flyouts. Two steps only: cards stay flat.
+    out property <color> shadow-1: dark ? #4d000000 : #0f000000;
+    out property <color> shadow-2: dark ? #73000000 : #24000000;
 
-    // ---- fixed geometry -----------------------------------------------
-    out property <length> titlebar-height: 34px;
-    out property <length> topbar-height: 52px;
-    out property <length> rail-width: 224px;
-    out property <length> rail-width-compact: 56px;
-    out property <length> page-padding: 20px;
+    // ---- fixed geometry ------------------------------------------------
+    out property <length> topbar-height: 48px;
+    out property <length> rail-width: 240px;
+    out property <length> rail-width-compact: 52px;
+    out property <length> statusbar-height: 24px;
+    /// Horizontal page inset. The gallery maths in `src/layout.rs` mirrors this.
+    out property <length> page-padding: 16px;
+    /// Widest a text column is allowed to get before it becomes unreadable.
+    out property <length> reading-max: 720px;
+
+    // ---- artwork grid --------------------------------------------------
+    // These four values MUST stay in sync with the constants in `src/layout.rs`.
+    out property <length> card-min-width: 168px;
+    out property <length> card-max-width: 300px;
+    out property <length> card-gap: 16px;
+    out property <length> card-caption-height: 44px;
+    /// Width of a column reserved for the overlay scrollbar, so a card never
+    /// sits underneath the thumb.
+    out property <length> scrollbar-gutter: 10px;
 
     // ---- type scale ----------------------------------------------------
-    // Deliberately small: this is a desktop information tool, not a touch UI.
     out property <length> font-caption: 11px;
     out property <length> font-small: 12px;
     out property <length> font-body: 13px;
@@ -78,7 +110,7 @@ export global Theme {
     out property <length> radius-xl: 12px;
     out property <length> radius-pill: 999px;
 
-    // ---- spacing -------------------------------------------------------
+    // ---- spacing (4px grid) --------------------------------------------
     out property <length> space-1: 4px;
     out property <length> space-2: 8px;
     out property <length> space-3: 12px;
@@ -87,11 +119,18 @@ export global Theme {
     out property <length> space-6: 24px;
     out property <length> space-8: 32px;
 
-    // ---- control sizes -------------------------------------------------
+    // ---- controls ------------------------------------------------------
     out property <length> control-height: 32px;
+    out property <length> control-height-sm: 26px;
     out property <length> control-height-lg: 36px;
     out property <length> icon-size: 16px;
     out property <length> icon-size-lg: 20px;
+    out property <length> row-height: 56px;
+
+    // ---- motion --------------------------------------------------------
+    // Short and linear-ish: a desktop tool should never feel animated.
+    out property <duration> motion-fast: 90ms;
+    out property <duration> motion: 150ms;
 }
 
 // Convenience aliases so components read cleanly.

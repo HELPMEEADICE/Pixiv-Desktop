@@ -7,6 +7,12 @@
 )]
 
 mod app;
+mod images;
+mod layout;
+mod picker;
+mod route;
+mod session;
+mod zoom;
 
 slint::include_modules!();
 

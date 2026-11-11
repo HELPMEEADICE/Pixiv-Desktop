@@ -1,0 +1,226 @@
+// Home: the artwork-first landing page.
+//
+// Deliberately *not* the generic GalleryPage: the front page earns a hero band
+// and a trending-tag entry point, while Search / Bookmarks / History want the
+// plainer header. Both share `ArtworkGrid` and `PageScroll`, so the masonry and
+// the scroll behaviour are still implemented once.
+//
+// Everything here is driven by real state: the hero reports how many works the
+// current feed actually holds and whether it came from the demo catalogue or a
+// live session. No count, badge or label is invented in this file.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Type } from "../theme.slint";
+import { FluentGlyph } from "../icons.slint";
+import {
+    AppButton, ButtonKind, IconButton, TagChip, PageScroll, StateView, StateKind,
+    Skeleton, ProgressBar, IllustItem,
+} from "../components.slint";
+import { ArtworkGrid } from "gallery.slint";
+
+export component HomePage inherits Rectangle {
+    in property <[[IllustItem]]> columns: [];
+    in property <length> card-width: 220px;
+    /// 0 content, 1 loading, 2 empty, 3 error, 4 locked
+    in property <int> state: 0;
+    in property <string> message: "";
+    in property <[string]> tags: [];
+    in property <string> active-tag: "";
+    in property <string> greeting: "为你推荐";
+    in property <string> subtitle: "根据 Pixiv 榜单与关注动态整理";
+    in property <string> count-label: "";
+    in property <bool> demo-mode: false;
+    in property <bool> loading-more: false;
+    in-out property <length> scroll-y: 0px;
+
+    callback measured(length);
+    callback open-illust(string);
+    callback open-author(string);
+    callback toggle-bookmark(string);
+    callback open-tag(string);
+    callback refresh();
+    callback load-more();
+    callback action();
+    callback retry();
+
+    background: Theme.canvas;
+
+    page := PageScroll {
+        width: 100%;
+        height: 100%;
+        scroll-y <=> root.scroll-y;
+        spacing: Theme.space-4;
+        width-changed(w) => { root.measured(w); }
+        scrolled(y) => {
+            if (root.state == 0 && !root.loading-more) {
+                if (y + page.viewport-height + 600px >= page.body-height) {
+                    root.load-more();
+                }
+            }
+        }
+
+        // ---------------- hero ----------------
+        hero := Rectangle {
+            height: 96px;
+            border-radius: Theme.radius-xl;
+            background: Theme.accent-subtle;
+            border-width: 1px;
+            border-color: Theme.accent-subtle-hover;
+            clip: true;
+
+            HorizontalLayout {
+                padding-left: Theme.space-5;
+                padding-right: Theme.space-4;
+                spacing: Theme.space-4;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: Theme.space-1;
+                    horizontal-stretch: 1;
+
+                    HorizontalLayout {
+                        spacing: Theme.space-2;
+                        alignment: start;
+                        FluentGlyph {
+                            name: "sparkle";
+                            width: Theme.icon-size-lg;
+                            height: Theme.icon-size-lg;
+                            tint: Theme.accent;
+                        }
+                        Text {
+                            text: root.greeting;
+                            color: Theme.text;
+                            font-size: Theme.font-title;
+                            font-weight: Type.semibold;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if root.count-label != "" : Text {
+                            text: root.count-label;
+                            color: Theme.accent-ink;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: root.demo-mode
+                            ? "演示模式：以下作品来自本地演示目录，标记为 [DEMO]，不会访问 Pixiv"
+                            : root.subtitle;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-small;
+                        wrap: word-wrap;
+                    }
+                }
+
+                AppButton {
+                    label: "换一批";
+                    icon: "refresh";
+                    kind: ButtonKind.Secondary;
+                    clicked => { root.refresh(); }
+                }
+            }
+        }
+
+        // ---------------- trending tags ----------------
+        if root.tags.length > 0 : VerticalLayout {
+            spacing: Theme.space-2;
+
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                FluentGlyph {
+                    name: "tag";
+                    width: Theme.icon-size;
+                    height: Theme.icon-size;
+                    tint: Theme.text-tertiary;
+                }
+                Text {
+                    text: "热门标签";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    font-weight: Type.semibold;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle {
+                height: 34px;
+                clip: true;
+
+                ScrollView {
+                    width: 100%;
+                    height: 100%;
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+                    HorizontalLayout {
+                        spacing: Theme.space-2;
+                        alignment: start;
+                        for t in root.tags : TagChip {
+                            label: t;
+                            active: t == root.active-tag;
+                            clicked => { root.open-tag(t); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------------- feed ----------------
+        if root.state == 0 : ArtworkGrid {
+            columns: root.columns;
+            card-width: root.card-width;
+            open-illust(id) => { root.open-illust(id); }
+            open-author(id) => { root.open-author(id); }
+            toggle-bookmark(id) => { root.toggle-bookmark(id); }
+        }
+
+        if root.state == 1 : HorizontalLayout {
+            spacing: Theme.card-gap;
+            alignment: start;
+            height: 420px;
+
+            for n in [0, 1, 2, 3] : VerticalLayout {
+                spacing: Theme.card-gap;
+                width: root.card-width;
+                alignment: start;
+                Skeleton { height: root.card-width * 1.25; }
+                Skeleton { height: root.card-width * 0.7; }
+            }
+        }
+
+        if root.state > 1 : Rectangle {
+            height: max(220px, page.viewport-height - 300px);
+            StateView {
+                width: parent.width;
+                height: parent.height;
+                kind: (root.state == 3) ? StateKind.Error
+                    : (root.state == 4) ? StateKind.Locked
+                    : StateKind.Empty;
+                title: (root.state == 3) ? "无法载入首页"
+                    : (root.state == 4) ? "需要登录"
+                    : "首页还是空的";
+                description: root.message;
+                action-label: (root.state == 3) ? "重试" : "前往设置";
+                retry => { root.retry(); }
+                action => { root.action(); }
+            }
+        }
+
+        if root.state == 0 && root.loading-more : Rectangle {
+            height: 48px;
+            VerticalLayout {
+                alignment: center;
+                spacing: Theme.space-2;
+                ProgressBar { indeterminate: true; width: 120px; }
+                Text {
+                    text: "正在加载更多…";
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

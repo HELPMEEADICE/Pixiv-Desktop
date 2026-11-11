@@ -1,81 +1,25 @@
-import { ScrollView } from "std-widgets.slint";
 // Settings.
 //
-// Organised the way Windows 11 apps do it: grouped cards, one concern per group,
-// a toggle switch where the value is boolean and a field where it is text.
+// Organised the way the Windows 11 Settings app does it: one concern per card,
+// a toggle where the value is boolean, a field where it is text, and destructive
+// actions behind an inline confirmation instead of a silent click.
 //
-// The authentication group is the important one and is written to be honest:
-// the app never renders a password form. It opens pixiv.net in the system
-// browser and stores the resulting session cookie.
+// Layout discipline: everything lives in a single `PageScroll`, so the body is
+// exactly as wide as the viewport. Each row caps its control column at 46% of the
+// card width, which is what keeps long hints readable at 800px instead of
+// clipped behind a fixed 168px column.
+//
+// The authentication group is the important one and is written to be honest: the
+// app never renders a password form. It opens pixiv.net in the system browser and
+// stores only the resulting session cookie, validated against a real endpoint
+// before it is trusted.
 
 import { Theme, Type } from "../theme.slint";
+import { FluentGlyph } from "../icons.slint";
 import {
-    AppButton, IconButton, ButtonKind, ToggleSwitch, Divider, Badge, SearchField,
+    AppButton, ButtonKind, ToggleSwitch, Divider, Badge, TextField, InfoBar, InfoKind,
+    PageScroll, SettingsCard, SettingsRow,
 } from "../components.slint";
-
-/// A titled group of rows, as in the Win11 settings app.
-component SettingsCard inherits Rectangle {
-    in property <string> title: "";
-    in property <string> description: "";
-
-    border-radius: Theme.radius-lg;
-    background: Theme.layer;
-    border-width: 1px;
-    border-color: Theme.border;
-
-    VerticalLayout {
-        padding: Theme.space-4;
-        spacing: Theme.space-3;
-
-        Text {
-            text: root.title;
-            color: Theme.text;
-            font-size: Theme.font-subhead;
-            font-weight: Type.semibold;
-        }
-        if root.description != "" : Text {
-            text: root.description;
-            color: Theme.text-secondary;
-            font-size: Theme.font-small;
-            wrap: word-wrap;
-        }
-
-        @children
-    }
-}
-
-/// Label on the left, control on the right.
-component SettingsRow inherits Rectangle {
-    in property <string> label: "";
-    in property <string> hint: "";
-    in property <length> control-width: 168px;
-
-    height: max(40px, self-layout.preferred-height);
-    self-layout := HorizontalLayout {
-        spacing: Theme.space-3;
-        VerticalLayout {
-            spacing: 1px;
-            alignment: center;
-            horizontal-stretch: 1;
-            Text {
-                text: root.label;
-                color: Theme.text;
-                font-size: Theme.font-body;
-                vertical-alignment: center;
-            }
-            if root.hint != "" : Text {
-                text: root.hint;
-                color: Theme.text-tertiary;
-                font-size: Theme.font-caption;
-                wrap: word-wrap;
-            }
-        }
-        Rectangle {
-            width: root.control-width;
-            @children
-        }
-    }
-}
 
 export component SettingsPage inherits Rectangle {
     // appearance
@@ -84,8 +28,13 @@ export component SettingsPage inherits Rectangle {
 
     // session
     in property <bool> authenticated: false;
+    in property <bool> busy: false;
     in property <string> session-user: "";
     in-out property <string> cookie-input: "";
+    /// Latest human-readable result of a session/clear action. Rendered in-page
+    /// so the user never has to notice the status bar at the bottom.
+    in property <string> notice: "";
+    in property <int> notice-kind: 0;
 
     // images
     in property <string> cache-summary: "";
@@ -94,7 +43,7 @@ export component SettingsPage inherits Rectangle {
 
     // downloads
     in property <string> download-directory: "";
-    in property <string> template-text: "";
+    in-out property <string> template-input: "";
 
     // mode
     in property <bool> demo-mode: false;
@@ -112,244 +61,348 @@ export component SettingsPage inherits Rectangle {
     callback apply-template(string);
     callback toggle-demo(bool);
     callback open-data-folder();
-    callback open-about();
+    callback open-project();
+    callback dismiss-notice();
 
     background: Theme.canvas;
 
-    ScrollView {
-        VerticalLayout {
-            // Constrained to the viewport so long paragraphs wrap instead of
-            // running under the scrollbar and being clipped.
-            width: root.width - 20px;
-            padding: Theme.page-padding;
-            spacing: Theme.space-4;
+    // Which destructive action is awaiting confirmation; empty means none.
+    property <string> confirm: "";
 
+    page := PageScroll {
+        width: 100%;
+        height: 100%;
+        spacing: Theme.space-3;
+
+        // ---- title ----
+        VerticalLayout {
+            spacing: Theme.space-1;
+            padding-top: Theme.space-1;
             Text {
                 text: "设置";
                 color: Theme.text;
                 font-size: Theme.font-page;
                 font-weight: Type.semibold;
             }
-
-            // ---- 账户 ----
-            SettingsCard {
-                title: "账户";
-                description: "本应用不提供登录表单，也不会接触你的密码。请用系统浏览器登录 Pixiv，然后把浏览器中的 PHPSESSID 会话值粘贴到下方。";
-
-                Rectangle {
-                    height: 44px;
-                    border-radius: Theme.radius-md;
-                    background: root.authenticated ? #14107c10 : Theme.layer-alt;
-
-                    HorizontalLayout {
-                        padding: Theme.space-3;
-                        spacing: Theme.space-2;
-                        Text {
-                            text: root.authenticated
-                                ? ("已登录：" + root.session-user)
-                                : "未登录（可以浏览，但收藏与关注需要登录）";
-                            color: root.authenticated ? Theme.success : Theme.text-secondary;
-                            font-size: Theme.font-small;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
-                            overflow: elide;
-                        }
-                        if root.authenticated : Badge { label: "已连接"; }
-                        if !root.authenticated : Badge {
-                            label: "只读模式";
-                            fill: #229d5d00;
-                            ink: Theme.warning;
-                        }
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: Theme.space-2;
-                    AppButton {
-                        label: "在浏览器中登录";
-                        icon: "open";
-                        kind: ButtonKind.Primary;
-                        clicked => { root.sign-in-browser(); }
-                    }
-                    AppButton {
-                        label: "退出登录";
-                        icon: "delete";
-                        enabled: root.authenticated;
-                        clicked => { root.sign-out(); }
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: Theme.space-2;
-                    cookie-field := SearchField {
-                        placeholder: "粘贴 PHPSESSID 的值";
-                        text <=> root.cookie-input;
-                        horizontal-stretch: 1;
-                    }
-                    AppButton {
-                        label: "保存会话";
-                        icon: "key";
-                        clicked => { root.submit-cookie(); }
-                    }
-                }
+            Text {
+                text: "账户、外观、缓存、下载与本地数据";
+                color: Theme.text-tertiary;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
             }
+        }
 
-            // ---- 外观 ----
-            SettingsCard {
-                title: "外观";
-                SettingsRow {
-                    label: "深色模式";
-                    hint: "也可以随时用顶部栏的按钮切换";
-                    ToggleSwitch {
-                        checked <=> root.dark;
-                        toggled(v) => { root.toggle-theme(v); }
-                    }
-                }
-                Divider { }
-                SettingsRow {
-                    label: "跟随系统主题";
-                    ToggleSwitch {
-                        checked: root.follow-system-theme;
-                        toggled(v) => { root.toggle-follow-system(v); }
-                    }
-                }
-            }
+        // ---- transient notice ----
+        if root.notice != "" : InfoBar {
+            kind: root.notice-kind == 1 ? InfoKind.Success
+                : root.notice-kind == 2 ? InfoKind.Warning
+                : root.notice-kind == 3 ? InfoKind.Error
+                : InfoKind.Info;
+            title: root.notice;
+            dismissible: true;
+            dismissed => { root.dismiss-notice(); }
+        }
 
-            // ---- 图片与缓存 ----
-            SettingsCard {
-                title: "图片与缓存";
-                description: "缩略图与原图分级缓存：网格只取中等尺寸，仅在看图时请求原图。";
-                SettingsRow {
-                    label: "缓存占用";
-                    hint: root.cache-summary;
-                    AppButton {
-                        label: "清理缓存";
-                        icon: "delete";
-                        clicked => { root.clear-cache(); }
-                    }
-                }
-                Divider { }
-                SettingsRow {
-                    label: "内存上限";
-                    hint: root.memory-mb + " MB（超出后按最近最少使用淘汰）";
-                    Text {
-                        text: root.memory-mb + " MB";
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-small;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                }
-                Divider { }
-                SettingsRow {
-                    label: "磁盘上限";
-                    hint: root.disk-mb + " MB";
-                    Text {
-                        text: root.disk-mb + " MB";
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-small;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                }
-            }
+        // ---- inline confirmation for destructive actions ----
+        if root.confirm != "" : Rectangle {
+            height: 52px;
+            border-radius: Theme.radius-sm;
+            background: Theme.danger-subtle;
+            border-width: 1px;
+            border-color: Theme.danger;
 
-            // ---- 下载 ----
-            SettingsCard {
-                title: "下载";
-                description: "仅用于个人离线浏览你在账号内已经可以查看的作品，请勿用于批量抓取或再分发。";
-                SettingsRow {
-                    label: "保存目录";
-                    hint: root.download-directory;
-                    AppButton {
-                        label: "更改";
-                        icon: "folder";
-                        clicked => { root.choose-directory(); }
-                    }
-                }
-                Divider { }
-                SettingsRow {
-                    label: "文件名模板";
-                    hint: "可用：{illust_id} {title} {author} {page} {page_count}";
-                    Text {
-                        text: root.template-text;
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-caption;
-                        overflow: elide;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                }
-            }
+            HorizontalLayout {
+                padding-left: Theme.space-3;
+                padding-right: Theme.space-2;
+                spacing: Theme.space-2;
 
-            // ---- 数据与模式 ----
-            SettingsCard {
-                title: "数据与本地状态";
-                SettingsRow {
-                    label: "演示模式";
-                    hint: "使用本地生成的示例数据，所有演示图片均标记为 [DEMO]，不会连接 Pixiv";
-                    ToggleSwitch {
-                        checked: root.demo-mode;
-                        toggled(v) => { root.toggle-demo(v); }
-                    }
+                FluentGlyph {
+                    name: "warning";
+                    width: Theme.icon-size;
+                    height: Theme.icon-size;
+                    tint: Theme.danger;
                 }
-                Divider { }
-                SettingsRow {
-                    label: "清除浏览历史";
-                    AppButton {
-                        label: "清除";
-                        icon: "delete";
-                        kind: ButtonKind.Subtle;
-                        clicked => { root.clear-history(); }
-                    }
-                }
-                Divider { }
-                SettingsRow {
-                    label: "清除下载记录";
-                    AppButton {
-                        label: "清除";
-                        icon: "delete";
-                        kind: ButtonKind.Subtle;
-                        clicked => { root.clear-downloads(); }
-                    }
-                }
-                Divider { }
-                SettingsRow {
-                    label: "打开数据目录";
-                    hint: "日志、缓存与本地数据库所在位置";
-                    AppButton {
-                        label: "打开";
-                        icon: "folder";
-                        clicked => { root.open-data-folder(); }
-                    }
-                }
-            }
 
-            // ---- 关于 ----
-            SettingsCard {
-                title: "关于";
                 Text {
-                    text: "Pixiv Desktop " + root.app-version;
+                    text: root.confirm == "cache" ? "确定要清除全部图片缓存吗？已下载的作品文件不受影响。"
+                        : root.confirm == "history" ? "确定要清除浏览历史与搜索历史吗？此操作无法撤销。"
+                        : "确定要清除下载记录吗？磁盘上的文件会保留。";
+                    color: Theme.text;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                AppButton {
+                    label: "取消";
+                    kind: ButtonKind.Subtle;
+                    compact: true;
+                    clicked => { root.confirm = ""; }
+                }
+                AppButton {
+                    label: "确定清除";
+                    kind: ButtonKind.Danger;
+                    compact: true;
+                    clicked => {
+                        if (root.confirm == "cache") { root.clear-cache(); }
+                        if (root.confirm == "history") { root.clear-history(); }
+                        if (root.confirm == "downloads") { root.clear-downloads(); }
+                        root.confirm = "";
+                    }
+                }
+            }
+        }
+
+        // ---- 账户 ----
+        SettingsCard {
+            title: "账户";
+            icon: "key";
+            description: "本应用不提供登录表单，也不会接触你的密码。请用系统浏览器登录 Pixiv，再把开发者工具中的 PHPSESSID 值粘贴到下方；会话只保存在本机。";
+
+            InfoBar {
+                kind: root.authenticated ? InfoKind.Success : InfoKind.Warning;
+                title: root.authenticated ? ("已登录：" + root.session-user) : "未登录（只读模式）";
+                message: root.authenticated
+                    ? "收藏、关注与下载队列可用。"
+                    : "可以浏览公开作品，但收藏与关注需要登录。";
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+
+                AppButton {
+                    label: "在浏览器中登录";
+                    icon: "open";
+                    kind: ButtonKind.Primary;
+                    clicked => { root.sign-in-browser(); }
+                }
+                AppButton {
+                    label: root.busy ? "正在验证…" : "退出登录";
+                    icon: "delete";
+                    enabled: root.authenticated && !root.busy;
+                    clicked => { root.sign-out(); }
+                }
+            }
+
+            // Full-width entry field: a cookie value is long, so it gets its own
+            // row rather than a squeezed control column.
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                field := TextField {
+                    placeholder: "粘贴 PHPSESSID 的值";
+                    leading-icon: "key";
+                    text <=> root.cookie-input;
+                    horizontal-stretch: 1;
+                    accepted(t) => { root.submit-cookie(); }
+                }
+                AppButton {
+                    label: "保存会话";
+                    icon: "check";
+                    enabled: root.cookie-input != "" && !root.busy;
+                    clicked => { root.submit-cookie(); }
+                }
+            }
+        }
+
+        // ---- 外观 ----
+        SettingsCard {
+            title: "外观";
+            icon: "light";
+            SettingsRow {
+                label: "深色模式";
+                available-width: page.body-width;
+                hint: "也可以随时用顶部栏的按钮切换";
+                ToggleSwitch {
+                    checked <=> root.dark;
+                    toggled(v) => { root.toggle-theme(v); }
+                }
+            }
+            Divider { }
+            SettingsRow {
+                label: "跟随系统主题";
+                available-width: page.body-width;
+                hint: "系统切换浅色/深色时自动应用";
+                ToggleSwitch {
+                    checked: root.follow-system-theme;
+                    toggled(v) => { root.toggle-follow-system(v); }
+                }
+            }
+        }
+
+        // ---- 图片与缓存 ----
+        SettingsCard {
+            title: "图片与缓存";
+            icon: "grid";
+            description: "缩略图与原图分级缓存：网格只取卡片尺寸的缩略图，只有看大图时才请求原图。";
+            SettingsRow {
+                label: "缓存占用";
+                available-width: page.body-width;
+                hint: root.cache-summary;
+                AppButton {
+                    label: "清理缓存";
+                    icon: "delete";
+                    clicked => { root.confirm = "cache"; }
+                }
+            }
+            Divider { }
+            SettingsRow {
+                label: "内存上限";
+                available-width: page.body-width;
+                hint: "超出后按最近最少使用淘汰";
+                Text {
+                    text: root.memory-mb + " MB";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+            Divider { }
+            SettingsRow {
+                label: "磁盘上限";
+                available-width: page.body-width;
+                hint: "超出后自动清理最旧的缓存文件";
+                Text {
+                    text: root.disk-mb + " MB";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ---- 下载 ----
+        SettingsCard {
+            title: "下载";
+            icon: "downloads";
+            description: "仅用于个人离线浏览你在账号内已经可以查看的作品。";
+            SettingsRow {
+                label: "保存目录";
+                available-width: page.body-width;
+                hint: root.download-directory;
+                AppButton {
+                    label: "更改…";
+                    icon: "folder";
+                    clicked => { root.choose-directory(); }
+                }
+            }
+            Divider { }
+            VerticalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: "文件名模板";
                     color: Theme.text;
                     font-size: Theme.font-body;
                 }
                 Text {
-                    text: "使用 Rust + Slint 构建的原生桌面客户端。图标来自 Microsoft Fluent UI System Icons（MIT）。本应用与 Pixiv Inc. 无隶属关系。";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-small;
+                    text: "可用占位符：{illust_id} {title} {author} {page} {page_count}";
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
                     wrap: word-wrap;
                 }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    TextField {
+                        placeholder: "{illust_id}_p{page}_{title}";
+                        text <=> root.template-input;
+                        horizontal-stretch: 1;
+                        accepted(t) => { root.apply-template(t); }
+                    }
+                    AppButton {
+                        label: "应用";
+                        icon: "check";
+                        enabled: root.template-input != "";
+                        clicked => { root.apply-template(root.template-input); }
+                    }
+                }
+            }
+        }
+
+        // ---- 数据与隐私 ----
+        SettingsCard {
+            title: "数据与隐私";
+            icon: "shield";
+            description: "所有本地数据都在你自己的磁盘上：SQLite 数据库、缩略图缓存与会话文件。没有任何遥测。";
+            SettingsRow {
+                label: "演示模式";
+                available-width: page.body-width;
+                hint: "使用本地生成的示例数据，作品标题带 [DEMO] 前缀，完全离线";
+                ToggleSwitch {
+                    checked: root.demo-mode;
+                    toggled(v) => { root.toggle-demo(v); }
+                }
+            }
+            Divider { }
+            SettingsRow {
+                label: "浏览与搜索历史";
+                available-width: page.body-width;
+                hint: "仅记录本机看过的作品与搜索词";
                 AppButton {
-                    label: "已知限制";
-                    icon: "info";
+                    label: "清除…";
+                    icon: "delete";
                     kind: ButtonKind.Subtle;
-                    clicked => { root.open-about(); }
+                    clicked => { root.confirm = "history"; }
+                }
+            }
+            Divider { }
+            SettingsRow {
+                label: "下载记录";
+                available-width: page.body-width;
+                hint: "清除队列历史，不删除已下载的文件";
+                AppButton {
+                    label: "清除…";
+                    icon: "delete";
+                    kind: ButtonKind.Subtle;
+                    clicked => { root.confirm = "downloads"; }
+                }
+            }
+            Divider { }
+            SettingsRow {
+                label: "数据目录";
+                available-width: page.body-width;
+                hint: "数据库、缓存与会话文件所在位置";
+                AppButton {
+                    label: "打开";
+                    icon: "folder";
+                    clicked => { root.open-data-folder(); }
+                }
+            }
+        }
+
+        // ---- 关于 ----
+        SettingsCard {
+            title: "关于";
+            icon: "info";
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Text {
+                    text: "Pixiv Desktop";
+                    color: Theme.text;
+                    font-size: Theme.font-body;
+                    font-weight: Type.semibold;
+                    vertical-alignment: center;
+                }
+                Badge { label: root.app-version; fill: Theme.layer-alt; ink: Theme.text-secondary; }
+            }
+            Text {
+                text: "使用 Rust + Slint 构建的原生 Windows 客户端。图标来自 Microsoft Fluent UI System Icons（MIT）。本应用与 Pixiv Inc. 无隶属关系，所有作品版权归原作者所有。";
+                color: Theme.text-secondary;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                AppButton {
+                    label: "打开项目主页";
+                    icon: "open";
+                    kind: ButtonKind.Subtle;
+                    clicked => { root.open-project(); }
                 }
             }
         }
     }
 }
-
-
-
-

@@ -1,22 +1,29 @@
-// Application shell: title/top bar, navigation rail, page router, status bar.
+// Application shell: top command bar, NavigationView pane, page router, status bar.
 //
 // Window chrome note: the window keeps the *native* frame. Slint can draw a custom
 // one via `no-frame: true`, but then window dragging, Snap Layouts, per-monitor
 // DPI changes and accessibility all have to be reimplemented against
 // `Window::set_position`, which is jittery and loses Win11 snapping. Keeping the
-// native frame and putting Fluent chrome inside it gives correct DPI behaviour and
-// real Snap Layouts; the in-app top bar supplies the Windows-11 chrome look.
+// native frame and putting Fluent chrome inside it keeps correct DPI behaviour and
+// real Snap Layouts; the in-app top bar supplies the Windows-11 look.
 //
-// Page instances are kept alive and toggled with `visible:` rather than rebuilt,
-// so switching pages preserves scroll position and loaded content.
+// Routing note: the five artwork destinations share one `GalleryPage` instance
+// because Rust reloads the model for every navigation anyway. Scroll restoration
+// is therefore owned by Rust (`App::scroll_offsets`) rather than by five parallel
+// page instances, which keeps this file honest about what it does.
+//
+// Keyboard: every shortcut is handled by one ancestor `FocusScope`, so it works
+// whether focus is on the window itself or inside the search box. Only
+// modifier-qualified combinations are intercepted, so typing never fights the UI.
 
 import { Theme, Type } from "theme.slint";
 import { FluentGlyph } from "icons.slint";
 import {
-    AppButton, IconButton, SearchField, ButtonKind, NavItem, Badge, Divider, HoverTip,
+    AppButton, IconButton, ButtonKind, TextField, NavItem, Badge, Divider, HoverTip,
     IllustItem,
 } from "components.slint";
-import { IllustGrid } from "pages/illust_grid.slint";
+import { HomePage } from "pages/home.slint";
+import { GalleryPage } from "pages/gallery.slint";
 import { DetailPage, ViewerPage } from "pages/detail.slint";
 import { DownloadsPage, DownloadRow } from "pages/downloads.slint";
 import { SettingsPage } from "pages/settings.slint";
@@ -28,7 +35,6 @@ export enum Destination {
     Search,
     Bookmarks,
     History,
-    Artist,
     Detail,
     Downloads,
     Settings,
@@ -36,37 +42,50 @@ export enum Destination {
 
 export component AppWindow inherits Window {
     title: "Pixiv Desktop";
-    min-width: 380px;
-    min-height: 420px;
-    // A preferred size larger than the desktop work area gets clamped by the
-    // window manager while Slint keeps laying out at the *preferred* width, which
-    // silently clips the right-hand chrome. Staying modest avoids that entirely;
-    // the user can still maximise.
-    preferred-width: 1000px;
-    preferred-height: 680px;
+    min-width: 640px;
+    min-height: 480px;
+    preferred-width: 1180px;
+    preferred-height: 820px;
     background: Theme.canvas;
 
     in property <Destination> page: Destination.Home;
-    in property <bool> rail-compact: false;
+    /// User's manual override for the NavigationView pane.
+    in-out property <bool> rail-collapsed: false;
+    /// Pane collapsed state; set by Rust from the width-changed event.
+    ///
+    /// Deliberately not bound to the window width here: making the NavItem layout
+    /// information depend on the window's own layout information is exactly the
+    /// binding loop Slint warns about. The window width is known authoritatively
+    /// to the host, so it is pushed in from Rust on the change event instead.
+    in property <bool> narrow: false;
+    out property <bool> rail-compact: root.rail-collapsed || root.narrow;
+    /// Content box width (window minus the navigation pane), pushed from Rust so
+    /// pages never have to read the window width from inside their own layout.
+    in property <length> content-width: 880px;
     in property <bool> demo-mode: false;
     in property <string> status-text: "";
     in property <string> session-user: "";
     in property <bool> authenticated: false;
     in-out property <bool> dark <=> Theme.dark;
     in-out property <string> search-text: "";
+    in property <string> search-word: "";
+    in property <bool> can-go-back: false;
+    in property <bool> can-go-forward: false;
 
-    // ---- grid page state ----
+    // ---- shared artwork-feed state ----
     in property <[[IllustItem]]> grid-columns: [];
     in property <length> grid-card-width: 220px;
     in property <int> grid-state: 0;
-    in property <string> grid-title: "首页";
-    in property <string> grid-subtitle: "";
     in property <string> grid-message: "";
-    in property <string> grid-action-label: "";
+    in property <string> grid-action-label: "前往设置";
+    in property <string> grid-count-label: "";
     in property <[string]> grid-tags: [];
     in property <string> grid-active-tag: "";
     in property <bool> grid-loading-more: false;
+    in property <int> ranking-filter: 0;
+    in property <[string]> ranking-filters: [];
     in-out property <length> grid-scroll-y: 0px;
+    in-out property <length> home-scroll-y: 0px;
 
     // ---- detail state ----
     in property <[ViewerPage]> detail-pages: [];
@@ -85,6 +104,9 @@ export component AppWindow inherits Window {
     in property <int> detail-bookmarks: 0;
     in property <int> detail-likes: 0;
     in property <bool> detail-bookmarked: false;
+    in property <bool> detail-following: false;
+    in property <bool> detail-busy: false;
+    in property <string> detail-ugoira-hint: "";
     in-out property <float> detail-zoom: 1.0;
     in-out property <length> detail-pan-x: 0px;
     in-out property <length> detail-pan-y: 0px;
@@ -97,6 +119,7 @@ export component AppWindow inherits Window {
     in property <int> downloads-failed: 0;
     in property <string> download-directory: "";
     in property <string> download-template: "";
+    in-out property <string> template-input: "";
 
     // ---- settings ----
     in property <string> cache-summary: "";
@@ -104,25 +127,30 @@ export component AppWindow inherits Window {
     in property <int> cache-disk-mb: 1024;
     in property <bool> follow-system-theme: true;
     in property <string> app-version: "0.1.0";
+    in property <bool> busy: false;
+    in property <string> notice: "";
+    in property <int> notice-kind: 0;
     in-out property <string> cookie-input: "";
 
-    // ---- navigation / actions ----
+    // ---- navigation / shell ----
     callback navigate(Destination);
     callback go-back();
     callback go-forward();
     callback search-submitted(string);
     callback toggle-theme(bool);
-    callback toggle-rail();
-    callback open-settings();
+    callback shell-shortcut(string);
 
-    // ---- grid ----
+    // ---- artwork feed ----
     callback open-illust(string);
     callback open-author(string);
     callback toggle-bookmark(string);
     callback open-tag(string);
+    callback grid-measured(length);
+    callback grid-scrolled(length);
     callback grid-retry();
     callback grid-action();
     callback load-more();
+    callback select-ranking-filter(int);
 
     // ---- detail ----
     callback detail-back();
@@ -131,13 +159,14 @@ export component AppWindow inherits Window {
     callback detail-open-tag(string);
     callback detail-download-page();
     callback detail-download-all();
+    callback detail-export-ugoira();
     callback detail-open-external();
     callback detail-follow();
     callback detail-retry();
     callback detail-select-page(int);
-    callback detail-request-zoom(length, length, float);
-    callback detail-request-pan(length, length);
-    callback detail-request-toggle-zoom(length, length);
+    callback detail-request-zoom(float, float, float, float, float);
+    callback detail-request-pan(float, float);
+    callback detail-request-toggle-zoom(float, float);
     callback detail-set-fit-mode(bool);
     callback detail-set-zoom(float);
     callback toggle-fullscreen();
@@ -145,6 +174,7 @@ export component AppWindow inherits Window {
     // ---- downloads ----
     callback download-cancel(int);
     callback download-retry(int);
+    callback download-retry-all();
     callback download-clear-finished();
     callback download-choose-directory();
     callback download-open-folder();
@@ -162,369 +192,454 @@ export component AppWindow inherits Window {
     callback apply-template(string);
     callback toggle-demo(bool);
     callback open-data-folder();
-    callback open-about();
+    callback open-project();
+    callback dismiss-notice();
 
-    out property <bool> is-grid-page:
-        root.page == Destination.Home || root.page == Destination.Discovery
-        || root.page == Destination.Ranking || root.page == Destination.Search
-        || root.page == Destination.Bookmarks || root.page == Destination.History
-        || root.page == Destination.Artist;
+    out property <bool> is-gallery-page:
+        root.page == Destination.Discovery || root.page == Destination.Ranking
+        || root.page == Destination.Search || root.page == Destination.Bookmarks
+        || root.page == Destination.History;
 
-    /// Fired whenever the window width changes, so Rust can recompute the column
-    /// count. Slint has no resize event; binding to `width` and reporting it from
-    /// the element that owns the property is the event-driven alternative to
-    /// polling.
+    // Diagnostics: the sizes the shell actually resolved to. Used by the DPI
+    // verification trace and by the capture harness.
+    out property <length> shell-height: shell.height;
+    out property <length> measured-width: 0px;
+
+    /// Fired when the window size changes. Slint has no resize event, so the
+    /// property change *is* the event; Rust then owns the narrow/compact decision
+    /// and pushes `narrow` back. No timer, no polling, no second opinion.
     callback width-changed(length);
     changed width => {
         root.width-changed(root.width);
     }
 
-    VerticalLayout {
-        // ================= top bar =================
-        Rectangle {
-            height: Theme.topbar-height;
-            background: Theme.chrome;
-            border-width: 1px;
-            border-color: Theme.border;
+    init => {
+        shortcuts.focus();
+    }
 
+    // A FocusScope is not a Rectangle: `width/height: 100%` inside one resolves
+    // against its *content* size, so nesting the shell in a scope sized with a
+    // percentage collapses it to `preferred-height` and leaves the rest of the
+    // window unpainted. Sizing it from the window properties is what makes the
+    // shell fill the frame at every DPI.
+    shortcuts := FocusScope {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+
+        key-pressed(e) => {
+            if (e.modifiers.control && (e.text == "f" || e.text == "k")) {
+                search-field.focus-input();
+                return EventResult.accept;
+            }
+            if (e.modifiers.alt && e.text == "LeftArrow") { root.go-back(); return EventResult.accept; }
+            if (e.modifiers.alt && e.text == "RightArrow") { root.go-forward(); return EventResult.accept; }
+            if (e.modifiers.control && e.text == "r") { root.grid-retry(); return EventResult.accept; }
+            if (e.text == "F11") { root.toggle-fullscreen(); return EventResult.accept; }
+            if (e.text == "Escape") { root.shell-shortcut("escape"); return EventResult.accept; }
+            if (e.modifiers.control && e.text == "1") { root.navigate(Destination.Home); return EventResult.accept; }
+            if (e.modifiers.control && e.text == "2") { root.navigate(Destination.Discovery); return EventResult.accept; }
+            if (e.modifiers.control && e.text == "3") { root.navigate(Destination.Ranking); return EventResult.accept; }
+            if (e.modifiers.control && e.text == "4") { root.navigate(Destination.Bookmarks); return EventResult.accept; }
+            if (e.modifiers.control && e.text == "5") { root.navigate(Destination.History); return EventResult.accept; }
+            if (e.modifiers.control && e.text == "6") { root.navigate(Destination.Downloads); return EventResult.accept; }
+            if (e.modifiers.control && (e.text == "," || e.text == "7")) {
+                root.navigate(Destination.Settings);
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+
+        shell := VerticalLayout {
+            width: 100%;
+            height: 100%;
+            // ================= top command bar =================
+            Rectangle {
+                height: Theme.topbar-height;
+                background: Theme.chrome;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                HorizontalLayout {
+                    padding-left: Theme.space-3;
+                    padding-right: Theme.space-3;
+                    spacing: Theme.space-1;
+
+                    // Wordmark: Pixiv blue square + label. Not a fake button.
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: Theme.radius-md;
+                        background: Theme.accent;
+                        Text {
+                            text: "P";
+                            color: Theme.on-accent;
+                            font-size: Theme.font-title;
+                            font-weight: Type.bold;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    IconButton {
+                        icon: "back";
+                        tip: "后退 (Alt+←)";
+                        enabled: root.can-go-back;
+                        clicked => { root.go-back(); }
+                    }
+                    IconButton {
+                        icon: "forward";
+                        tip: "前进 (Alt+→)";
+                        enabled: root.can-go-forward;
+                        clicked => { root.go-forward(); }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: Theme.topbar-height;
+                        min-width: 96px;
+
+                        search-field := TextField {
+                            height: Theme.control-height;
+                            y: (parent.height - self.height) / 2;
+                            placeholder: "搜索插画、漫画、动图或标签…";
+                            leading-icon: "search";
+                            text <=> root.search-text;
+                            accepted(t) => { root.search-submitted(t); }
+                        }
+                    }
+
+                    if root.demo-mode : Rectangle {
+                        height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.warning-subtle;
+                        HorizontalLayout {
+                            padding-left: Theme.space-2;
+                            padding-right: Theme.space-2;
+                            alignment: center;
+                            Text {
+                                text: "DEMO 演示数据";
+                                color: Theme.warning;
+                                font-size: Theme.font-caption;
+                                font-weight: Type.semibold;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    IconButton {
+                        icon: root.dark ? "light" : "dark";
+                        tip: root.dark ? "切换到浅色主题" : "切换到深色主题";
+                        clicked => { root.toggle-theme(!root.dark); }
+                    }
+
+                    // Account affordance: opens Settings, where the sign-in flow lives.
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: Theme.radius-pill;
+                        background: root.authenticated ? Theme.accent : Theme.layer-alt;
+                        border-width: root.authenticated ? 0px : 1px;
+                        border-color: Theme.border-strong;
+                        clip: true;
+
+                        Text {
+                            text: root.authenticated ? root.session-user : "登";
+                            color: root.authenticated ? Theme.on-accent : Theme.text-tertiary;
+                            font-size: Theme.font-caption;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        avatar-area := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.navigate(Destination.Settings); }
+                        }
+                        HoverTip {
+                            show: avatar-area.has-hover;
+                            tip: root.authenticated ? "账户与设置" : "未登录，点击前往设置";
+                            x: -self.width + 30px;
+                            y: 36px;
+                        }
+                    }
+                }
+            }
+
+            // ================= body =================
             HorizontalLayout {
-                padding-left: Theme.space-2;
-                padding-right: Theme.space-2;
-                spacing: Theme.space-1;
+                spacing: 0px;
 
-                // Logo
+                // ---- NavigationView pane ----
                 Rectangle {
-                    width: 32px;
-                    height: 32px;
-                    border-radius: Theme.radius-md;
-                    background: Theme.accent;
-                    Text {
-                        text: "P";
-                        color: Theme.on-accent;
-                        font-size: Theme.font-title;
-                        font-weight: Type.bold;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
+                    width: root.rail-compact ? Theme.rail-width-compact : Theme.rail-width;
+                    background: Theme.chrome;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    clip: true;
 
-                IconButton { icon: "back"; tip: "后退 (Alt+←)"; clicked => { root.go-back(); } }
-                IconButton { icon: "forward"; tip: "前进 (Alt+→)"; clicked => { root.go-forward(); } }
-
-                Rectangle {
-                    horizontal-stretch: 1;
-                    // Bounded so the trailing actions can never be pushed out of
-                    // the window at narrow widths.
-                    min-width: 120px;
-                    height: Theme.topbar-height;
-
-                    SearchField {
-                        height: Theme.control-height;
-                        y: (parent.height - self.height) / 2;
-                        placeholder: "搜索插画、漫画、动图或标签…";
-                        text <=> root.search-text;
-                        accepted(t) => { root.search-submitted(t); }
-                    }
-                }
-
-                if root.demo-mode : Rectangle {
-                    height: 22px;
-                    border-radius: Theme.radius-sm;
-                    background: #229d5d00;
-                    HorizontalLayout {
+                    VerticalLayout {
+                        padding-top: Theme.space-2;
+                        padding-bottom: Theme.space-2;
                         padding-left: Theme.space-2;
                         padding-right: Theme.space-2;
-                        alignment: center;
-                        Text {
-                            text: "DEMO 演示数据";
-                            color: Theme.warning;
-                            font-size: Theme.font-caption;
-                            font-weight: Type.semibold;
-                            vertical-alignment: center;
+                        spacing: 2px;
+
+                        NavItem {
+                            icon: "home"; label: "首页"; compact: root.rail-compact;
+                            selected: root.page == Destination.Home;
+                            clicked => { root.navigate(Destination.Home); }
+                        }
+                        NavItem {
+                            icon: "discover"; label: "发现"; compact: root.rail-compact;
+                            selected: root.page == Destination.Discovery;
+                            clicked => { root.navigate(Destination.Discovery); }
+                        }
+                        NavItem {
+                            icon: "ranking"; label: "排行榜"; compact: root.rail-compact;
+                            selected: root.page == Destination.Ranking;
+                            clicked => { root.navigate(Destination.Ranking); }
+                        }
+                        NavItem {
+                            icon: "search"; label: "搜索"; compact: root.rail-compact;
+                            selected: root.page == Destination.Search;
+                            clicked => { root.navigate(Destination.Search); }
+                        }
+                        NavItem {
+                            icon: "star"; label: "收藏"; compact: root.rail-compact;
+                            selected: root.page == Destination.Bookmarks;
+                            clicked => { root.navigate(Destination.Bookmarks); }
+                        }
+                        NavItem {
+                            icon: "history"; label: "浏览历史"; compact: root.rail-compact;
+                            selected: root.page == Destination.History;
+                            clicked => { root.navigate(Destination.History); }
+                        }
+                        NavItem {
+                            icon: "downloads"; label: "下载管理"; compact: root.rail-compact;
+                            selected: root.page == Destination.Downloads;
+                            badge: root.downloads-active;
+                            clicked => { root.navigate(Destination.Downloads); }
+                        }
+
+                        Rectangle { vertical-stretch: 1; }
+
+                        Divider { }
+                        NavItem {
+                            icon: "settings"; label: "设置"; compact: root.rail-compact;
+                            selected: root.page == Destination.Settings;
+                            clicked => { root.navigate(Destination.Settings); }
+                        }
+                        NavItem {
+                            icon: root.rail-compact ? "chevron-right" : "chevron-left";
+                            label: root.rail-compact ? "展开侧栏" : "收起侧栏";
+                            compact: root.rail-compact;
+                            clicked => { root.rail-collapsed = !root.rail-collapsed; }
                         }
                     }
                 }
 
-                IconButton {
-                    icon: root.dark ? "light" : "dark";
-                    tip: root.dark ? "切换到浅色" : "切换到深色";
-                    clicked => { root.toggle-theme(!root.dark); }
-                }
-                IconButton {
-                    icon: "notification";
-                    tip: "通知";
-                }
-
-                // Avatar / sign-in affordance
+                // ---- page router ----
                 Rectangle {
-                    width: 30px;
-                    height: 30px;
-                    border-radius: Theme.radius-pill;
-                    background: root.authenticated ? Theme.accent : Theme.layer-alt;
-                    border-width: root.authenticated ? 0px : 1px;
-                    border-color: Theme.border-strong;
+                    horizontal-stretch: 1;
+                    background: Theme.canvas;
+                    clip: true;
 
-                    Text {
-                        text: root.authenticated ? root.session-user : "登";
-                        color: root.authenticated ? Theme.on-accent : Theme.text-tertiary;
-                        font-size: Theme.font-caption;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        overflow: elide;
+                    home-page := HomePage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.page == Destination.Home;
+                        columns: root.grid-columns;
+                        card-width: root.grid-card-width;
+                        state: root.grid-state;
+                        message: root.grid-message;
+                        tags: root.grid-tags;
+                        active-tag: root.grid-active-tag;
+                        count-label: root.grid-count-label;
+                        demo-mode: root.demo-mode;
+                        loading-more: root.grid-loading-more;
+                        scroll-y <=> root.home-scroll-y;
+                        measured(w) => { root.grid-measured(w); }
+                        open-illust(id) => { root.open-illust(id); }
+                        open-author(id) => { root.open-author(id); }
+                        toggle-bookmark(id) => { root.toggle-bookmark(id); }
+                        open-tag(t) => { root.open-tag(t); }
+                        refresh => { root.grid-retry(); }
+                        retry => { root.grid-retry(); }
+                        action => { root.grid-action(); }
+                        load-more => { root.load-more(); }
                     }
-                    av := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.open-settings(); }
+
+                    gallery := GalleryPage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.is-gallery-page;
+                        columns: root.grid-columns;
+                        card-width: root.grid-card-width;
+                        state: root.grid-state;
+                        title: root.page == Destination.Discovery ? "发现"
+                            : root.page == Destination.Ranking ? "排行榜"
+                            : root.page == Destination.Search
+                                ? (root.search-word == "" ? "搜索" : "搜索：" + root.search-word)
+                            : root.page == Destination.Bookmarks ? "收藏"
+                            : "浏览历史";
+                        subtitle: root.page == Destination.Discovery ? "热门标签与精选作品"
+                            : root.page == Destination.Ranking ? "Pixiv 官方榜单，可切换统计周期"
+                            : root.page == Destination.Search ? "按关键词查找作品，回车提交"
+                            : root.page == Destination.Bookmarks ? "你收藏的作品（需要登录）"
+                            : "本机记录过的作品";
+                        message: root.grid-message;
+                        action-label: root.grid-action-label;
+                        tags: root.grid-tags;
+                        active-tag: root.grid-active-tag;
+                        count-label: root.grid-count-label;
+                        filters: root.page == Destination.Ranking ? root.ranking-filters : [];
+                        active-filter: root.page == Destination.Ranking ? root.ranking-filter : -1;
+                        loading-more: root.grid-loading-more;
+                        scroll-y <=> root.grid-scroll-y;
+                        measured(w) => { root.grid-measured(w); }
+                        open-illust(id) => { root.open-illust(id); }
+                        open-author(id) => { root.open-author(id); }
+                        toggle-bookmark(id) => { root.toggle-bookmark(id); }
+                        open-tag(t) => { root.open-tag(t); }
+                        select-filter(i) => { root.select-ranking-filter(i); }
+                        retry => { root.grid-retry(); }
+                        action => { root.grid-action(); }
+                        load-more => { root.load-more(); }
                     }
-                    HoverTip {
-                        show: av.has-hover;
-                        tip: root.authenticated ? "账户与设置" : "未登录，点击前往设置";
-                        x: -self.width + 30px;
-                        y: 34px;
+
+                    DetailPage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.page == Destination.Detail;
+                        available-width: root.content-width;
+                        title: root.detail-title;
+                        author: root.detail-author;
+                        author-id: root.detail-author-id;
+                        description: root.detail-description;
+                        tags: root.detail-tags;
+                        posted: root.detail-posted;
+                        kind: root.detail-kind;
+                        page-count: root.detail-page-count;
+                        views: root.detail-views;
+                        bookmarks: root.detail-bookmarks;
+                        likes: root.detail-likes;
+                        bookmarked: root.detail-bookmarked;
+                        authenticated: root.authenticated;
+                        following: root.detail-following;
+                        busy: root.detail-busy;
+                        ugoira-hint: root.detail-ugoira-hint;
+                        state: root.detail-state;
+                        message: root.detail-message;
+                        pages: root.detail-pages;
+                        current-page <=> root.detail-page-index;
+                        zoom <=> root.detail-zoom;
+                        pan-x <=> root.detail-pan-x;
+                        pan-y <=> root.detail-pan-y;
+                        fit-mode: root.detail-fit-mode;
+                        back => { root.detail-back(); }
+                        toggle-bookmark => { root.detail-toggle-bookmark(); }
+                        open-author => { root.detail-open-author(); }
+                        open-tag(t) => { root.detail-open-tag(t); }
+                        download-page => { root.detail-download-page(); }
+                        download-all => { root.detail-download-all(); }
+                        export-ugoira => { root.detail-export-ugoira(); }
+                        open-external => { root.detail-open-external(); }
+                        follow => { root.detail-follow(); }
+                        retry => { root.detail-retry(); }
+                        select-page(i) => { root.detail-select-page(i); }
+                        request-zoom(px, py, dy, w, h) => { root.detail-request-zoom(px, py, dy, w, h); }
+                        request-pan(dx, dy) => { root.detail-request-pan(dx, dy); }
+                        request-toggle-zoom(px, py) => { root.detail-request-toggle-zoom(px, py); }
+                        set-fit-mode(m) => { root.detail-set-fit-mode(m); }
+                        set-zoom(z) => { root.detail-set-zoom(z); }
+                        toggle-fullscreen => { root.toggle-fullscreen(); }
+                    }
+
+                    DownloadsPage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.page == Destination.Downloads;
+                        rows: root.download-rows;
+                        active-count: root.downloads-active;
+                        done-count: root.downloads-done;
+                        failed-count: root.downloads-failed;
+                        directory: root.download-directory;
+                        template-text: root.download-template;
+                        cancel(id) => { root.download-cancel(id); }
+                        retry(id) => { root.download-retry(id); }
+                        retry-all => { root.download-retry-all(); }
+                        clear-finished => { root.download-clear-finished(); }
+                        choose-directory => { root.download-choose-directory(); }
+                        open-folder => { root.download-open-folder(); }
+                        open-task(id) => { root.download-open-task(id); }
+                    }
+
+                    SettingsPage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.page == Destination.Settings;
+                        dark <=> root.dark;
+                        follow-system-theme: root.follow-system-theme;
+                        authenticated: root.authenticated;
+                        busy: root.busy;
+                        session-user: root.session-user;
+                        cookie-input <=> root.cookie-input;
+                        notice: root.notice;
+                        notice-kind: root.notice-kind;
+                        cache-summary: root.cache-summary;
+                        memory-mb: root.cache-memory-mb;
+                        disk-mb: root.cache-disk-mb;
+                        download-directory: root.download-directory;
+                        template-input <=> root.template-input;
+                        demo-mode: root.demo-mode;
+                        app-version: root.app-version;
+                        toggle-theme(v) => { root.toggle-theme(v); }
+                        toggle-follow-system(v) => { root.toggle-follow-system(v); }
+                        sign-in-browser => { root.sign-in-browser(); }
+                        submit-cookie => { root.submit-cookie(); }
+                        sign-out => { root.sign-out(); }
+                        clear-cache => { root.clear-cache(); }
+                        clear-history => { root.clear-history(); }
+                        clear-downloads => { root.clear-downloads(); }
+                        choose-directory => { root.choose-directory(); }
+                        apply-template(t) => { root.apply-template(t); }
+                        toggle-demo(v) => { root.toggle-demo(v); }
+                        open-data-folder => { root.open-data-folder(); }
+                        open-project => { root.open-project(); }
+                        dismiss-notice => { root.dismiss-notice(); }
                     }
                 }
             }
-        }
 
-        // ================= body =================
-        HorizontalLayout {
-            spacing: 0px;
-
-            // ---- navigation rail ----
+            // ================= status bar =================
             Rectangle {
-                width: root.rail-compact ? Theme.rail-width-compact : Theme.rail-width;
+                height: Theme.statusbar-height;
                 background: Theme.chrome;
                 border-width: 1px;
                 border-color: Theme.border;
-                clip: true;
 
-                VerticalLayout {
-                    padding-top: Theme.space-2;
-                    padding-bottom: Theme.space-2;
-                    padding-left: Theme.space-2;
-                    padding-right: Theme.space-2;
-                    spacing: 2px;
+                HorizontalLayout {
+                    padding-left: Theme.space-3;
+                    padding-right: Theme.space-3;
+                    spacing: Theme.space-3;
 
-                    NavItem {
-                        icon: "home"; label: "首页"; compact: root.rail-compact;
-                        selected: root.page == Destination.Home;
-                        clicked => { root.navigate(Destination.Home); }
+                    Text {
+                        text: root.status-text;
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
                     }
-                    NavItem {
-                        icon: "discover"; label: "发现"; compact: root.rail-compact;
-                        selected: root.page == Destination.Discovery;
-                        clicked => { root.navigate(Destination.Discovery); }
+                    Text {
+                        text: root.demo-mode ? "演示模式（本地数据）" : "真实 Pixiv 会话";
+                        color: root.demo-mode ? Theme.warning : Theme.success;
+                        font-size: Theme.font-caption;
+                        vertical-alignment: center;
                     }
-                    NavItem {
-                        icon: "ranking"; label: "排行榜"; compact: root.rail-compact;
-                        selected: root.page == Destination.Ranking;
-                        clicked => { root.navigate(Destination.Ranking); }
-                    }
-                    NavItem {
-                        icon: "follow"; label: "关注动态"; compact: root.rail-compact;
-                        selected: root.page == Destination.Search;
-                        clicked => { root.navigate(Destination.Search); }
-                    }
-                    NavItem {
-                        icon: "search"; label: "搜索"; compact: root.rail-compact;
-                        clicked => { root.navigate(Destination.Search); }
-                    }
-                    NavItem {
-                        icon: "star"; label: "收藏"; compact: root.rail-compact;
-                        selected: root.page == Destination.Bookmarks;
-                        clicked => { root.navigate(Destination.Bookmarks); }
-                    }
-                    NavItem {
-                        icon: "history"; label: "浏览历史"; compact: root.rail-compact;
-                        selected: root.page == Destination.History;
-                        clicked => { root.navigate(Destination.History); }
-                    }
-                    NavItem {
-                        icon: "downloads"; label: "下载管理"; compact: root.rail-compact;
-                        selected: root.page == Destination.Downloads;
-                        clicked => { root.navigate(Destination.Downloads); }
-                    }
-
-                    Rectangle { vertical-stretch: 1; }
-
-                    Divider { }
-                    NavItem {
-                        icon: "settings"; label: "设置"; compact: root.rail-compact;
-                        selected: root.page == Destination.Settings;
-                        clicked => { root.navigate(Destination.Settings); }
-                    }
-                    NavItem {
-                        icon: root.rail-compact ? "forward" : "chevron-left";
-                        label: "收起侧栏";
-                        compact: root.rail-compact;
-                        clicked => { root.toggle-rail(); }
-                    }
-                }
-            }
-
-            // ---- content router ----
-            Rectangle {
-                horizontal-stretch: 1;
-                background: Theme.canvas;
-                clip: true;
-
-                // Grid pages share one instance so scroll position and loaded
-                // pages survive navigation.
-                g := IllustGrid {
-                    width: parent.width;
-                    height: parent.height;
-                    visible: root.is-grid-page;
-                    columns: root.grid-columns;
-                    card-width: root.grid-card-width;
-                    state: root.grid-state;
-                    title: root.grid-title;
-                    subtitle: root.grid-subtitle;
-                    message: root.grid-message;
-                    action-label: root.grid-action-label;
-                    tags: root.grid-tags;
-                    active-tag: root.grid-active-tag;
-                    loading-more: root.grid-loading-more;
-                    scroll-y <=> root.grid-scroll-y;
-                    open-illust(id) => { root.open-illust(id); }
-                    open-author(id) => { root.open-author(id); }
-                    toggle-bookmark(id) => { root.toggle-bookmark(id); }
-                    open-tag(t) => { root.open-tag(t); }
-                    retry => { root.grid-retry(); }
-                    action => { root.grid-action(); }
-                    load-more => { root.load-more(); }
-                }
-
-                d := DetailPage {
-                    width: parent.width;
-                    height: parent.height;
-                    visible: root.page == Destination.Detail;
-                    title: root.detail-title;
-                    author: root.detail-author;
-                    author-id: root.detail-author-id;
-                    description: root.detail-description;
-                    tags: root.detail-tags;
-                    posted: root.detail-posted;
-                    kind: root.detail-kind;
-                    page-count: root.detail-page-count;
-                    views: root.detail-views;
-                    bookmarks: root.detail-bookmarks;
-                    likes: root.detail-likes;
-                    bookmarked: root.detail-bookmarked;
-                    authenticated: root.authenticated;
-                    state: root.detail-state;
-                    message: root.detail-message;
-                    pages: root.detail-pages;
-                    current-page <=> root.detail-page-index;
-                    zoom <=> root.detail-zoom;
-                    pan-x <=> root.detail-pan-x;
-                    pan-y <=> root.detail-pan-y;
-                    fit-mode: root.detail-fit-mode;
-                    back => { root.detail-back(); }
-                    toggle-bookmark => { root.detail-toggle-bookmark(); }
-                    open-author => { root.detail-open-author(); }
-                    open-tag(t) => { root.detail-open-tag(t); }
-                    download-page => { root.detail-download-page(); }
-                    download-all => { root.detail-download-all(); }
-                    open-external => { root.detail-open-external(); }
-                    follow => { root.detail-follow(); }
-                    retry => { root.detail-retry(); }
-                    select-page(i) => { root.detail-select-page(i); }
-                    request-zoom(px, py, dy) => { root.detail-request-zoom(px, py, dy); }
-                    request-pan(px, py) => { root.detail-request-pan(px, py); }
-                    request-toggle-zoom(px, py) => { root.detail-request-toggle-zoom(px, py); }
-                    set-fit-mode(m) => { root.detail-set-fit-mode(m); }
-                    set-zoom(z) => { root.detail-set-zoom(z); }
-                    toggle-fullscreen => { root.toggle-fullscreen(); }
-                }
-
-                DownloadsPage {
-                    width: parent.width;
-                    height: parent.height;
-                    visible: root.page == Destination.Downloads;
-                    rows: root.download-rows;
-                    active-count: root.downloads-active;
-                    done-count: root.downloads-done;
-                    failed-count: root.downloads-failed;
-                    directory: root.download-directory;
-                    template-text: root.download-template;
-                    cancel(id) => { root.download-cancel(id); }
-                    retry(id) => { root.download-retry(id); }
-                    clear-finished => { root.download-clear-finished(); }
-                    choose-directory => { root.download-choose-directory(); }
-                    open-folder => { root.download-open-folder(); }
-                    open-task(id) => { root.download-open-task(id); }
-                }
-
-                SettingsPage {
-                    width: parent.width;
-                    height: parent.height;
-                    visible: root.page == Destination.Settings;
-                    dark <=> root.dark;
-                    follow-system-theme: root.follow-system-theme;
-                    authenticated: root.authenticated;
-                    session-user: root.session-user;
-                    cookie-input <=> root.cookie-input;
-                    cache-summary: root.cache-summary;
-                    memory-mb: root.cache-memory-mb;
-                    disk-mb: root.cache-disk-mb;
-                    download-directory: root.download-directory;
-                    template-text: root.download-template;
-                    demo-mode: root.demo-mode;
-                    app-version: root.app-version;
-                    toggle-theme(v) => { root.toggle-theme(v); }
-                    toggle-follow-system(v) => { root.toggle-follow-system(v); }
-                    sign-in-browser => { root.sign-in-browser(); }
-                    submit-cookie => { root.submit-cookie(); }
-                    sign-out => { root.sign-out(); }
-                    clear-cache => { root.clear-cache(); }
-                    clear-history => { root.clear-history(); }
-                    clear-downloads => { root.clear-downloads(); }
-                    choose-directory => { root.choose-directory(); }
-                    apply-template(t) => { root.apply-template(t); }
-                    toggle-demo(v) => { root.toggle-demo(v); }
-                    open-data-folder => { root.open-data-folder(); }
-                    open-about => { root.open-about(); }
-                }
-            }
-        }
-
-        // ================= status bar =================
-        Rectangle {
-            height: 24px;
-            background: Theme.chrome;
-            border-width: 1px;
-            border-color: Theme.border;
-
-            HorizontalLayout {
-                padding-left: Theme.space-3;
-                padding-right: Theme.space-3;
-                spacing: Theme.space-3;
-
-                Text {
-                    text: root.status-text;
-                    color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    overflow: elide;
-                }
-                Text {
-                    text: root.demo-mode-label;
-                    color: root.demo-mode ? Theme.warning : Theme.success;
-                    font-size: Theme.font-caption;
-                    vertical-alignment: center;
                 }
             }
         }
     }
-
-    out property <string> demo_mode_label: root.demo-mode ? "演示模式（本地数据）" : "真实 Pixiv 会话";
 }
-
-
-
-
-
-
-
-

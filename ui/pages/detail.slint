@@ -1,18 +1,20 @@
-import { ScrollView } from "std-widgets.slint";
 // Illustration detail page — the most important screen in the app.
 //
 // Layout follows Pixiv: the artwork dominates, metadata sits in a compact column
-// on the right, page thumbnails run along the bottom. The viewer follows WinUI
-// idiom: fit / actual-size modes, wheel zoom anchored at the cursor, drag to pan,
-// double-click to toggle, and a distraction-free fullscreen mode.
+// on the right, page thumbnails run along the bottom. The viewer follows the
+// WinUI media-surface idiom: fit / actual-size modes, wheel zoom anchored at the
+// cursor, drag to pan, double-click to toggle, F11 for fullscreen.
 //
-// All zoom/pan arithmetic lives in Rust (`viewer.rs`) so it can be unit tested;
-// this file only forwards pointer events and renders the resulting transform.
+// The zoom/pan arithmetic is *not* duplicated here. Slint forwards raw pointer
+// geometry (including the viewer's own width/height, so no 520px magic constant)
+// and Rust owns the transform, where it is unit tested in `src/zoom.rs`.
 
+import { ScrollView } from "std-widgets.slint";
 import { Theme, Type } from "../theme.slint";
+import { FluentGlyph } from "../icons.slint";
 import {
     AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind,
-    Skeleton, HoverTip,
+    Skeleton, HoverTip, InfoBar, InfoKind, PageScroll, ProgressBar, SectionHeader,
 } from "../components.slint";
 
 /// One viewable page. `thumb` is the thumbnail-strip image; `source` is either
@@ -36,37 +38,33 @@ export component ZoomViewer inherits Rectangle {
     in-out property <length> pan-y: 0px;
     in property <bool> show-controls: true;
 
-    /// Cursor position and wheel delta; Rust owns the transform maths.
-    callback request-zoom(length, length, float);
-    callback request-pan(length, length);
-    callback request-toggle-zoom(length, length);
+    /// Cursor position (px), wheel delta (px), and the viewer's own viewport.
+    callback request-zoom(float, float, float, float, float);
+    callback request-pan(float, float);
+    callback request-toggle-zoom(float, float);
     callback set-fit-mode(bool);
     callback set-zoom(float);
     callback toggle-fullscreen();
 
     clip: true;
-    background: Theme.dark ? #0e0e11 : #eef0f3;
+    background: Theme.dark ? #101012 : #e8eaed;
 
-    // Fit scale: the largest scale that shows the whole page.
+    // Fit scale: the largest scale that shows the whole page inside the box.
     out property <float> fit-scale:
-        (root.page.width <= 0 || root.page.height <= 0)
+        (root.page.width <= 0 || root.page.height <= 0 || root.width <= 0px || root.height <= 0px)
             ? 1.0
-            : Math.min((root.width / 1px) / (root.page.width * 1.0), (root.height / 1px) / (root.page.height * 1.0));
+            : Math.min((root.width / 1px) / (root.page.width * 1.0),
+                       (root.height / 1px) / (root.page.height * 1.0));
+    // One geometry path for both modes. Fit mode is just "scale = fit * zoom",
+    // so panning and cursor-anchored zoom keep working while fitted instead of
+    // silently switching to a different code path with different maths.
     out property <float> scale: root.fit-mode ? root.fit-scale * root.zoom : root.zoom;
 
-    // Fit mode: let Slint's own `contain` centring do the geometry. Hand-rolled
-    // sizing is only needed once the user zooms or pans, and it is what produced
-    // off-centre, undersized images when a page's declared size disagreed with
-    // its decoded size.
-    if root.fit-mode : Image {
-        source: root.page.source;
-        width: 100%;
-        height: 100%;
-        image-fit: contain;
-    }
+    // Last pointer position, so `moved` can produce a delta for panning.
+    property <float> last-x: 0.0;
+    property <float> last-y: 0.0;
 
     img := Image {
-        visible: !root.fit-mode;
         source: root.page.source;
         x: (root.width - self.width) / 2 + root.pan-x;
         y: (root.height - self.height) / 2 + root.pan-y;
@@ -80,6 +78,12 @@ export component ZoomViewer inherits Rectangle {
     if root.page.failed : VerticalLayout {
         alignment: center;
         spacing: Theme.space-2;
+        FluentGlyph {
+            name: "warning";
+            width: 28px;
+            height: 28px;
+            tint: Theme.danger;
+        }
         Text {
             text: "图片加载失败";
             color: Theme.text-secondary;
@@ -87,45 +91,47 @@ export component ZoomViewer inherits Rectangle {
             horizontal-alignment: center;
         }
         AppButton {
-            label: "重试";
+            label: "重新载入";
             icon: "refresh";
-            clicked => { root.request-toggle-zoom(0px, 0px); }
+            clicked => { root.request-toggle-zoom(0px / 1px, 0px / 1px); }
         }
     }
     if !root.page.loaded && !root.page.failed : VerticalLayout {
         alignment: center;
         spacing: Theme.space-2;
+        Skeleton { width: 96px; height: 6px; radius: Theme.radius-pill; }
         Text {
             text: "正在载入图片…";
             color: Theme.text-tertiary;
             font-size: Theme.font-small;
             horizontal-alignment: center;
         }
-        Skeleton { width: 120px; height: 8px; radius: Theme.radius-pill; }
     }
 
     ta := TouchArea {
         scroll-event(e) => {
-            // dy > 0 means wheel-down; forward raw values, Rust clamps and anchors.
-            root.request-zoom(ta.mouse-x, ta.mouse-y, e.delta-y / 1px);
+            root.request-zoom(ta.mouse-x / 1px, ta.mouse-y / 1px, e.delta-y / 1px,
+                root.width / 1px, root.height / 1px);
+            EventResult.accept
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.last-x = ta.mouse-x / 1px;
+                root.last-y = ta.mouse-y / 1px;
+            }
             EventResult.accept
         }
         moved => {
-            if (ta.pressed) {
-                root.request-pan(ta.mouse-x, ta.mouse-y);
+            if (ta.pressed && !root.fit-mode) {
+                root.request-pan((ta.mouse-x / 1px) - root.last-x, (ta.mouse-y / 1px) - root.last-y);
             }
-        }
-        pointer-event(e) => {
-            // Remember where a drag begins so pan deltas are relative.
-            if (e.kind == PointerEventKind.down) {
-                root.request-pan(ta.mouse-x, ta.mouse-y);
-            }
-            EventResult.accept
+            root.last-x = ta.mouse-x / 1px;
+            root.last-y = ta.mouse-y / 1px;
         }
         double-clicked => {
-            root.request-toggle-zoom(ta.mouse-x, ta.mouse-y);
+            root.request-toggle-zoom(ta.mouse-x / 1px, ta.mouse-y / 1px);
         }
-        mouse-cursor: root.zoom > 1.0 ? MouseCursor.grab : MouseCursor.default;
+        mouse-cursor: root.fit-mode ? MouseCursor.default : MouseCursor.grab;
     }
 
     // Floating control bar, as in WinUI's media surfaces.
@@ -134,35 +140,38 @@ export component ZoomViewer inherits Rectangle {
         y: root.height - self.height - Theme.space-3;
         height: 36px;
         border-radius: Theme.radius-lg;
-        background: Theme.dark ? #cc1c1c20 : #e6ffffff;
+        background: Theme.dark ? #dd1c1c20 : #e8ffffff;
         border-width: 1px;
         border-color: Theme.border;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: Theme.shadow-2;
+        drop-shadow-offset-y: 2px;
 
         HorizontalLayout {
             padding-left: Theme.space-1;
             padding-right: Theme.space-1;
-            spacing: Theme.space-1;
+            spacing: 0px;
             alignment: center;
 
             IconButton {
                 icon: "fit";
-                tip: "适应窗口 (F)";
+                tip: "适应窗口";
                 active: root.fit-mode;
                 size: 28px;
                 clicked => { root.set-fit-mode(true); root.set-zoom(1.0); }
             }
             IconButton {
                 icon: "actual-size";
-                tip: "实际尺寸 (1)";
+                tip: "实际尺寸";
                 active: !root.fit-mode;
                 size: 28px;
                 clicked => { root.set-fit-mode(false); root.set-zoom(1.0); }
             }
             IconButton {
                 icon: "zoom-out";
-                tip: "缩小 (-)";
+                tip: "缩小";
                 size: 28px;
-                clicked => { root.set-zoom(Math.max(0.2, root.zoom - 0.2)); }
+                clicked => { root.set-zoom(Math.max(0.2, root.zoom * 0.8)); }
             }
             Text {
                 text: Math.round(root.scale * 100) + "%";
@@ -174,9 +183,9 @@ export component ZoomViewer inherits Rectangle {
             }
             IconButton {
                 icon: "zoom-in";
-                tip: "放大 (+)";
+                tip: "放大";
                 size: 28px;
-                clicked => { root.set-zoom(Math.min(8.0, root.zoom + 0.2)); }
+                clicked => { root.set-zoom(Math.min(8.0, root.zoom * 1.25)); }
             }
             IconButton {
                 icon: "fullscreen";
@@ -203,161 +212,206 @@ export component InfoPanel inherits Rectangle {
     in property <int> likes: 0;
     in property <bool> bookmarked: false;
     in property <bool> authenticated: false;
+    in property <bool> following: false;
+    in property <bool> busy: false;
+    in property <string> ugoira-hint: "";
 
     callback toggle-bookmark();
     callback open-author();
     callback open-tag(string);
     callback download-page();
     callback download-all();
+    callback export-ugoira();
     callback open-external();
     callback follow();
 
-    background: Theme.canvas;
+    background: Theme.layer;
+    border-width: 1px;
+    border-color: Theme.border;
 
-    ScrollView {
-        VerticalLayout {
-            padding: Theme.space-4;
-            spacing: Theme.space-3;
+    page := PageScroll {
+        width: 100%;
+        height: 100%;
+        padding-x: Theme.space-4;
+        padding-y: Theme.space-4;
+        gutter: false;
+        spacing: Theme.space-3;
 
-            Text {
-                text: root.title;
-                color: Theme.text;
-                font-size: Theme.font-title;
-                font-weight: Type.semibold;
-                wrap: word-wrap;
-            }
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.font-title;
+            font-weight: Type.semibold;
+            wrap: word-wrap;
+        }
 
-            // Author row
-            Rectangle {
-                height: 40px;
-                background: transparent;
-
-                HorizontalLayout {
-                    spacing: Theme.space-2;
-                    alignment: start;
-
-                    Rectangle {
-                        width: 32px;
-                        height: 32px;
-                        border-radius: Theme.radius-pill;
-                        background: Theme.accent-subtle;
-                        Text {
-                            text: "画";
-                            color: Theme.accent;
-                            font-size: Theme.font-small;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 0px;
-                        Text {
-                            text: root.author;
-                            color: Theme.text;
-                            font-size: Theme.font-body;
-                            font-weight: Type.medium;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: "@" + root.author-id;
-                            color: Theme.text-tertiary;
-                            font-size: Theme.font-caption;
-                            overflow: elide;
-                        }
-                    }
-
-                    ta-author := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.open-author(); }
-                    }
-                }
-            }
+        // ---- author ----
+        Rectangle {
+            height: 44px;
+            border-radius: Theme.radius-md;
+            background: ta-author.has-hover ? Theme.layer-alt : transparent;
 
             HorizontalLayout {
+                padding-left: Theme.space-1;
+                padding-right: Theme.space-1;
                 spacing: Theme.space-2;
-                AppButton {
-                    label: root.bookmarked ? "已收藏" : "收藏";
-                    icon: "follow";
-                    kind: root.bookmarked ? ButtonKind.Primary : ButtonKind.Secondary;
-                    clicked => { root.toggle-bookmark(); }
+                alignment: start;
+
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: Theme.radius-pill;
+                    background: Theme.accent-subtle;
+                    Text {
+                        text: "画";
+                        color: Theme.accent;
+                        font-size: Theme.font-small;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 0px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: root.author;
+                        color: Theme.text;
+                        font-size: Theme.font-body;
+                        font-weight: Type.medium;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "ID " + root.author-id;
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        overflow: elide;
+                    }
+                }
+
                 AppButton {
-                    label: "关注";
+                    label: root.following ? "已关注" : "关注";
                     icon: "artist";
+                    compact: true;
+                    kind: root.following ? ButtonKind.Primary : ButtonKind.Secondary;
+                    enabled: root.authenticated && !root.busy;
                     clicked => { root.follow(); }
                 }
             }
 
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                AppButton {
-                    label: "保存本页";
-                    icon: "downloads";
-                    clicked => { root.download-page(); }
-                }
-                AppButton {
-                    label: root.page-count > 1 ? ("下载全部 " + root.page-count) : "下载";
-                    icon: "downloads";
-                    clicked => { root.download-all(); }
-                }
+            ta-author := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.open-author(); }
             }
+        }
+
+        // ---- primary actions ----
+        HorizontalLayout {
+            spacing: Theme.space-2;
 
             AppButton {
-                label: "在浏览器中打开";
-                icon: "open";
-                kind: ButtonKind.Subtle;
-                clicked => { root.open-external(); }
+                label: root.bookmarked ? "已收藏" : "收藏";
+                icon: "follow";
+                kind: root.bookmarked ? ButtonKind.Primary : ButtonKind.Secondary;
+                enabled: !root.busy;
+                clicked => { root.toggle-bookmark(); }
             }
+            AppButton {
+                label: "保存本页";
+                icon: "downloads";
+                clicked => { root.download-page(); }
+            }
+        }
 
-            if !root.authenticated : Rectangle {
-                border-radius: Theme.radius-md;
-                background: Theme.accent-subtle;
-                HorizontalLayout {
-                    padding: Theme.space-2;
-                    spacing: Theme.space-2;
-                    Text {
-                        text: "未登录：收藏与关注需要先在设置中完成登录。";
-                        color: Theme.accent;
-                        font-size: Theme.font-caption;
-                        wrap: word-wrap;
-                        vertical-alignment: center;
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            AppButton {
+                label: root.page-count > 1 ? ("下载全部 " + root.page-count) : "下载";
+                icon: "downloads";
+                kind: ButtonKind.Secondary;
+                clicked => { root.download-all(); }
+            }
+            if root.kind == 2 : AppButton {
+                label: "导出动图 GIF";
+                icon: "play";
+                kind: ButtonKind.Secondary;
+                enabled: !root.busy;
+                clicked => { root.export-ugoira(); }
+            }
+        }
+
+        AppButton {
+            label: "在浏览器中打开";
+            icon: "open";
+            kind: ButtonKind.Subtle;
+            clicked => { root.open-external(); }
+        }
+
+        if !root.authenticated : InfoBar {
+            kind: InfoKind.Warning;
+            title: "只读模式";
+            message: "收藏与关注需要先完成登录（设置 → 账户）。";
+        }
+
+        if root.kind == 2 && root.ugoira-hint != "" : InfoBar {
+            kind: InfoKind.Info;
+            title: "动图（Ugoira）";
+            message: root.ugoira-hint;
+        }
+
+        Divider { }
+
+        // ---- stats ----
+        HorizontalLayout {
+            spacing: Theme.space-4;
+            alignment: start;
+            Text { text: "浏览 " + root.views; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+            Text { text: "收藏 " + root.bookmarks; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+            Text { text: "赞 " + root.likes; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+            Text { text: root.posted; color: Theme.text-tertiary; font-size: Theme.font-small; vertical-alignment: center; overflow: elide; }
+        }
+
+        if root.description != "" : Text {
+            text: root.description;
+            color: Theme.text-secondary;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+        }
+
+        if root.tags.length > 0 : VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: "标签";
+                color: Theme.text-tertiary;
+                font-size: Theme.font-caption;
+                font-weight: Type.semibold;
+            }
+            Rectangle {
+                height: 60px;
+                clip: true;
+                ScrollView {
+                    width: 100%;
+                    height: 100%;
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+                    // Chips flow left-to-right and are reachable by scrolling the
+                    // strip; a wrapping row is not expressible in Slint layouts.
+                    HorizontalLayout {
+                        spacing: Theme.space-2;
+                        alignment: start;
+                        for t in root.tags : TagChip {
+                            label: t;
+                            clicked => { root.open-tag(t); }
+                        }
                     }
-                }
-            }
-
-            Divider { }
-
-            // Stats
-            HorizontalLayout {
-                spacing: Theme.space-4;
-                Text { text: "浏览 " + root.views; color: Theme.text-secondary; font-size: Theme.font-small; }
-                Text { text: "收藏 " + root.bookmarks; color: Theme.text-secondary; font-size: Theme.font-small; }
-                Text { text: "赞 " + root.likes; color: Theme.text-secondary; font-size: Theme.font-small; }
-                Text { text: root.posted; color: Theme.text-tertiary; font-size: Theme.font-small; }
-            }
-
-            if root.description != "" : Text {
-                text: root.description;
-                color: Theme.text-secondary;
-                font-size: Theme.font-small;
-                wrap: word-wrap;
-            }
-
-            if root.tags.length > 0 : HorizontalLayout {
-                spacing: Theme.space-2;
-                
-                for t in root.tags : TagChip {
-                    label: t;
-                    clicked => { root.open-tag(t); }
                 }
             }
         }
     }
 }
 
-/// Full page: viewer + metadata + thumbnail strip.
+/// Full page: toolbar + viewer + metadata + thumbnail strip.
 export component DetailPage inherits Rectangle {
     in property <string> title: "";
     in property <string> author: "";
@@ -372,9 +426,12 @@ export component DetailPage inherits Rectangle {
     in property <int> likes: 0;
     in property <bool> bookmarked: false;
     in property <bool> authenticated: false;
+    in property <bool> following: false;
+    in property <bool> busy: false;
     /// 0 content, 1 loading, 3 error
     in property <int> state: 0;
     in property <string> message: "";
+    in property <string> ugoira-hint: "";
 
     in property <[ViewerPage]> pages: [];
     in-out property <int> current-page: 0;
@@ -390,18 +447,24 @@ export component DetailPage inherits Rectangle {
     callback open-tag(string);
     callback download-page();
     callback download-all();
+    callback export-ugoira();
     callback open-external();
     callback follow();
     callback retry();
     callback select-page(int);
-    callback request-zoom(length, length, float);
-    callback request-pan(length, length);
-    callback request-toggle-zoom(length, length);
+    callback request-zoom(float, float, float, float, float);
+    callback request-pan(float, float);
+    callback request-toggle-zoom(float, float);
     callback set-fit-mode(bool);
     callback set-zoom(float);
     callback toggle-fullscreen();
 
     background: Theme.canvas;
+
+    /// Content box width, pushed in by the shell. Reading the window width here
+    /// reports as a binding loop.
+    in property <length> available-width: 900px;
+    out property <bool> wide: root.available-width >= 900px;
 
     VerticalLayout {
         // ---- toolbar ----
@@ -426,13 +489,21 @@ export component DetailPage inherits Rectangle {
                     horizontal-stretch: 1;
                 }
 
-                if root.page-count > 1 : Text {
-                    text: (root.current-page + 1) + " / " + root.page-count;
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-small;
-                    vertical-alignment: center;
+                if root.page-count > 1 : Badge {
+                    label: (root.current-page + 1) + " / " + root.page-count;
+                    fill: Theme.layer-alt;
+                    ink: Theme.text-secondary;
                 }
 
+                IconButton {
+                    icon: "fit";
+                    tip: root.fit-mode ? "当前：适应窗口" : "当前：实际尺寸";
+                    active: root.fit-mode;
+                    clicked => {
+                        root.set-fit-mode(!root.fit-mode);
+                        root.set-zoom(1.0);
+                    }
+                }
                 IconButton {
                     icon: "open";
                     tip: "在浏览器中打开";
@@ -450,7 +521,14 @@ export component DetailPage inherits Rectangle {
 
         if root.state == 1 : VerticalLayout {
             alignment: center;
-            Text { text: "正在载入作品…"; color: Theme.text-secondary; horizontal-alignment: center; }
+            spacing: Theme.space-2;
+            ProgressBar { indeterminate: true; width: 140px; }
+            Text {
+                text: "正在载入作品…";
+                color: Theme.text-secondary;
+                font-size: Theme.font-small;
+                horizontal-alignment: center;
+            }
         }
 
         if root.state == 3 : StateView {
@@ -461,143 +539,146 @@ export component DetailPage inherits Rectangle {
             retry => { root.retry(); }
         }
 
-        if root.state == 0 && root.pages.length > 0 : Rectangle {
-            // Side-by-side on a wide window, stacked on a narrow one.
-            if root.width > 1000px : HorizontalLayout {
-                spacing: 0px;
+        if root.state == 0 && root.pages.length > 0 && root.wide : HorizontalLayout {
+            spacing: Theme.space-3;
+            padding: Theme.space-3;
 
-                ZoomViewer {
-                    horizontal-stretch: 1;
-                    page: root.pages[root.current-page];
-                    fit-mode: root.fit-mode;
-                    zoom <=> root.zoom;
-                    pan-x <=> root.pan-x;
-                    pan-y <=> root.pan-y;
-                    request-zoom(px, py, dy) => { root.request-zoom(px, py, dy); }
-                    request-pan(px, py) => { root.request-pan(px, py); }
-                    request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
-                    set-fit-mode(m) => { root.set-fit-mode(m); }
-                    set-zoom(z) => { root.set-zoom(z); }
-                    toggle-fullscreen => { root.toggle-fullscreen(); }
-                }
-
-                Rectangle {
-                    width: 340px;
-                    InfoPanel {
-                        width: parent.width;
-                        height: parent.height;
-                        title: root.title;
-                        author: root.author;
-                        author-id: root.author-id;
-                        description: root.description;
-                        tags: root.tags;
-                        posted: root.posted;
-                        kind: root.kind;
-                        page-count: root.page-count;
-                        views: root.views;
-                        bookmarks: root.bookmarks;
-                        likes: root.likes;
-                        bookmarked: root.bookmarked;
-                        authenticated: root.authenticated;
-                        toggle-bookmark => { root.toggle-bookmark(); }
-                        open-author => { root.open-author(); }
-                        open-tag(t) => { root.open-tag(t); }
-                        download-page => { root.download-page(); }
-                        download-all => { root.download-all(); }
-                        open-external => { root.open-external(); }
-                        follow => { root.follow(); }
-                    }
-                }
+            ZoomViewer {
+                horizontal-stretch: 1;
+                page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
+                fit-mode: root.fit-mode;
+                zoom <=> root.zoom;
+                pan-x <=> root.pan-x;
+                pan-y <=> root.pan-y;
+                request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
+                request-pan(dx, dy) => { root.request-pan(dx, dy); }
+                request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
+                set-fit-mode(m) => { root.set-fit-mode(m); }
+                set-zoom(z) => { root.set-zoom(z); }
+                toggle-fullscreen => { root.toggle-fullscreen(); }
             }
 
-            if root.width <= 1000px : VerticalLayout {
-                ZoomViewer {
-                    // Stretch-based rather than `root.height * 0.55`: deriving a
-                    // child height from the parent height made the page taller
-                    // than the viewport and pushed the status bar out of view.
-                    vertical-stretch: 3;
-                    min-height: 200px;
-                    page: root.pages[root.current-page];
-                    fit-mode: root.fit-mode;
-                    zoom <=> root.zoom;
-                    pan-x <=> root.pan-x;
-                    pan-y <=> root.pan-y;
-                    request-zoom(px, py, dy) => { root.request-zoom(px, py, dy); }
-                    request-pan(px, py) => { root.request-pan(px, py); }
-                    request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
-                    set-fit-mode(m) => { root.set-fit-mode(m); }
-                    set-zoom(z) => { root.set-zoom(z); }
-                    toggle-fullscreen => { root.toggle-fullscreen(); }
-                }
-                Rectangle {
-                    vertical-stretch: 1;
-                    InfoPanel {
-                        width: parent.width;
-                        height: parent.height;
-                        title: root.title;
-                        author: root.author;
-                        author-id: root.author-id;
-                        description: root.description;
-                        tags: root.tags;
-                        posted: root.posted;
-                        kind: root.kind;
-                        page-count: root.page-count;
-                        views: root.views;
-                        bookmarks: root.bookmarks;
-                        likes: root.likes;
-                        bookmarked: root.bookmarked;
-                        authenticated: root.authenticated;
-                        toggle-bookmark => { root.toggle-bookmark(); }
-                        open-author => { root.open-author(); }
-                        open-tag(t) => { root.open-tag(t); }
-                        download-page => { root.download-page(); }
-                        download-all => { root.download-all(); }
-                        open-external => { root.open-external(); }
-                        follow => { root.follow(); }
-                    }
+            Rectangle {
+                width: Math.min(360px, root.available-width * 0.38);
+                border-radius: Theme.radius-lg;
+                clip: true;
+
+                InfoPanel {
+                    width: parent.width;
+                    height: parent.height;
+                    title: root.title;
+                    author: root.author;
+                    author-id: root.author-id;
+                    description: root.description;
+                    tags: root.tags;
+                    posted: root.posted;
+                    kind: root.kind;
+                    page-count: root.page-count;
+                    views: root.views;
+                    bookmarks: root.bookmarks;
+                    likes: root.likes;
+                    bookmarked: root.bookmarked;
+                    authenticated: root.authenticated;
+                    following: root.following;
+                    busy: root.busy;
+                    ugoira-hint: root.ugoira-hint;
+                    toggle-bookmark => { root.toggle-bookmark(); }
+                    open-author => { root.open-author(); }
+                    open-tag(t) => { root.open-tag(t); }
+                    download-page => { root.download-page(); }
+                    download-all => { root.download-all(); }
+                    export-ugoira => { root.export-ugoira(); }
+                    open-external => { root.open-external(); }
+                    follow => { root.follow(); }
                 }
             }
         }
 
+        if root.state == 0 && root.pages.length > 0 && !root.wide : VerticalLayout {
+            ZoomViewer {
+                vertical-stretch: 3;
+                min-height: 180px;
+                page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
+                fit-mode: root.fit-mode;
+                zoom <=> root.zoom;
+                pan-x <=> root.pan-x;
+                pan-y <=> root.pan-y;
+                request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
+                request-pan(dx, dy) => { root.request-pan(dx, dy); }
+                request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
+                set-fit-mode(m) => { root.set-fit-mode(m); }
+                set-zoom(z) => { root.set-zoom(z); }
+                toggle-fullscreen => { root.toggle-fullscreen(); }
+            }
+            InfoPanel {
+                vertical-stretch: 2;
+                min-height: 160px;
+                title: root.title;
+                author: root.author;
+                author-id: root.author-id;
+                description: root.description;
+                tags: root.tags;
+                posted: root.posted;
+                kind: root.kind;
+                page-count: root.page-count;
+                views: root.views;
+                bookmarks: root.bookmarks;
+                likes: root.likes;
+                bookmarked: root.bookmarked;
+                authenticated: root.authenticated;
+                following: root.following;
+                busy: root.busy;
+                ugoira-hint: root.ugoira-hint;
+                toggle-bookmark => { root.toggle-bookmark(); }
+                open-author => { root.open-author(); }
+                open-tag(t) => { root.open-tag(t); }
+                download-page => { root.download-page(); }
+                download-all => { root.download-all(); }
+                export-ugoira => { root.export-ugoira(); }
+                open-external => { root.open-external(); }
+                follow => { root.follow(); }
+            }
+        }
+
         // ---- page thumbnail strip ----
-        if root.state == 0 && root.page-count > 1 : Rectangle {
-            height: 72px;
-            background: Theme.layer-alt;
+        if root.state == 0 && root.pages.length > 1 : Rectangle {
+            height: 68px;
+            background: Theme.layer;
 
-            HorizontalLayout {
-                padding: Theme.space-2;
-                spacing: Theme.space-2;
+            ScrollView {
+                width: 100%;
+                height: 100%;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
 
-                for p[i] in root.pages : Rectangle {
-                    width: 52px;
-                    height: 52px;
-                    border-radius: Theme.radius-md;
-                    border-width: (i == root.current-page) ? 2px : 1px;
-                    border-color: (i == root.current-page) ? Theme.accent : Theme.border;
-                    background: Theme.layer;
-                    clip: true;
+                HorizontalLayout {
+                    padding: Theme.space-2;
+                    spacing: Theme.space-2;
+                    alignment: start;
 
-                    Image {
-                        source: p.thumb;
-                        width: 100%;
-                        height: 100%;
-                        image-fit: cover;
-                    }
+                    for p[i] in root.pages : Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        border-radius: Theme.radius-sm;
+                        border-width: (i == root.current-page) ? 2px : 1px;
+                        border-color: (i == root.current-page) ? Theme.accent : Theme.border;
+                        background: Theme.layer-alt;
+                        clip: true;
 
-                    TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.select-page(i); }
+                        Image {
+                            source: p.thumb;
+                            width: 100%;
+                            height: 100%;
+                            image-fit: cover;
+                        }
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.select-page(i); }
+                        }
                     }
                 }
             }
         }
     }
 }
-
-
-
-
-
-
-
-

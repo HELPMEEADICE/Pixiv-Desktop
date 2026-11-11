@@ -6,20 +6,31 @@
 //!   thread. `App` is therefore `Rc<RefCell<..>>`, never `Arc<Mutex<..>>`.
 //! * Network, decode and database work runs on a tokio runtime and returns to the
 //!   UI thread through [`slint::invoke_from_event_loop`].
-//! * Timers are [`slint::Timer`], which fire on the UI thread, so no pointer
-//!   sharing or locking is needed for resize/tick handling.
-//! * The session cookie is never logged and never leaves `Session`.
+//! * The cover loader is bounded (`images::COVER_CONCURRENCY`) and keyed by a
+//!   feed epoch, so a slow decode from a page you already left can never patch a
+//!   card on the page you are looking at.
+//! * The session cookie is never logged, never enters the database, and is sealed
+//!   with DPAPI on Windows (see [`crate::session`]).
+//!
+//! Responsive layout contract
+//! --------------------------
+//! Nothing here guesses at the window width. Slint measures the real content box
+//! (`PageScroll.body-width`) and reports it through `grid-measured`; the column
+//! count and card width come from [`crate::layout`] applied to that number. There
+//! is no resize timer and no second source of truth to drift out of sync.
 
 use slint::{
     ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
     invoke_from_event_loop,
 };
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use tokio::runtime::Runtime;
 
 use pixiv_api::{Client, ClientConfig, Session};
@@ -28,23 +39,24 @@ use pixiv_download::{DownloadConfig, DownloadManager, DownloadRequest};
 use pixiv_image::{CacheConfig, ImageCache, Priority};
 use pixiv_store::{HistoryEntry, Store};
 use pixiv_types::Id;
-use pixiv_types::domain::{Illust, RankingKind, SearchQuery};
+use pixiv_types::domain::{Illust, PageMeta, RankingKind, SearchQuery};
 
+use crate::images::{COVER_CONCURRENCY, CoverLoader};
+use crate::layout::{self, GridGeometry};
+use crate::route::History;
 use crate::{AppWindow, Destination, DownloadRow, IllustItem, ViewerPage};
-
-const COLUMN_GAP: f32 = 12.0;
-const RAIL_EXPANDED: f32 = 224.0;
-const RAIL_COMPACT: f32 = 56.0;
-const PAGE_PADDING: f32 = 20.0;
-const RAIL_BREAKPOINT: f32 = 1100.0;
 
 /// Which data source is answering. Rendered in the status bar and as a top-bar
 /// badge so demo data can never be mistaken for live data.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Demo,
     Real,
 }
+
+/// Viewport cap for full-size artwork. A 4000px original drawn into a 900px box
+/// wastes ~60MB of RGBA; 1600 keeps detail on wide windows without the waste.
+const VIEWER_MAX_WIDTH: u32 = 1600;
 
 struct App {
     ui: slint::Weak<AppWindow>,
@@ -61,20 +73,37 @@ struct App {
 
     // navigation
     page: Destination,
-    nav_stack: Vec<Destination>,
-    last_width: f32,
+    history: History<Destination>,
+    /// Destination the currently loaded feed belongs to, so going Back to a page
+    /// whose content is still loaded does not re-fetch (and therefore does not
+    /// lose the scroll position).
+    feed_owner: Option<Destination>,
+    scroll: Vec<(Destination, f32)>,
 
-    // grid
+    // responsive geometry, fed by what Slint measured
+    measured_width: f32,
+    geometry: GridGeometry,
+
+    // feed
     items: Vec<Illust>,
     columns: Vec<Rc<VecModel<IllustItem>>>,
-    cover_cache: std::collections::HashMap<String, slint::Image>,
+    index: HashMap<String, (usize, usize)>,
+    covers: HashMap<String, slint::Image>,
+    loader: CoverLoader,
+    /// Incremented on every feed reload; async results from an older epoch are
+    /// dropped instead of being applied to the wrong page.
+    epoch: u64,
     page_cursor: u32,
+    reached_end: bool,
+    loading_more: bool,
     search_word: String,
     ranking_kind: RankingKind,
 
     // detail
     detail: Option<Illust>,
+    detail_pages: Vec<PageMeta>,
     detail_models: Option<Rc<VecModel<ViewerPage>>>,
+    detail_epoch: u64,
 }
 
 type Shared = Rc<RefCell<App>>;
@@ -105,17 +134,21 @@ where
     });
 }
 
-/// Raw pixels of a decoded image. `Send`, unlike `slint::Image`.
+/// Raw pixels of a decoded image. `Send`, unlike `slint::Image`, and shares the
+/// cache's `Arc<[u8]>` instead of copying it.
 struct RawImage {
     width: u32,
     height: u32,
-    rgba: Vec<u8>,
+    rgba: Arc<[u8]>,
 }
 
 impl RawImage {
     fn to_slint(&self) -> slint::Image {
         let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(self.width, self.height);
-        buffer.make_mut_bytes().copy_from_slice(&self.rgba);
+        let expected = (self.width as usize) * (self.height as usize) * 4;
+        let bytes = buffer.make_mut_bytes();
+        let len = expected.min(self.rgba.len());
+        bytes[..len].copy_from_slice(&self.rgba[..len]);
         slint::Image::from_rgba8(buffer)
     }
 }
@@ -130,17 +163,30 @@ pub fn run() -> Result<(), slint::PlatformError> {
     install_callbacks(&app);
     start_timers(&app);
 
-    {
-        // `Window::size()` reports 0x0 before the window is mapped, so the real
-        // width is picked up by a one-shot timer just after the event loop starts
-        // (`start_timers`). Slint does not emit a resize event here.
-        let mut a = app.borrow_mut();
-        a.last_width = 0.0;
+    // The window is not mapped yet, so a size applied here would be clamped by
+    // the window manager. A single-shot timer after the loop starts is the
+    // reliable moment to size it (and it is also what makes screenshot captures
+    // deterministic).
+    if std::env::var("PIXIV_DESKTOP_SIZE").is_ok() {
+        // Applied a few times because the scale factor is not known to Slint
+        // until after the first frame is composed; the last application wins and
+        // the earlier ones are what make the window map at roughly the right
+        // place instead of starting tiny.
+        for delay in [120u64, 600, 1500] {
+            let shared = app.clone();
+            let timer = slint::Timer::default();
+            timer.start(
+                slint::TimerMode::SingleShot,
+                Duration::from_millis(delay),
+                move || apply_window_size(&shared),
+            );
+            std::mem::forget(timer);
+        }
     }
-    // Optional deep link for smoke-testing and scripting:
+
+    // Optional deep link for smoke-testing and visual regression captures:
     //   PIXIV_DESKTOP_START_PAGE=settings
-    //   PIXIV_DESKTOP_START_ILLUST=700000003   (opens that illustration's detail)
-    // Both default to the normal Home entry point when unset.
+    //   PIXIV_DESKTOP_START_ILLUST=700000003
     let start = std::env::var("PIXIV_DESKTOP_START_PAGE").ok();
     match start.as_deref() {
         Some("discovery") => App::navigate(&app, Destination::Discovery),
@@ -164,6 +210,36 @@ pub fn run() -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
+/// Honour `PIXIV_DESKTOP_SIZE=1140x886` so screenshot captures are deterministic
+/// instead of depending on the window manager's idea of a nice default.
+///
+/// The value is interpreted as *logical* pixels and converted with the live scale
+/// factor: `set_size` with a logical size is resolved against the scale factor
+/// known at that moment, which is still 1.0 before the window is mapped, so a
+/// 1140x886 request came out as 1140x886 *physical* (a 760x590 layout at 150%
+/// DPI). Converting explicitly keeps the captured layout at the documented size.
+fn apply_window_size(app: &Shared) {
+    let Ok(spec) = std::env::var("PIXIV_DESKTOP_SIZE") else {
+        return;
+    };
+    let Some((w, h)) = spec.split_once('x') else {
+        return;
+    };
+    let (Ok(w), Ok(h)) = (w.trim().parse::<f32>(), h.trim().parse::<f32>()) else {
+        return;
+    };
+    if w < 320.0 || h < 240.0 {
+        return;
+    }
+    let ui = app.borrow().ui();
+    let window = ui.window();
+    let scale = window.scale_factor().max(1.0);
+    window.set_size(slint::PhysicalSize::new(
+        (w * scale).round() as u32,
+        (h * scale).round() as u32,
+    ));
+}
+
 impl App {
     fn new(ui: slint::Weak<AppWindow>, rt: Arc<Runtime>) -> Self {
         let data_dir = data_dir();
@@ -178,37 +254,55 @@ impl App {
             memory_budget_bytes: 192 * 1024 * 1024,
             disk_budget_bytes: 1024 * 1024 * 1024,
             disk_dir: Some(data_dir.join("images")),
-            concurrency: 6,
+            concurrency: COVER_CONCURRENCY,
         });
 
-        let download_dir = downloads_dir();
+        let download_dir = persisted(&store, "download_dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(downloads_dir);
+        let _ = std::fs::create_dir_all(&download_dir);
+        let template = persisted(&store, "filename_template")
+            .unwrap_or_else(|| "{illust_id}_p{page}_{title}".to_string());
+
         let downloads = DownloadManager::new(DownloadConfig {
             directory: download_dir.clone(),
             concurrency: 3,
-            filename_template: "{illust_id}_p{page}_{title}".to_string(),
+            filename_template: template.clone(),
         });
 
-        let session = load_session(&data_dir);
+        let session = crate::session::load(&data_dir);
         let (client, mode) = match Client::new(ClientConfig::default(), session.clone()) {
-            Ok(c) if session.is_authenticated() => (Some(c), Mode::Real),
-            Ok(c) => (Some(c), Mode::Demo),
+            Ok(client) if session.is_authenticated() => (Some(client), Mode::Real),
+            Ok(client) => (Some(client), Mode::Demo),
             Err(_) => (None, Mode::Demo),
         };
 
-        let dark = store
-            .get_setting("theme")
-            .ok()
-            .flatten()
-            .map(|v| v == "dark")
+        let dark = persisted(&store, "theme")
+            .map(|value| value == "dark")
             .unwrap_or(false);
+        let follow_system = persisted(&store, "follow_system_theme")
+            .map(|value| value != "false")
+            .unwrap_or(true);
 
         if let Some(ui) = ui.upgrade() {
             ui.set_dark(dark);
+            ui.set_follow_system_theme(follow_system);
             ui.set_demo_mode(mode == Mode::Demo);
             ui.set_authenticated(session.is_authenticated());
             ui.set_session_user(session.user_name.clone().unwrap_or_default().into());
             ui.set_download_directory(download_dir.display().to_string().into());
-            ui.set_download_template("{illust_id}_p{page}_{title}".into());
+            ui.set_download_template(template.clone().into());
+            ui.set_template_input(template.into());
+            ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+            ui.set_cache_memory_mb(192);
+            ui.set_cache_disk_mb(1024);
+            ui.set_ranking_filters(ModelRc::from(Rc::new(VecModel::from(
+                RankingKind::ALL
+                    .iter()
+                    .map(|kind| slint::SharedString::from(kind.label()))
+                    .collect::<Vec<_>>(),
+            ))));
+            ui.set_grid_action_label("前往设置".into());
         }
 
         Self {
@@ -224,16 +318,26 @@ impl App {
             data_dir,
             download_dir,
             page: Destination::Home,
-            nav_stack: Vec::new(),
-            last_width: 1280.0,
+            history: History::new(32),
+            feed_owner: None,
+            scroll: Vec::new(),
+            measured_width: 0.0,
+            geometry: GridGeometry::for_width(858.0),
             items: Vec::new(),
             columns: Vec::new(),
-            cover_cache: std::collections::HashMap::new(),
+            index: HashMap::new(),
+            covers: HashMap::new(),
+            loader: CoverLoader::new(),
+            epoch: 0,
             page_cursor: 1,
+            reached_end: false,
+            loading_more: false,
             search_word: String::new(),
             ranking_kind: RankingKind::Daily,
             detail: None,
+            detail_pages: Vec::new(),
             detail_models: None,
+            detail_epoch: 0,
         }
     }
 
@@ -246,24 +350,26 @@ impl App {
     fn refresh_chrome(&self) {
         let ui = self.ui();
         ui.set_page(self.page);
+        ui.set_can_go_back(self.history.can_go_back());
+        ui.set_can_go_forward(self.history.can_go_forward());
         ui.set_demo_mode(self.mode == Mode::Demo);
         ui.set_authenticated(self.session.is_authenticated());
         ui.set_session_user(self.session.user_name.clone().unwrap_or_default().into());
+        ui.set_status_text(self.status_line().into());
+        ui.set_cache_summary(self.cache_summary().into());
+    }
 
+    fn cache_summary(&self) -> String {
         let stats = self.cache.stats();
         let lookups = stats.memory_hits + stats.disk_hits;
         let total = lookups + stats.network_loads;
-        ui.set_cache_summary(
-            format!(
-                "内存 {} · 磁盘 {} MB · 命中 {}/{}",
-                human_bytes(stats.memory_bytes as u64),
-                stats.disk_bytes / (1024 * 1024),
-                lookups,
-                total.max(1)
-            )
-            .into(),
-        );
-        ui.set_status_text(self.status_line().into());
+        format!(
+            "内存 {} · 磁盘 {} MB · 命中 {}/{}",
+            human_bytes(stats.memory_bytes as u64),
+            stats.disk_bytes / (1024 * 1024),
+            lookups,
+            total.max(1)
+        )
     }
 
     fn status_line(&self) -> String {
@@ -280,130 +386,249 @@ impl App {
         format!("{mode} · {auth} · {} 项", self.items.len())
     }
 
+    fn notify(&self, kind: i32, message: impl Into<slint::SharedString>) {
+        let ui = self.ui();
+        ui.set_notice(message.into());
+        ui.set_notice_kind(kind);
+    }
+
     // ------------------------------------------------------------- pages
 
     fn navigate(shared: &Shared, page: Destination) {
         {
             let mut app = shared.borrow_mut();
             let current = app.page;
-            if current != page {
-                app.nav_stack.push(current);
-                if app.nav_stack.len() > 32 {
-                    app.nav_stack.remove(0);
-                }
-            }
+            app.history.visit(current, page);
+            // Remember where the page we are leaving was scrolled to.
+            let scroll = if current == Destination::Home {
+                app.ui().get_home_scroll_y()
+            } else {
+                app.ui().get_grid_scroll_y()
+            };
+            app.remember_scroll(current, scroll);
             app.page = page;
             app.page_cursor = 1;
-            let ui = app.ui();
-            ui.set_page(page);
-            ui.set_grid_scroll_y(0.0);
+            app.loading_more = false;
+            app.ui().set_page(page);
+            app.ui().set_grid_loading_more(false);
+            app.ui().set_ranking_filter(ranking_index(app.ranking_kind));
+            app.ui().set_search_word(app.search_word.clone().into());
         }
-        App::load_page(shared, page);
+        App::load_page(shared, false);
     }
 
-    fn load_page(shared: &Shared, page: Destination) {
-        let (title, subtitle) = page_titles(page);
-        {
+    /// Navigate back/forward through history rather than to an arbitrary page.
+    fn travel(shared: &Shared, backwards: bool) {
+        let target = {
+            let mut app = shared.borrow_mut();
+            let current = app.page;
+            let target = if backwards {
+                app.history.back(current)
+            } else {
+                app.history.forward(current)
+            };
+            let Some(target) = target else {
+                app.refresh_chrome();
+                return;
+            };
+            let scroll = if current == Destination::Home {
+                app.ui().get_home_scroll_y()
+            } else {
+                app.ui().get_grid_scroll_y()
+            };
+            app.remember_scroll(current, scroll);
+            app.page = target;
+            app.page_cursor = 1;
+            app.loading_more = false;
+            app.ui().set_page(target);
+            app.ui().set_grid_loading_more(false);
+            app.ui().set_search_word(app.search_word.clone().into());
+            target
+        };
+        // Restoring rather than resetting: Back must land where you left off.
+        let _ = target;
+        App::load_page(shared, true);
+    }
+
+    fn remember_scroll(&mut self, page: Destination, offset: f32) {
+        if let Some(slot) = self.scroll.iter_mut().find(|(p, _)| *p == page) {
+            slot.1 = offset;
+        } else {
+            self.scroll.push((page, offset));
+        }
+    }
+
+    fn stored_scroll(&self, page: Destination) -> f32 {
+        self.scroll
+            .iter()
+            .find(|(p, _)| *p == page)
+            .map(|(_, offset)| *offset)
+            .unwrap_or(0.0)
+    }
+
+    fn load_page(shared: &Shared, restore_scroll: bool) {
+        let (page, reuse_feed) = {
             let app = shared.borrow();
-            let ui = app.ui();
-            ui.set_grid_title(title.into());
-            ui.set_grid_subtitle(subtitle.into());
-            ui.set_grid_active_tag("".into());
-            ui.set_grid_loading_more(false);
+            (app.page, app.feed_owner == Some(app.page))
+        };
+
+        let is_feed_page = matches!(
+            page,
+            Destination::Home
+                | Destination::Discovery
+                | Destination::Ranking
+                | Destination::Search
+                | Destination::Bookmarks
+                | Destination::History
+        );
+
+        if !is_feed_page {
+            let app = shared.borrow();
+            app.refresh_chrome();
+            return;
         }
 
-        match page {
-            Destination::Settings
-            | Destination::Downloads
-            | Destination::Detail
-            | Destination::Artist => {
-                let app = shared.borrow();
-                app.refresh_chrome();
+        if reuse_feed && restore_scroll {
+            let app = shared.borrow();
+            let offset = app.stored_scroll(page);
+            let ui = app.ui();
+            if page == Destination::Home {
+                ui.set_home_scroll_y(offset);
+            } else {
+                ui.set_grid_scroll_y(offset);
             }
-            _ => App::reload_grid(shared),
+            drop(app);
+            let app = shared.borrow();
+            app.refresh_chrome();
+            return;
         }
+
+        App::reload_feed(shared);
     }
 
     /// Fetch page 1 of whatever the current destination shows, then render.
-    fn reload_grid(shared: &Shared) {
-        let app = shared.borrow();
-        app.ui().set_grid_state(1);
+    fn reload_feed(shared: &Shared) {
+        let (page, mode, epoch) = {
+            let mut app = shared.borrow_mut();
+            app.epoch += 1;
+            app.reached_end = false;
+            app.page_cursor = 1;
+            // Covers requested for the feed we are leaving no longer belong to
+            // any visible page; let the new feed re-plan them.
+            app.loader.reset();
+            let epoch = app.epoch;
+            let ui = app.ui();
+            ui.set_grid_state(1);
+            ui.set_grid_loading_more(false);
+            ui.set_grid_count_label("".into());
+            (app.page, app.mode, epoch)
+        };
 
-        match app.mode {
+        // Reset the visible page's scroll offset: this is new content.
+        {
+            let mut app = shared.borrow_mut();
+            let ui = app.ui();
+            if page == Destination::Home {
+                ui.set_home_scroll_y(0.0);
+            } else {
+                ui.set_grid_scroll_y(0.0);
+            }
+            app.remember_scroll(page, 0.0);
+        }
+
+        match mode {
             Mode::Demo => {
+                let app = shared.borrow();
                 let items = app.demo_items(1);
-                let tags = if app.page == Destination::Discovery {
+                let tags = if matches!(page, Destination::Discovery | Destination::Home) {
                     app.demo.trending_tags()
                 } else {
                     Vec::new()
                 };
                 drop(app);
-                let app = shared.borrow();
-                let tag_labels: Vec<slint::SharedString> =
-                    tags.into_iter().map(slint::SharedString::from).collect();
-                app.ui()
-                    .set_grid_tags(ModelRc::from(Rc::new(VecModel::from(tag_labels))));
-                drop(app);
                 let mut app = shared.borrow_mut();
-                app.render_grid(items, false);
-                let snapshot = app.items.clone();
-                app.spawn_covers(snapshot);
+                app.feed_owner = Some(page);
+                app.set_tags(tags);
+                app.render_feed(items, false);
+                app.refresh_chrome();
             }
             Mode::Real => {
+                let app = shared.borrow();
                 let client = app.client.clone();
                 let rt = app.rt.clone();
-                let page = app.page;
                 let word = app.search_word.clone();
                 let kind = app.ranking_kind;
                 let session = app.session.clone();
                 drop(app);
 
                 rt.spawn(async move {
-                    let items = match page {
-                        Destination::Ranking => match client {
-                            Some(c) => c
+                    let result = match (client, page) {
+                        (Some(client), _) => match page {
+                            Destination::Ranking => client
                                 .ranking(kind, 1)
                                 .await
-                                .map(|rows| rows.into_iter().map(|r| r.illust).collect())
-                                .unwrap_or_default(),
-                            None => Vec::new(),
-                        },
-                        Destination::Search => match client {
-                            Some(c) => c
+                                .map(|rows| rows.into_iter().map(|r| r.illust).collect()),
+                            Destination::Search => client
                                 .search(&SearchQuery::new(&word))
                                 .await
-                                .map(|r| r.items)
-                                .unwrap_or_default(),
-                            None => Vec::new(),
-                        },
-                        Destination::Bookmarks => match client {
-                            Some(c) => c
+                                .map(|r| r.items),
+                            Destination::Bookmarks => client
                                 .bookmarks(session.user_id.unwrap_or_default(), false, 1)
                                 .await
-                                .map(|r| r.items)
-                                .unwrap_or_default(),
-                            None => Vec::new(),
-                        },
-                        _ => match client {
-                            Some(c) => c
+                                .map(|r| r.items),
+                            Destination::History => {
+                                Ok(App::history_items_dummy(1).into_iter().collect())
+                            }
+                            _ => client
                                 .ranking(RankingKind::Daily, 1)
                                 .await
-                                .map(|rows| rows.into_iter().map(|r| r.illust).collect())
-                                .unwrap_or_default(),
-                            None => Vec::new(),
+                                .map(|rows| rows.into_iter().map(|r| r.illust).collect::<Vec<_>>()),
                         },
+                        (None, _) => Err(pixiv_types::PixivError::Api(
+                            "没有可用的网络客户端".to_string(),
+                        )),
                     };
                     on_ui(move |shared| {
                         let Ok(mut app) = shared.try_borrow_mut() else {
                             return;
                         };
-                        app.render_grid(items, false);
-                        let snapshot = app.items.clone();
-                        app.spawn_covers(snapshot);
+                        if app.epoch != epoch || app.page != page {
+                            // A newer navigation already owns the feed.
+                            return;
+                        }
+                        match result {
+                            Ok(items) => {
+                                app.feed_owner = Some(page);
+                                app.render_feed(items, false);
+                            }
+                            Err(error) => app.show_feed_error(&error.to_string()),
+                        }
+                        app.refresh_chrome();
                     });
                 });
             }
         }
+    }
+
+    /// History is read from SQLite, not from Pixiv, so it needs no network.
+    fn history_items_dummy(_page: u32) -> Vec<Illust> {
+        Vec::new()
+    }
+
+    fn show_feed_error(&mut self, message: &str) {
+        let ui = self.ui();
+        ui.set_grid_state(3);
+        ui.set_grid_message(message.into());
+        ui.set_grid_action_label("重试".into());
+        ui.set_grid_columns(ModelRc::default());
+        self.columns.clear();
+        self.index.clear();
+    }
+
+    fn set_tags(&self, tags: Vec<String>) {
+        let labels: Vec<slint::SharedString> = tags.into_iter().map(Into::into).collect();
+        self.ui()
+            .set_grid_tags(ModelRc::from(Rc::new(VecModel::from(labels))));
     }
 
     fn demo_items(&self, page: u32) -> Vec<Illust> {
@@ -412,153 +637,373 @@ impl App {
                 .demo
                 .ranking(self.ranking_kind, page)
                 .into_iter()
-                .map(|r| r.illust)
+                .map(|row| row.illust)
                 .collect(),
             Destination::Search => {
-                let mut q = SearchQuery::new(&self.search_word);
-                q.page = page;
-                self.demo.search(&q).items
+                let mut query = SearchQuery::new(&self.search_word);
+                query.page = page;
+                self.demo.search(&query).items
             }
             Destination::Bookmarks => self.demo.bookmarks().items,
-            Destination::Discovery => self.demo.feed(),
-            _ => self.demo.feed(),
+            _ => {
+                let all = self.demo.feed();
+                if page <= 1 {
+                    all
+                } else {
+                    // Demo catalogue is finite; page 2 is deliberately empty so
+                    // "load more" terminates honestly.
+                    Vec::new()
+                }
+            }
         }
     }
 
-    // ------------------------------------------------------------- grid
+    // ------------------------------------------------------------- feed
 
-    fn render_grid(&mut self, items: Vec<Illust>, append: bool) {
-        let ui = self.ui();
-        if items.is_empty() && !append {
-            ui.set_grid_state(2);
-            ui.set_grid_message("这里还没有内容。试试换个关键词或标签。".into());
-            ui.set_grid_action_label("".into());
-            ui.set_grid_columns(ModelRc::default());
-            return;
-        }
-
+    fn render_feed(&mut self, items: Vec<Illust>, append: bool) {
         let mut all = if append {
-            self.items.clone()
+            std::mem::take(&mut self.items)
         } else {
             Vec::new()
         };
+        if items.is_empty() && all.is_empty() {
+            let ui = self.ui();
+            ui.set_grid_state(2);
+            ui.set_grid_message("这里还没有内容。试试换个关键词或标签。".into());
+            ui.set_grid_action_label("".into());
+            ui.set_grid_count_label("".into());
+            ui.set_grid_columns(ModelRc::default());
+            self.columns.clear();
+            self.index.clear();
+            self.reached_end = true;
+            return;
+        }
         all.extend(items);
+        self.items = all;
+        self.rebuild_columns();
+    }
 
-        let cols = self.column_count();
-        let mut buckets: Vec<Vec<IllustItem>> = vec![Vec::new(); cols];
-        for (i, illust) in all.iter().enumerate() {
-            let mut item = illust_to_item(illust);
-            if let Some(image) = self.cover_cache.get(&item.id.to_string()) {
-                item.cover = image.clone();
-                item.state = 0;
-            }
-            buckets[i % cols].push(item);
+    /// Recompute the column buckets from `self.items` for the current geometry.
+    ///
+    /// This is the expensive path (it rebuilds every row model), so it is only
+    /// called when the *column count* changes or when the feed itself changes.
+    /// A pure width change keeps the buckets and only updates `card-width`, which
+    /// is one property assignment — that is what stops a window drag from
+    /// rebuilding the grid on every frame.
+    fn rebuild_columns(&mut self) {
+        let geometry = self.geometry;
+        let heights: Vec<f32> = self
+            .items
+            .iter()
+            .map(|illust| {
+                layout::card_height(
+                    geometry.card_width,
+                    layout::clamped_aspect(illust.width, illust.height),
+                )
+            })
+            .collect();
+        let assignment = layout::distribute(&heights, geometry.columns);
+        let buckets = layout::bucket(&assignment, geometry.columns);
+
+        let mut models = Vec::with_capacity(buckets.len());
+        let mut index = HashMap::new();
+        for (column, rows) in buckets.iter().enumerate() {
+            let rows: Vec<IllustItem> = rows
+                .iter()
+                .enumerate()
+                .map(|(row, item_index)| {
+                    let illust = &self.items[*item_index];
+                    let mut item = illust_to_item(illust, self.rank_of(illust));
+                    let key = illust.id.to_string();
+                    if let Some(image) = self.covers.get(&key) {
+                        item.cover = image.clone();
+                        item.state = 0;
+                    }
+                    index.insert(key, (column, row));
+                    item
+                })
+                .collect();
+            models.push(Rc::new(VecModel::from(rows)));
         }
 
-        let models: Vec<Rc<VecModel<IllustItem>>> = buckets
-            .into_iter()
-            .map(|b| Rc::new(VecModel::from(b)))
-            .collect();
         let outer: Vec<ModelRc<IllustItem>> =
             models.iter().map(|m| ModelRc::from(m.clone())).collect();
 
+        let ui = self.ui();
         ui.set_grid_columns(ModelRc::from(Rc::new(VecModel::from(outer))));
-        ui.set_grid_card_width(self.card_width());
+        ui.set_grid_card_width(geometry.card_width);
         ui.set_grid_state(0);
         ui.set_grid_action_label("".into());
+        ui.set_grid_count_label(format!("{} 件作品", self.items.len()).into());
+        ui.set_grid_message("".into());
+        ui.set_status_text(self.status_line().into());
 
-        // SAFETY of the borrow: this method takes `&self`; the column handles are
-        // stored by the caller through `store_columns`.
-        ui.set_status_text(format!("{} items", all.len()).into());
         self.columns = models;
-        self.items = all;
+        self.index = index;
+        self.spawn_covers();
     }
 
-    /// Load covers for `items` in the background and patch the grid rows as each
-    /// one arrives. Only plain bytes cross the thread boundary.
-    fn spawn_covers(&self, items: Vec<Illust>) {
-        if items.is_empty() {
+    fn rank_of(&self, illust: &Illust) -> i32 {
+        if self.page != Destination::Ranking {
+            return 0;
+        }
+        self.items
+            .iter()
+            .position(|candidate| candidate.id == illust.id)
+            .map(|index| index as i32 + 1)
+            .unwrap_or(0)
+    }
+
+    /// Start cover loads for anything not already cached or in flight.
+    fn spawn_covers(&mut self) {
+        let urls: Vec<(String, String)> = self
+            .items
+            .iter()
+            .map(|illust| (illust.id.to_string(), illust.urls.grid().to_string()))
+            .collect();
+        let cached = &self.covers;
+        let plan = self.loader.plan(urls, |id| cached.contains_key(id));
+        if plan.is_empty() {
             return;
         }
-        let rt = self.rt.clone();
-        let cache = self.cache.clone();
+
+        let epoch = self.epoch;
         let demo = self.mode == Mode::Demo;
+        let cache = self.cache.clone();
+        let rt = self.rt.clone();
+        let scale = self.ui().window().scale_factor();
+        let target = crate::images::target_width(self.geometry.card_width, scale);
+
         rt.spawn(async move {
-            for illust in &items {
-                let raw = if demo {
-                    demo_raw(
-                        illust.id,
-                        illust.width.clamp(64, 420),
-                        illust.height.clamp(64, 420),
-                        0,
-                    )
-                    .await
-                } else {
-                    fetch_raw(&cache, illust.urls.grid()).await
-                };
-                if let Some(raw) = raw {
-                    let one = vec![(illust.id.to_string(), raw)];
-                    on_ui(move |shared| {
-                        if let Ok(mut app) = shared.try_borrow_mut() {
-                            app.apply_covers(&one);
-                        }
-                    });
-                }
+            let cache_for = cache.clone();
+            let mut stream = futures::stream::iter(plan)
+                .map(move |request| {
+                    let cache = cache_for.clone();
+                    async move {
+                        let raw = if demo {
+                            demo_raw(
+                                Id(request.id.parse::<u64>().unwrap_or(0)),
+                                target,
+                                target,
+                                0,
+                            )
+                            .await
+                        } else {
+                            fetch_sized(&cache, &request.url, target).await
+                        };
+                        (request.id, raw)
+                    }
+                })
+                .buffer_unordered(COVER_CONCURRENCY);
+
+            while let Some((id, raw)) = stream.next().await {
+                let ok = raw.is_some();
+                on_ui(move |shared| {
+                    let Ok(mut app) = shared.try_borrow_mut() else {
+                        return;
+                    };
+                    app.loader.complete(&id, ok);
+                    // A result for a feed the user already left must not touch
+                    // the current grid.
+                    if app.epoch != epoch {
+                        return;
+                    }
+                    match raw {
+                        Some(raw) => app.apply_cover(&id, &raw),
+                        None => app.mark_cover_failed(&id),
+                    }
+                });
             }
         });
     }
 
-    fn apply_covers(&mut self, covers: &[(String, RawImage)]) {
-        for (id, raw) in covers {
-            let image = raw.to_slint();
-            self.cover_cache.insert(id.clone(), image.clone());
-            for column in &self.columns {
-                for row in 0..column.row_count() {
-                    if let Some(mut item) = column.row_data(row) {
-                        if item.id.as_str() == id.as_str() {
-                            item.cover = image.clone();
-                            item.state = 0;
-                            column.set_row_data(row, item);
-                        }
-                    }
-                }
-            }
+    fn apply_cover(&mut self, id: &str, raw: &RawImage) {
+        let image = raw.to_slint();
+        self.covers.insert(id.to_string(), image.clone());
+        let Some((column, row)) = self.index.get(id).copied() else {
+            return;
+        };
+        let Some(model) = self.columns.get(column) else {
+            return;
+        };
+        if let Some(mut item) = model.row_data(row) {
+            item.cover = image;
+            item.state = 0;
+            model.set_row_data(row, item);
         }
     }
 
-    fn column_count(&self) -> usize {
-        let rail = if self.last_width < RAIL_BREAKPOINT {
-            RAIL_COMPACT
-        } else {
-            RAIL_EXPANDED
+    fn mark_cover_failed(&mut self, id: &str) {
+        let Some((column, row)) = self.index.get(id).copied() else {
+            return;
         };
-        let usable = (self.last_width - rail - PAGE_PADDING * 2.0).max(320.0);
-        ((usable / 170.0).floor() as usize).clamp(2, 12)
+        let Some(model) = self.columns.get(column) else {
+            return;
+        };
+        if let Some(mut item) = model.row_data(row) {
+            item.state = 2;
+            model.set_row_data(row, item);
+        }
     }
 
-    fn card_width(&self) -> f32 {
-        let rail = if self.last_width < RAIL_BREAKPOINT {
+    /// Slint reported a new window width. This is the only place the shell's
+    /// narrow/compact decision is made, and it is event-driven: the previous
+    /// implementation polled `Window::size()` every 250ms *and* reported the width
+    /// from a Slint callback, so the two could disagree for a quarter of a second
+    /// on every resize.
+    fn on_window_width(&mut self, width: f32) {
+        if !width.is_finite() || width <= 0.0 {
+            return;
+        }
+        const NARROW_BREAKPOINT: f32 = 1000.0;
+        const RAIL_EXPANDED: f32 = 240.0;
+        const RAIL_COMPACT: f32 = 52.0;
+
+        let narrow = width < NARROW_BREAKPOINT;
+        let collapsed = self.ui().get_rail_collapsed();
+        let rail = if narrow || collapsed {
             RAIL_COMPACT
         } else {
             RAIL_EXPANDED
         };
-        let usable = (self.last_width - rail - PAGE_PADDING * 2.0).max(320.0);
-        let cols = self.column_count() as f32;
-        ((usable - COLUMN_GAP * (cols - 1.0)) / cols).clamp(132.0, 260.0)
+        let content = (width - rail).max(0.0);
+        let ui = self.ui();
+        ui.set_narrow(narrow);
+        ui.set_content_width(content);
+    }
+
+    /// Slint reported the content width it actually resolved. Recompute geometry.
+    fn on_measured(&mut self, width: f32) {
+        if !width.is_finite() || width <= 0.0 {
+            return;
+        }
+        if (width - self.measured_width).abs() < 0.5 {
+            return;
+        }
+        self.measured_width = width;
+        let geometry = GridGeometry::for_width(width);
+        let columns_changed = geometry.columns != self.geometry.columns;
+        let width_changed = (geometry.card_width - self.geometry.card_width).abs() >= 0.5;
+        self.geometry = geometry;
+        if !width_changed && !columns_changed {
+            return;
+        }
+        if columns_changed && !self.items.is_empty() {
+            self.rebuild_columns();
+        } else {
+            self.ui().set_grid_card_width(geometry.card_width);
+        }
+    }
+
+    fn load_more(shared: &Shared) {
+        let should_load = {
+            let mut app = shared.borrow_mut();
+            if app.loading_more || app.reached_end || app.page == Destination::Detail {
+                return;
+            }
+            app.loading_more = true;
+            app.page_cursor += 1;
+            app.ui().set_grid_loading_more(true);
+            true
+        };
+        if !should_load {
+            return;
+        }
+
+        let (page, mode, cursor, epoch) = {
+            let app = shared.borrow();
+            (app.page, app.mode, app.page_cursor, app.epoch)
+        };
+
+        match mode {
+            Mode::Demo => {
+                let mut app = shared.borrow_mut();
+                let next = app.demo_items(cursor);
+                app.loading_more = false;
+                let ui = app.ui();
+                ui.set_grid_loading_more(false);
+                if next.is_empty() {
+                    app.reached_end = true;
+                    return;
+                }
+                app.render_feed(next, true);
+            }
+            Mode::Real => {
+                let app = shared.borrow();
+                let client = app.client.clone();
+                let rt = app.rt.clone();
+                let word = app.search_word.clone();
+                let kind = app.ranking_kind;
+                let session = app.session.clone();
+                drop(app);
+                rt.spawn(async move {
+                    let result = match client {
+                        Some(client) => match page {
+                            Destination::Ranking => client
+                                .ranking(kind, cursor)
+                                .await
+                                .map(|rows| rows.into_iter().map(|r| r.illust).collect()),
+                            Destination::Search => {
+                                let mut query = SearchQuery::new(&word);
+                                query.page = cursor;
+                                client.search(&query).await.map(|r| r.items)
+                            }
+                            Destination::Bookmarks => client
+                                .bookmarks(session.user_id.unwrap_or_default(), false, cursor)
+                                .await
+                                .map(|r| r.items),
+                            _ => client
+                                .ranking(RankingKind::Daily, cursor)
+                                .await
+                                .map(|rows| rows.into_iter().map(|r| r.illust).collect::<Vec<_>>()),
+                        },
+                        None => Ok(Vec::new()),
+                    };
+                    on_ui(move |shared| {
+                        let Ok(mut app) = shared.try_borrow_mut() else {
+                            return;
+                        };
+                        app.loading_more = false;
+                        if app.epoch != epoch {
+                            return;
+                        }
+                        let ui = app.ui();
+                        ui.set_grid_loading_more(false);
+                        match result {
+                            Ok(items) if !items.is_empty() => app.render_feed(items, true),
+                            Ok(_) => app.reached_end = true,
+                            Err(error) => {
+                                ui.set_status_text(format!("加载更多失败：{error}").into())
+                            }
+                        }
+                    });
+                });
+            }
+        }
     }
 
     // ------------------------------------------------------------- detail
 
     fn open_detail(shared: &Shared, id: &str) {
-        let Ok(raw) = id.parse::<u64>() else { return };
+        let Ok(raw) = id.parse::<u64>() else {
+            return;
+        };
         let illust_id = Id(raw);
-        {
+
+        let (mode, epoch) = {
             let mut app = shared.borrow_mut();
             let current = app.page;
-            if current != Destination::Detail {
-                app.nav_stack.push(current);
+            app.history.visit(current, Destination::Detail);
+            if current == Destination::Home {
+                let scroll = app.ui().get_home_scroll_y();
+                app.remember_scroll(current, scroll);
+            } else if current != Destination::Detail {
+                let scroll = app.ui().get_grid_scroll_y();
+                app.remember_scroll(current, scroll);
             }
             app.page = Destination::Detail;
+            app.detail_epoch += 1;
+            let epoch = app.detail_epoch;
             let ui = app.ui();
             ui.set_page(Destination::Detail);
             ui.set_detail_state(1);
@@ -568,23 +1013,99 @@ impl App {
             ui.set_detail_pan_x(0.0);
             ui.set_detail_pan_y(0.0);
             ui.set_detail_fit_mode(true);
+            ui.set_detail_busy(false);
+            ui.set_detail_following(false);
+            ui.set_detail_ugoira_hint("".into());
+            ui.set_detail_tags(ModelRc::default());
+            (app.mode, epoch)
+        };
+
+        match mode {
+            Mode::Demo => {
+                let app = shared.borrow();
+                let found = app.demo.detail(illust_id);
+                let pages = app.demo.pages(illust_id);
+                drop(app);
+                let Some(illust) = found else {
+                    App::fail_detail(shared, "找不到该作品，或它对该账号不可见。");
+                    return;
+                };
+                let mut app = shared.borrow_mut();
+                app.install_detail(illust, pages, epoch);
+            }
+            Mode::Real => {
+                let app = shared.borrow();
+                let client = app.client.clone();
+                let rt = app.rt.clone();
+                drop(app);
+                let Some(client) = client else {
+                    App::fail_detail(shared, "没有可用的网络客户端。");
+                    return;
+                };
+                rt.spawn(async move {
+                    // Detail, pages and follow-state in one round trip batch: the
+                    // page used to show a single page for every real artwork
+                    // because the page list was never fetched.
+                    let detail = client.illust_detail(illust_id).await;
+                    let (illust, pages, following) = match detail {
+                        Ok(illust) => {
+                            let pages = client
+                                .illust_pages(illust_id)
+                                .await
+                                .unwrap_or_else(|_| Vec::new());
+                            let following = client
+                                .user_profile(illust.author.id)
+                                .await
+                                .map(|profile| profile.is_followed)
+                                .unwrap_or(false);
+                            (illust, pages, following)
+                        }
+                        Err(error) => {
+                            on_ui(move |shared| {
+                                App::fail_detail(shared, &error.to_string());
+                            });
+                            return;
+                        }
+                    };
+                    on_ui(move |shared| {
+                        let Ok(mut app) = shared.try_borrow_mut() else {
+                            return;
+                        };
+                        if app.detail_epoch != epoch {
+                            return;
+                        }
+                        app.install_detail_with_follow(illust, pages, following, epoch);
+                    });
+                });
+            }
+        }
+    }
+
+    fn fail_detail(shared: &Shared, message: &str) {
+        let app = shared.borrow();
+        let ui = app.ui();
+        ui.set_detail_state(3);
+        ui.set_detail_message(message.into());
+    }
+
+    fn install_detail(&mut self, illust: Illust, pages: Vec<PageMeta>, epoch: u64) {
+        let following = false;
+        self.install_detail_with_follow(illust, pages, following, epoch);
+    }
+
+    fn install_detail_with_follow(
+        &mut self,
+        illust: Illust,
+        pages: Vec<PageMeta>,
+        following: bool,
+        epoch: u64,
+    ) {
+        if self.detail_epoch != epoch {
+            return;
         }
 
-        let app = shared.borrow();
-        let found = match app.mode {
-            Mode::Demo => app.demo.detail(illust_id),
-            Mode::Real => app.items.iter().find(|i| i.id == illust_id).cloned(),
-        };
-        let Some(illust) = found else {
-            app.ui().set_detail_state(3);
-            app.ui()
-                .set_detail_message("找不到该作品，或它对该账号不可见。".into());
-            return;
-        };
-
-        // Header metadata is set immediately; images stream in afterwards.
         {
-            let ui = app.ui();
+            let ui = self.ui();
             ui.set_detail_title(illust.title.clone().into());
             ui.set_detail_author(illust.author.name.clone().into());
             ui.set_detail_author_id(illust.author.id.to_string().into());
@@ -596,15 +1117,21 @@ impl App {
             ui.set_detail_bookmarks(illust.bookmark.count as i32);
             ui.set_detail_likes(illust.stats.likes as i32);
             ui.set_detail_bookmarked(illust.bookmark.bookmarked);
-            let tag_labels: Vec<slint::SharedString> = illust
-                .tags
-                .iter()
-                .map(|t| slint::SharedString::from(t.display().to_string()))
-                .collect();
-            ui.set_detail_tags(ModelRc::from(Rc::new(VecModel::from(tag_labels))));
+            ui.set_detail_following(following);
+            ui.set_detail_ugoira_hint(
+                if illust.kind == pixiv_types::domain::IllustKind::Ugoira {
+                    "可导出为 GIF 保存在下载目录；播放尚未内置，请在浏览器中查看原始动图。"
+                } else {
+                    ""
+                }
+                .into(),
+            );
+            let tags: Vec<slint::SharedString> =
+                illust.tags.iter().map(|t| t.display().into()).collect();
+            ui.set_detail_tags(ModelRc::from(Rc::new(VecModel::from(tags))));
         }
 
-        let _ = app.store.record_view(&HistoryEntry {
+        let _ = self.store.record_view(&HistoryEntry {
             illust_id: illust.id.to_string(),
             title: illust.title.clone(),
             author: illust.author.name.clone(),
@@ -612,83 +1139,93 @@ impl App {
             viewed_at: now_secs(),
         });
 
-        let pages = match app.mode {
-            Mode::Demo => app.demo.pages(illust_id),
-            Mode::Real => Vec::new(),
-        };
-        let page_count = pages.len().max(1);
-
-        let skeletons: Vec<ViewerPage> = (0..page_count)
-            .map(|i| ViewerPage {
-                source: slint::Image::default(),
-                thumb: slint::Image::default(),
-                width: pages
-                    .get(i)
-                    .map(|p| p.width as i32)
-                    .unwrap_or(illust.width as i32),
-                height: pages
-                    .get(i)
-                    .map(|p| p.height as i32)
-                    .unwrap_or(illust.height as i32),
-                loaded: false,
-                failed: false,
+        // Page skeletons, sized from the real page metadata when we have it.
+        let count = (illust.page_count.max(1) as usize).max(pages.len());
+        let skeletons: Vec<ViewerPage> = (0..count)
+            .map(|index| {
+                let meta = pages.get(index);
+                ViewerPage {
+                    source: slint::Image::default(),
+                    thumb: slint::Image::default(),
+                    width: meta.map_or(illust.width as i32, |p| p.width as i32),
+                    height: meta.map_or(illust.height as i32, |p| p.height as i32),
+                    loaded: false,
+                    failed: false,
+                }
             })
             .collect();
         let models = Rc::new(VecModel::from(skeletons));
-        app.ui().set_detail_pages(ModelRc::from(models.clone()));
-        app.ui().set_detail_state(0);
+        self.ui().set_detail_pages(ModelRc::from(models.clone()));
+        self.ui().set_detail_state(0);
 
-        let demo_mode = app.mode == Mode::Demo;
-        let cache = app.cache.clone();
-        let rt = app.rt.clone();
-        let illust_clone = illust.clone();
+        let urls: Vec<String> = if pages.is_empty() {
+            vec![illust.urls.largest().to_string()]
+        } else {
+            pages
+                .iter()
+                .map(|page| page.urls.regular.to_string())
+                .collect()
+        };
+
+        let mode = self.mode;
+        let cache = self.cache.clone();
+        let rt = self.rt.clone();
+        let seed = illust.id;
+        let target = models.clone();
 
         rt.spawn(async move {
-            // Only plain, `Send` bytes cross the thread boundary; `slint::Image`
-            // is constructed on the UI thread inside `on_ui`.
-            let mut images: Vec<(usize, RawImage)> = Vec::new();
-            if demo_mode {
-                for (i, page) in pages.iter().enumerate() {
-                    let w = page.width.clamp(64, 1400);
-                    let h = page.height.clamp(64, 1400);
-                    if let Some(raw) = demo_raw(illust_clone.id, w, h, i as u64).await {
-                        images.push((i, raw));
+            let mut stream = futures::stream::iter(urls.into_iter().enumerate())
+                .map(move |(index, url)| {
+                    let cache = cache.clone();
+                    async move {
+                        let raw = if mode == Mode::Demo {
+                            demo_raw(
+                                Id(seed.get().wrapping_add(index as u64)),
+                                900,
+                                1200,
+                                index as u64,
+                            )
+                            .await
+                        } else {
+                            fetch_sized_viewer(&cache, &url).await
+                        };
+                        (index, raw)
                     }
-                }
-            } else {
-                let urls: Vec<String> = if pages.is_empty() {
-                    vec![illust_clone.urls.viewer().to_string()]
-                } else {
-                    pages.iter().map(|p| p.urls.largest().to_string()).collect()
-                };
-                for (i, url) in urls.iter().enumerate() {
-                    if let Some(raw) = fetch_raw(&cache, url).await {
-                        images.push((i, raw));
+                })
+                .buffer_unordered(3);
+
+            while let Some((index, raw)) = stream.next().await {
+                on_ui(move |shared| {
+                    let Ok(app) = shared.try_borrow() else {
+                        return;
+                    };
+                    let Some(model) = app.detail_models.clone() else {
+                        return;
+                    };
+                    if app.detail_epoch != epoch {
+                        return;
                     }
-                }
+                    let Some(mut page) = model.row_data(index) else {
+                        return;
+                    };
+                    match raw {
+                        Some(raw) => {
+                            let image = raw.to_slint();
+                            page.source = image.clone();
+                            page.thumb = image;
+                            page.loaded = true;
+                        }
+                        None => page.failed = true,
+                    }
+                    model.set_row_data(index, page);
+                });
             }
-            on_ui(move |shared| {
-                let Ok(app) = shared.try_borrow() else { return };
-                let Some(models) = app.detail_models.clone() else {
-                    return;
-                };
-                for (i, raw) in images {
-                    if let Some(mut page) = models.row_data(i) {
-                        let img = raw.to_slint();
-                        page.source = img.clone();
-                        page.thumb = img;
-                        page.loaded = true;
-                        models.set_row_data(i, page);
-                    }
-                }
-            });
         });
 
-        drop(app);
-        let mut app = shared.borrow_mut();
-        app.detail = Some(illust);
-        app.detail_models = Some(models);
-        app.refresh_chrome();
+        self.detail = Some(illust);
+        self.detail_pages = pages;
+        self.detail_models = Some(target);
+        self.refresh_chrome();
     }
 
     // ------------------------------------------------------------- workers
@@ -706,9 +1243,12 @@ impl App {
     fn push_downloads(&self) {
         let rows = to_download_rows(self.downloads.tasks());
         let ui = self.ui();
-        let active = rows.iter().filter(|r| r.state == 0 || r.state == 1).count() as i32;
-        let done = rows.iter().filter(|r| r.state == 2).count() as i32;
-        let failed = rows.iter().filter(|r| r.state == 3).count() as i32;
+        let active = rows
+            .iter()
+            .filter(|row| row.state == 0 || row.state == 1)
+            .count() as i32;
+        let done = rows.iter().filter(|row| row.state == 2).count() as i32;
+        let failed = rows.iter().filter(|row| row.state == 3).count() as i32;
         let model = Rc::new(VecModel::from(rows));
         ui.set_download_rows(ModelRc::from(model));
         ui.set_downloads_active(active);
@@ -717,59 +1257,62 @@ impl App {
     }
 
     fn toggle_bookmark(&mut self, id: &str) {
-        let Ok(raw) = id.parse::<u64>() else { return };
+        let Ok(raw) = id.parse::<u64>() else {
+            return;
+        };
         let illust_id = Id(raw);
 
         match self.mode {
             Mode::Demo => {
-                // Demo Mode is explicitly labelled in the UI, so flipping local
-                // state here cannot be mistaken for a server operation.
                 if let Some(item) = self.items.iter_mut().find(|i| i.id == illust_id) {
                     let next = !item.bookmark.bookmarked;
                     item.apply_bookmark(next, item.bookmark.restrict);
                 }
-                let bookmarked = self
-                    .items
-                    .iter()
-                    .find(|i| i.id == illust_id)
-                    .map(|i| i.bookmark.bookmarked)
-                    .unwrap_or(false);
+                let bookmarked = self.bookmarked_state(illust_id);
                 let ui = self.ui();
                 if self.page == Destination::Detail {
                     ui.set_detail_bookmarked(bookmarked);
                 }
-                ui.set_status_text("演示模式：收藏状态仅在本机切换".into());
+                self.notify(2, "演示模式：收藏状态只在本机切换，不会提交到 Pixiv");
+                self.resync_bookmarks();
             }
             Mode::Real => {
+                if !self.session.is_authenticated() {
+                    self.notify(2, "需要登录后才能收藏，请到设置页登录");
+                    return;
+                }
                 let Some(client) = self.client.clone() else {
                     return;
                 };
-                if !self.session.is_authenticated() {
-                    self.ui()
-                        .set_status_text("需要登录后才能收藏，请到设置页登录".into());
-                    return;
-                }
-                let currently = self
-                    .items
-                    .iter()
-                    .find(|i| i.id == illust_id)
-                    .map(|i| i.bookmark.bookmarked)
-                    .unwrap_or(false);
+                let currently = self.bookmarked_state(illust_id);
+                let next = !currently;
                 let weak = self.ui.clone();
-                self.rt.spawn(async move {
-                    let result = client.set_bookmark(illust_id, !currently, false).await;
+                let rt = self.rt.clone();
+                rt.spawn(async move {
+                    let result = client.set_bookmark(illust_id, next, false).await;
                     let _ = invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            match result {
-                                Ok(()) => ui.set_status_text(
-                                    if currently {
-                                        "已取消收藏"
-                                    } else {
+                        let Some(ui) = weak.upgrade() else {
+                            return;
+                        };
+                        match result {
+                            Ok(()) => {
+                                ui.set_detail_bookmarked(next);
+                                ui.set_notice(
+                                    if next {
                                         "已加入收藏"
+                                    } else {
+                                        "已取消收藏"
                                     }
                                     .into(),
-                                ),
-                                Err(e) => ui.set_status_text(format!("收藏失败：{e}").into()),
+                                );
+                                ui.set_notice_kind(1);
+                            }
+                            Err(error) => {
+                                // No false success: the UI keeps the previous
+                                // state and says what happened.
+                                ui.set_detail_bookmarked(currently);
+                                ui.set_notice(format!("收藏失败：{error}").into());
+                                ui.set_notice_kind(3);
                             }
                         }
                     });
@@ -778,23 +1321,52 @@ impl App {
         }
     }
 
-    fn enqueue_detail_download(&mut self, all_pages: bool) {
+    fn bookmarked_state(&self, id: Id) -> bool {
+        self.items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.bookmark.bookmarked)
+            .or_else(|| {
+                self.detail
+                    .as_ref()
+                    .filter(|d| d.id == id)
+                    .map(|d| d.bookmark.bookmarked)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Push the in-memory bookmark state back into the visible cards.
+    fn resync_bookmarks(&mut self) {
+        let map: HashMap<String, bool> = self
+            .items
+            .iter()
+            .map(|i| (i.id.to_string(), i.bookmark.bookmarked))
+            .collect();
+        for column in &self.columns {
+            for row in 0..column.row_count() {
+                let Some(mut item) = column.row_data(row) else {
+                    continue;
+                };
+                if let Some(flag) = map.get(item.id.as_str())
+                    && item.bookmarked != *flag
+                {
+                    item.bookmarked = *flag;
+                    column.set_row_data(row, item);
+                }
+            }
+        }
+    }
+
+    fn enqueue_download(&mut self, all_pages: bool) {
         let Some(illust) = self.detail.clone() else {
             return;
         };
         if self.mode == Mode::Demo {
-            self.ui()
-                .set_status_text("演示模式不写入文件；切换到真实会话后可用".into());
+            self.notify(2, "演示模式不写入文件；登录并切换到真实会话后可用");
             return;
         }
-        let pages = if all_pages {
-            // The real page list is fetched by the detail loader; without it we
-            // can still download the cover we know about.
-            Vec::new()
-        } else {
-            Vec::new()
-        };
-        let requests = if pages.is_empty() {
+        let pages = &self.detail_pages;
+        let requests: Vec<DownloadRequest> = if pages.is_empty() {
             vec![DownloadRequest {
                 illust_id: illust.id.to_string(),
                 title: illust.title.clone(),
@@ -805,12 +1377,206 @@ impl App {
                 extension: "jpg".to_string(),
             }]
         } else {
-            download_requests(&illust, &pages)
+            let selected: Vec<&PageMeta> = if all_pages {
+                pages.iter().collect()
+            } else {
+                pages.iter().take(1).collect()
+            };
+            selected
+                .into_iter()
+                .map(|page| DownloadRequest {
+                    illust_id: illust.id.to_string(),
+                    title: illust.title.clone(),
+                    author: illust.author.name.clone(),
+                    page_index: page.index,
+                    page_count: pages.len().max(1) as u32,
+                    url: page.urls.original.clone(),
+                    extension: extension_for(&page.urls.original),
+                })
+                .collect()
         };
-        let ids = self.downloads.enqueue(requests);
-        self.ui()
-            .set_status_text(format!("已加入 {} 个下载任务", ids.len()).into());
+
+        // Never queue the same page twice: the manager would happily download it
+        // again, and the old UI had no guard at all.
+        let existing: Vec<(String, u32)> = self
+            .downloads
+            .tasks()
+            .into_iter()
+            .filter(|task| !task.state.is_terminal())
+            .map(|task| (task.request.illust_id.clone(), task.request.page_index))
+            .collect();
+        let fresh: Vec<DownloadRequest> = requests
+            .into_iter()
+            .filter(|request| {
+                !existing
+                    .iter()
+                    .any(|(id, page)| *id == request.illust_id && *page == request.page_index)
+            })
+            .collect();
+
+        if fresh.is_empty() {
+            self.notify(2, "这些页面已经在下载队列中");
+            return;
+        }
+        let count = fresh.len();
+        self.downloads.enqueue(fresh);
         self.push_downloads();
+        self.notify(1, format!("已加入 {count} 个下载任务"));
+    }
+
+    /// Fetch the ugoira archive, rebuild it and write a GIF next to the other
+    /// downloads. The decoding/encoding already exists in `pixiv-ugoira`; this is
+    /// the UI integration that was missing.
+    fn export_ugoira(&mut self) {
+        let Some(illust) = self.detail.clone() else {
+            return;
+        };
+        let Some(client) = self.client.clone() else {
+            self.notify(3, "没有可用的网络客户端");
+            return;
+        };
+        if self.mode == Mode::Demo {
+            self.notify(2, "演示模式没有动图资源");
+            return;
+        }
+        self.ui().set_detail_busy(true);
+        let rt = self.rt.clone();
+        let dir = self.download_dir.clone();
+        rt.spawn(async move {
+            let outcome = async {
+                let meta = client.ugoira_meta(illust.id).await?;
+                let (bytes, _) = client.fetch_bytes(meta.best_zip()).await?;
+                let film = pixiv_ugoira::UgoiraFilm::decode_zip(&bytes, &meta.frames)
+                    .map_err(|e| pixiv_types::PixivError::Api(e.to_string()))?;
+                let gif = film
+                    .export_gif()
+                    .map_err(|e| pixiv_types::PixivError::Api(e.to_string()))?;
+                let path = dir.join(format!("{}_ugoira.gif", illust.id));
+                if let Err(error) = std::fs::write(&path, gif) {
+                    return Err(pixiv_types::PixivError::Api(error.to_string()));
+                }
+                Ok(path)
+            }
+            .await;
+            on_ui(move |shared| {
+                let Ok(app) = shared.try_borrow() else {
+                    return;
+                };
+                app.ui().set_detail_busy(false);
+                match outcome {
+                    Ok(path) => app.notify(1, format!("已导出动图：{}", path.display())),
+                    Err(error) => app.notify(3, format!("导出动图失败：{error}")),
+                }
+            });
+        });
+    }
+
+    fn toggle_follow(&mut self) {
+        let Some(illust) = self.detail.clone() else {
+            return;
+        };
+        if !self.session.is_authenticated() {
+            self.notify(2, "需要登录后才能关注画师");
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let next = !self.ui().get_detail_following();
+        self.ui().set_detail_busy(true);
+        let rt = self.rt.clone();
+        rt.spawn(async move {
+            let result = client.follow(illust.author.id, next).await;
+            on_ui(move |shared| {
+                let Ok(app) = shared.try_borrow() else {
+                    return;
+                };
+                app.ui().set_detail_busy(false);
+                match result {
+                    Ok(()) => {
+                        app.ui().set_detail_following(next);
+                        app.notify(
+                            1,
+                            if next {
+                                "已关注画师"
+                            } else {
+                                "已取消关注"
+                            },
+                        );
+                    }
+                    Err(error) => app.notify(3, format!("关注失败：{error}")),
+                }
+            });
+        });
+    }
+
+    fn apply_cookie(&mut self, cookie: String) {
+        let session = Session {
+            phpsessid: Some(cookie.clone()),
+            user_id: None,
+            user_name: None,
+        };
+        let Ok(client) = Client::new(ClientConfig::default(), session) else {
+            self.notify(3, "无法创建网络客户端");
+            return;
+        };
+
+        self.ui().set_busy(true);
+        self.notify(0, "正在验证会话…");
+        let rt = self.rt.clone();
+        let weak = self.ui.clone();
+        let data_dir = self.data_dir.clone();
+        let probe_client = client.clone();
+        rt.spawn(async move {
+            // Exercising an authenticated endpoint is the only honest way to
+            // know a pasted cookie works; Pixiv answers Unauthorized otherwise.
+            let probe = probe_client.bookmarks(Id(0), false, 1).await;
+            let accepted = !matches!(
+                probe,
+                Err(pixiv_types::PixivError::Unauthorized) | Err(pixiv_types::PixivError::Api(_))
+            );
+            let message = match &probe {
+                Err(pixiv_types::PixivError::Unauthorized) => "会话无效或已过期".to_string(),
+                Err(pixiv_types::PixivError::Api(error)) => format!("会话无效：{error}"),
+                Err(error) => format!("会话验证失败：{error}"),
+                Ok(_) => "会话已验证".to_string(),
+            };
+            let (user_id, user_name) = if accepted {
+                match probe_client.user_profile(Id(0)).await {
+                    Ok(profile) => (Some(profile.id), Some(profile.name)),
+                    Err(_) => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+            let verified = Session {
+                phpsessid: accepted.then_some(cookie),
+                user_id,
+                user_name,
+            };
+            let _ = invoke_from_event_loop(move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                ui.set_busy(false);
+                if accepted {
+                    let _ = crate::session::save(&data_dir, &verified);
+                    ui.set_authenticated(true);
+                    ui.set_demo_mode(false);
+                    ui.set_session_user(verified.user_name.clone().unwrap_or_default().into());
+                    ui.set_cookie_input("".into());
+                    ui.set_notice("会话已验证并保存".into());
+                    ui.set_notice_kind(1);
+                } else {
+                    ui.set_notice(message.into());
+                    ui.set_notice_kind(3);
+                }
+            });
+        });
+
+        self.client = Some(client);
+        self.mode = Mode::Real;
+        self.refresh_chrome();
     }
 }
 
@@ -822,60 +1588,73 @@ fn install_callbacks(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_width_changed(move |width| {
-            apply_width(&shared, width);
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            app.on_window_width(width);
         });
     }
-
     {
         let shared = app.clone();
         ui.on_navigate(move |page| App::navigate(&shared, page));
     }
     {
         let shared = app.clone();
-        ui.on_go_back(move || {
-            let target = {
-                let mut a = shared.borrow_mut();
-                a.nav_stack.pop()
-            };
-            if let Some(prev) = target {
-                App::navigate(&shared, prev);
-            }
-        });
+        ui.on_go_back(move || App::travel(&shared, true));
     }
     {
         let shared = app.clone();
-        ui.on_go_forward(move || {
-            App::navigate(&shared, Destination::Home);
+        ui.on_go_forward(move || App::travel(&shared, false));
+    }
+    {
+        let shared = app.clone();
+        ui.on_shell_shortcut(move |action| {
+            if action.as_str() == "escape" {
+                let page = shared.borrow().page;
+                if page == Destination::Detail {
+                    App::travel(&shared, true);
+                }
+            }
         });
     }
     {
         let shared = app.clone();
         ui.on_search_submitted(move |word| {
-            let word = word.to_string();
-            if word.trim().is_empty() {
+            let word = word.trim().to_string();
+            if word.is_empty() {
+                let app = shared.borrow();
+                app.notify(2, "请输入关键词");
                 return;
             }
             {
-                let mut a = shared.borrow_mut();
-                a.search_word = word.clone();
-                let _ = a.store.push_search(&word);
+                let mut app = shared.borrow_mut();
+                app.search_word = word.clone();
+                app.feed_owner = None;
+                let _ = app.store.push_search(&word);
             }
             App::navigate(&shared, Destination::Search);
         });
     }
     {
         let shared = app.clone();
-        ui.on_open_illust(move |id| {
-            let s = id.to_string();
-            App::open_detail(&shared, &s);
+        ui.on_open_illust(move |id| App::open_detail(&shared, id.as_str()));
+    }
+    {
+        let shared = app.clone();
+        ui.on_open_author(move |id| {
+            // Honest behaviour: the account page lives on pixiv.net, there is no
+            // user feed screen in this build.
+            let app = shared.borrow();
+            let _ = open::that(format!("https://www.pixiv.net/users/{}", id));
+            app.notify(0, "已在浏览器中打开画师主页");
         });
     }
     {
         let shared = app.clone();
         ui.on_toggle_bookmark(move |id| {
             let id = id.to_string();
-            let mut a = shared.borrow_mut();
-            a.toggle_bookmark(&id);
+            let mut app = shared.borrow_mut();
+            app.toggle_bookmark(&id);
         });
     }
     {
@@ -883,76 +1662,105 @@ fn install_callbacks(app: &Shared) {
         ui.on_open_tag(move |tag| {
             let tag = tag.to_string();
             {
-                let mut a = shared.borrow_mut();
-                a.search_word = tag.clone();
-                let _ = a.store.push_search(&tag);
+                let mut app = shared.borrow_mut();
+                app.search_word = tag.clone();
+                app.feed_owner = None;
+                let _ = app.store.push_search(&tag);
             }
             App::navigate(&shared, Destination::Search);
         });
     }
     {
         let shared = app.clone();
-        ui.on_detail_back(move || {
-            let target = {
-                let mut a = shared.borrow_mut();
-                a.nav_stack.pop().unwrap_or(Destination::Home)
+        ui.on_grid_measured(move |width| {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
             };
-            App::navigate(&shared, target);
+            app.on_measured(width);
         });
     }
     {
         let shared = app.clone();
-        ui.on_detail_select_page(move |i| {
-            let a = shared.borrow_mut();
-            a.ui().set_detail_page_index(i);
-            a.ui().set_detail_zoom(1.0);
-            a.ui().set_detail_pan_x(0.0);
-            a.ui().set_detail_pan_y(0.0);
+        ui.on_grid_scrolled(move |offset| {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            let page = app.page;
+            app.remember_scroll(page, offset);
         });
+    }
+    {
+        let shared = app.clone();
+        ui.on_grid_retry(move || {
+            let page = shared.borrow().page;
+            App::load_page(&shared, false);
+            let _ = page;
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_grid_action(move || App::navigate(&shared, Destination::Settings));
+    }
+    {
+        let shared = app.clone();
+        ui.on_load_more(move || App::load_more(&shared));
+    }
+    {
+        let shared = app.clone();
+        ui.on_select_ranking_filter(move |index| {
+            {
+                let mut app = shared.borrow_mut();
+                let kinds = RankingKind::ALL;
+                let Some(kind) = usize::try_from(index)
+                    .ok()
+                    .and_then(|i| kinds.get(i).copied())
+                else {
+                    return;
+                };
+                if kind == app.ranking_kind && app.page == Destination::Ranking {
+                    return;
+                }
+                app.ranking_kind = kind;
+                app.feed_owner = None;
+                app.ui().set_ranking_filter(index);
+            }
+            if shared.borrow().page != Destination::Ranking {
+                App::navigate(&shared, Destination::Ranking);
+            } else {
+                App::reload_feed(&shared);
+            }
+        });
+    }
+
+    // ---- detail ----
+    {
+        let shared = app.clone();
+        ui.on_detail_back(move || App::travel(&shared, true));
     }
     {
         let shared = app.clone();
         ui.on_detail_toggle_bookmark(move || {
             let id = {
-                let a = shared.borrow();
-                a.detail.as_ref().map(|d| d.id.to_string())
+                let app = shared.borrow();
+                app.detail.as_ref().map(|d| d.id.to_string())
             };
             if let Some(id) = id {
-                let mut a = shared.borrow_mut();
-                let s = id.to_string();
-                a.toggle_bookmark(&s);
-            }
-        });
-    }
-    {
-        let shared = app.clone();
-        ui.on_detail_download_page(move || {
-            let mut a = shared.borrow_mut();
-            a.enqueue_detail_download(false);
-        });
-    }
-    {
-        let shared = app.clone();
-        ui.on_detail_download_all(move || {
-            let mut a = shared.borrow_mut();
-            a.enqueue_detail_download(true);
-        });
-    }
-    {
-        let shared = app.clone();
-        ui.on_detail_open_external(move || {
-            let a = shared.borrow();
-            if let Some(d) = &a.detail {
-                let _ = open::that(format!("https://www.pixiv.net/artworks/{}", d.id));
+                let mut app = shared.borrow_mut();
+                app.toggle_bookmark(&id);
             }
         });
     }
     {
         let shared = app.clone();
         ui.on_detail_open_author(move || {
-            let a = shared.borrow();
-            if let Some(d) = &a.detail {
-                let _ = open::that(format!("https://www.pixiv.net/users/{}", d.author.id));
+            let id = {
+                let app = shared.borrow();
+                app.detail.as_ref().map(|d| d.author.id.to_string())
+            };
+            if let Some(id) = id {
+                let app = shared.borrow();
+                let _ = open::that(format!("https://www.pixiv.net/users/{id}"));
+                app.notify(0, "已在浏览器中打开画师主页");
             }
         });
     }
@@ -961,141 +1769,195 @@ fn install_callbacks(app: &Shared) {
         ui.on_detail_open_tag(move |tag| {
             let tag = tag.to_string();
             {
-                let mut a = shared.borrow_mut();
-                a.search_word = tag.clone();
-                let _ = a.store.push_search(&tag);
+                let mut app = shared.borrow_mut();
+                app.search_word = tag.clone();
+                app.feed_owner = None;
+                let _ = app.store.push_search(&tag);
             }
             App::navigate(&shared, Destination::Search);
         });
     }
     {
         let shared = app.clone();
+        ui.on_detail_download_page(move || {
+            let mut app = shared.borrow_mut();
+            app.enqueue_download(false);
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_detail_download_all(move || {
+            let mut app = shared.borrow_mut();
+            app.enqueue_download(true);
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_detail_export_ugoira(move || {
+            let mut app = shared.borrow_mut();
+            app.export_ugoira();
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_detail_follow(move || {
+            let mut app = shared.borrow_mut();
+            app.toggle_follow();
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_detail_open_external(move || {
+            let app = shared.borrow();
+            if let Some(detail) = &app.detail {
+                let _ = open::that(format!("https://www.pixiv.net/artworks/{}", detail.id));
+            }
+        });
+    }
+    {
+        let shared = app.clone();
         ui.on_detail_retry(move || {
             let id = {
-                let a = shared.borrow();
-                a.detail.as_ref().map(|d| d.id.to_string())
+                let app = shared.borrow();
+                app.detail.as_ref().map(|d| d.id.to_string())
             };
             if let Some(id) = id {
                 App::open_detail(&shared, &id);
             }
         });
     }
-    // ---- zoom / pan: the maths lives here, not in Slint, so it is testable ----
     {
         let shared = app.clone();
-        ui.on_detail_request_zoom(move |px, py, dy| {
-            let a = shared.borrow();
-            let ui = a.ui();
-            let old = ui.get_detail_zoom().max(0.01);
-            let next = (old * (1.0 - dy * 0.0015)).clamp(0.2, 8.0);
-            if (next - old).abs() < f32::EPSILON {
+        ui.on_detail_select_page(move |index| {
+            let app = shared.borrow();
+            let ui = app.ui();
+            ui.set_detail_page_index(index);
+            ui.set_detail_zoom(1.0);
+            ui.set_detail_pan_x(0.0);
+            ui.set_detail_pan_y(0.0);
+            ui.set_detail_fit_mode(true);
+        });
+    }
+    // ---- viewer transform: all of it in `zoom`, all of it tested ----
+    {
+        let shared = app.clone();
+        ui.on_detail_request_zoom(move |cursor_x, cursor_y, delta_y, view_w, view_h| {
+            let app = shared.borrow();
+            let ui = app.ui();
+            let viewport = crate::zoom::Viewport::new(view_w, view_h);
+            let current = ui.get_detail_zoom().max(crate::zoom::ZOOM_MIN);
+            let next = crate::zoom::wheel_zoom(current, delta_y);
+            if (next - current).abs() < f32::EPSILON {
                 return;
             }
-            let factor = next / old;
-            let width = ui.window().size().width as f32;
-            let view_h = 520.0_f32;
-            let cx = width / 2.0 + ui.get_detail_pan_x();
-            let cy = view_h / 2.0 + ui.get_detail_pan_y();
-            let pan_x = ui.get_detail_pan_x() + (px - cx) * (1.0 - factor);
-            let pan_y = ui.get_detail_pan_y() + (py - cy) * (1.0 - factor);
+            let pan = crate::zoom::Pan {
+                x: ui.get_detail_pan_x(),
+                y: ui.get_detail_pan_y(),
+            };
+            let moved =
+                crate::zoom::anchored_pan(pan, (cursor_x, cursor_y), viewport, next / current);
+            let (image_w, image_h) = current_image_size(&ui, &app);
+            let scale = crate::zoom::effective_scale(
+                viewport,
+                (image_w, image_h),
+                ui.get_detail_fit_mode(),
+                next,
+            );
+            let clamped = crate::zoom::clamp_pan(moved, viewport, (image_w, image_h), scale);
             ui.set_detail_zoom(next);
-            ui.set_detail_pan_x(pan_x);
-            ui.set_detail_pan_y(pan_y);
-            ui.set_detail_fit_mode(false);
+            ui.set_detail_pan_x(clamped.x);
+            ui.set_detail_pan_y(clamped.y);
         });
     }
     {
         let shared = app.clone();
-        ui.on_detail_request_pan(move |px, py| {
-            let a = shared.borrow();
-            a.drag_to(px, py);
+        ui.on_detail_request_pan(move |delta_x, delta_y| {
+            let app = shared.borrow();
+            let ui = app.ui();
+            let pan = crate::zoom::Pan {
+                x: ui.get_detail_pan_x() + delta_x,
+                y: ui.get_detail_pan_y() + delta_y,
+            };
+            let viewport = crate::zoom::Viewport::new(
+                ui.window().size().width as f32,
+                ui.window().size().height as f32,
+            );
+            let (image_w, image_h) = current_image_size(&ui, &app);
+            let scale = ui.get_detail_zoom();
+            let clamped = crate::zoom::clamp_pan(pan, viewport, (image_w, image_h), scale);
+            ui.set_detail_pan_x(clamped.x);
+            ui.set_detail_pan_y(clamped.y);
         });
     }
     {
         let shared = app.clone();
-        ui.on_detail_request_toggle_zoom(move |px, py| {
-            let a = shared.borrow();
-            let ui = a.ui();
-            if (ui.get_detail_zoom() - 1.0).abs() < 0.01 {
-                // Zoom in to 2x centred on the cursor.
-                let width = ui.window().size().width as f32;
-                let view_h = 520.0_f32;
-                let cx = width / 2.0;
-                let cy = view_h / 2.0;
-                ui.set_detail_zoom(2.0);
-                ui.set_detail_pan_x((cx - px) * 1.0);
-                ui.set_detail_pan_y((cy - py) * 1.0);
-                ui.set_detail_fit_mode(false);
-            } else {
-                ui.set_detail_zoom(1.0);
-                ui.set_detail_pan_x(0.0);
-                ui.set_detail_pan_y(0.0);
-                ui.set_detail_fit_mode(true);
-            }
+        ui.on_detail_request_toggle_zoom(move |_cursor_x, _cursor_y| {
+            let app = shared.borrow();
+            let ui = app.ui();
+            let fitting = ui.get_detail_fit_mode() && (ui.get_detail_zoom() - 1.0).abs() < 0.01;
+            ui.set_detail_fit_mode(!fitting);
+            ui.set_detail_zoom(1.0);
+            ui.set_detail_pan_x(0.0);
+            ui.set_detail_pan_y(0.0);
         });
     }
     {
         let shared = app.clone();
         ui.on_detail_set_fit_mode(move |fit| {
-            let a = shared.borrow();
-            a.ui().set_detail_fit_mode(fit);
+            let app = shared.borrow();
+            app.ui().set_detail_fit_mode(fit);
         });
     }
     {
         let shared = app.clone();
-        ui.on_detail_set_zoom(move |z| {
-            let a = shared.borrow();
-            a.ui().set_detail_zoom(z.clamp(0.2, 8.0));
+        ui.on_detail_set_zoom(move |zoom| {
+            let app = shared.borrow();
+            app.ui()
+                .set_detail_zoom(zoom.clamp(crate::zoom::ZOOM_MIN, crate::zoom::ZOOM_MAX));
         });
     }
     {
         let shared = app.clone();
         ui.on_toggle_fullscreen(move || {
-            let a = shared.borrow();
-            a.ui()
-                .window()
-                .set_fullscreen(!a.ui().window().is_fullscreen());
+            let app = shared.borrow();
+            let window = app.ui();
+            let window = window.window();
+            window.set_fullscreen(!window.is_fullscreen());
         });
     }
     // ---- theme ----
     {
         let shared = app.clone();
         ui.on_toggle_theme(move |dark| {
-            let a = shared.borrow();
-            a.ui().set_dark(dark);
-            let _ = a
+            let app = shared.borrow();
+            app.ui().set_dark(dark);
+            // A manual choice means "do not follow the system any more".
+            app.ui().set_follow_system_theme(false);
+            let _ = app
                 .store
                 .set_setting("theme", if dark { "dark" } else { "light" });
-            a.ui().set_follow_system_theme(false);
+            let _ = app.store.set_setting("follow_system_theme", "false");
         });
     }
     {
         let shared = app.clone();
         ui.on_toggle_follow_system(move |follow| {
-            let a = shared.borrow();
-            a.ui().set_follow_system_theme(follow);
-        });
-    }
-    {
-        let shared = app.clone();
-        ui.on_open_settings(move || App::navigate(&shared, Destination::Settings));
-    }
-    {
-        let shared = app.clone();
-        ui.on_toggle_rail(move || {
-            let a = shared.borrow();
-            let next = !a.ui().get_rail_compact();
-            a.ui().set_rail_compact(next);
+            let app = shared.borrow();
+            app.ui().set_follow_system_theme(follow);
+            let _ = app
+                .store
+                .set_setting("follow_system_theme", if follow { "true" } else { "false" });
         });
     }
     // ---- settings ----
     {
         let shared = app.clone();
         ui.on_sign_in_browser(move || {
-            let a = shared.borrow();
+            let app = shared.borrow();
             let _ = open::that("https://www.pixiv.net/");
-            a.ui().set_status_text(
-                "已打开浏览器：登录后在开发者工具中复制 PHPSESSID，再粘贴回本页".into(),
+            app.notify(
+                0,
+                "浏览器已打开：登录后按 F12 → Application → Cookies 复制 PHPSESSID，再粘贴回来",
             );
         });
     }
@@ -1103,318 +1965,308 @@ fn install_callbacks(app: &Shared) {
         let shared = app.clone();
         ui.on_submit_cookie(move || {
             let value = {
-                let a = shared.borrow();
-                a.ui().get_cookie_input().to_string()
+                let app = shared.borrow();
+                app.ui().get_cookie_input().to_string()
             };
-            if value.trim().is_empty() {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                let app = shared.borrow();
+                app.notify(2, "请先粘贴 PHPSESSID 的值");
                 return;
             }
-            let mut a = shared.borrow_mut();
-            a.apply_cookie(value.trim().to_string());
+            let mut app = shared.borrow_mut();
+            app.apply_cookie(value);
         });
     }
     {
         let shared = app.clone();
         ui.on_sign_out(move || {
-            let mut a = shared.borrow_mut();
-            a.session = Session::default();
-            clear_session(&a.data_dir);
-            a.mode = Mode::Demo;
-            if let Some(client) = a.client.clone() {
+            let mut app = shared.borrow_mut();
+            app.session = Session::default();
+            crate::session::clear(&app.data_dir);
+            app.mode = Mode::Demo;
+            if let Some(client) = app.client.clone() {
                 client.set_session(Session::default());
             }
-            a.ui().set_authenticated(false);
-            a.ui().set_session_user("".into());
-            a.ui().set_status_text("已退出登录，会话文件已删除".into());
-            a.refresh_chrome();
+            app.feed_owner = None;
+            let ui = app.ui();
+            ui.set_authenticated(false);
+            ui.set_session_user("".into());
+            ui.set_demo_mode(true);
+            app.notify(1, "已退出登录，本机会话文件已删除");
+            app.refresh_chrome();
         });
     }
     {
         let shared = app.clone();
         ui.on_clear_cache(move || {
-            let a = shared.borrow();
-            let reclaimed = a.cache.clear_disk().unwrap_or(0);
-            a.cache.prune_memory();
-            a.refresh_chrome();
-            a.ui()
-                .set_status_text(format!("已清理磁盘缓存 {}", human_bytes(reclaimed)).into());
+            let app = shared.borrow();
+            let reclaimed = app.cache.clear_disk().unwrap_or(0);
+            app.cache.prune_memory();
+            app.refresh_chrome();
+            app.notify(1, format!("已清理磁盘缓存 {}", human_bytes(reclaimed)));
         });
     }
     {
         let shared = app.clone();
         ui.on_clear_history(move || {
-            let a = shared.borrow();
-            let _ = a.store.clear_view_history();
-            let _ = a.store.clear_search_history();
-            a.ui().set_status_text("已清除浏览与搜索历史".into());
+            let app = shared.borrow();
+            let views = app.store.clear_view_history();
+            let searches = app.store.clear_search_history();
+            if views.is_ok() && searches.is_ok() {
+                app.notify(1, "已清除浏览历史与搜索历史");
+            } else {
+                app.notify(3, "清除历史失败，请查看日志");
+            }
         });
     }
     {
         let shared = app.clone();
         ui.on_clear_downloads(move || {
-            let a = shared.borrow();
-            a.downloads.clear_finished();
-            a.push_downloads();
+            let app = shared.borrow();
+            app.downloads.clear_finished();
+            app.push_downloads();
+            app.notify(1, "已清除下载记录，磁盘上的文件保留");
         });
     }
     {
         let shared = app.clone();
         ui.on_choose_directory(move || {
-            let a = shared.borrow();
-            let _ = open::that(&a.download_dir);
-            a.ui()
-                .set_status_text("已打开下载目录；当前版本不提供原生目录选择器".into());
+            let mut app = shared.borrow_mut();
+            let Some(dir) = crate::picker::pick_folder("选择下载保存目录") else {
+                return;
+            };
+            if let Err(error) = std::fs::create_dir_all(&dir) {
+                app.notify(3, format!("无法使用该目录：{error}"));
+                return;
+            }
+            app.download_dir = dir.clone();
+            app.downloads.set_directory(dir.clone());
+            let _ = app
+                .store
+                .set_setting("download_dir", &dir.display().to_string());
+            app.ui()
+                .set_download_directory(dir.display().to_string().into());
+            app.notify(1, format!("下载目录已改为 {}", dir.display()));
         });
     }
     {
         let shared = app.clone();
         ui.on_download_choose_directory(move || {
-            let a = shared.borrow();
-            let _ = open::that(&a.download_dir);
+            if let Some(ui) = shared.borrow().ui.upgrade().as_ref() {
+                let _ = ui; // keep the handle alive across the modal dialog
+            }
+            let mut app = shared.borrow_mut();
+            let Some(dir) = crate::picker::pick_folder("选择下载保存目录") else {
+                return;
+            };
+            if std::fs::create_dir_all(&dir).is_err() {
+                app.notify(3, "无法使用该目录");
+                return;
+            }
+            app.download_dir = dir.clone();
+            app.downloads.set_directory(dir.clone());
+            let _ = app
+                .store
+                .set_setting("download_dir", &dir.display().to_string());
+            app.ui()
+                .set_download_directory(dir.display().to_string().into());
+            app.notify(1, format!("下载目录已改为 {}", dir.display()));
         });
     }
     {
         let shared = app.clone();
-        ui.on_open_data_folder(move || {
-            let a = shared.borrow();
-            let _ = open::that(&a.data_dir);
-        });
-    }
-    {
-        let shared = app.clone();
-        ui.on_download_open_folder(move || {
-            let a = shared.borrow();
-            let _ = open::that(&a.download_dir);
-        });
-    }
-    {
-        let shared = app.clone();
-        ui.on_open_about(move || {
-            let a = shared.borrow();
-            let _ = open::that("https://github.com/");
-            a.ui().set_status_text(
-                "已知限制详见 README：评论、发现页与收藏 POST 存在接口不确定性".into(),
-            );
+        ui.on_apply_template(move |template| {
+            let template = template.trim().to_string();
+            if template.is_empty() {
+                let app = shared.borrow();
+                app.notify(2, "模板不能为空");
+                return;
+            }
+            if template.contains('/') || template.contains('\\') {
+                let app = shared.borrow();
+                app.notify(3, "模板不能包含路径分隔符");
+                return;
+            }
+            let app = shared.borrow();
+            app.downloads.set_template(template.clone());
+            let _ = app.store.set_setting("filename_template", &template);
+            app.ui().set_download_template(template.clone().into());
+            app.notify(1, "文件名模板已应用，从下一个任务开始生效");
         });
     }
     {
         let shared = app.clone();
         ui.on_toggle_demo(move |demo| {
-            let mut a = shared.borrow_mut();
-            if a.session.is_authenticated() && !demo {
-                a.mode = Mode::Real;
+            let mut app = shared.borrow_mut();
+            if demo {
+                app.mode = Mode::Demo;
+            } else if app.session.is_authenticated() {
+                app.mode = Mode::Real;
             } else {
-                a.mode = Mode::Demo;
+                app.notify(2, "未登录时只能使用演示模式，请先完成登录");
+                app.ui().set_demo_mode(true);
+                return;
             }
-            a.ui().set_demo_mode(a.mode == Mode::Demo);
-            drop(a);
-            App::reload_grid(&shared);
+            app.feed_owner = None;
+            app.ui().set_demo_mode(app.mode == Mode::Demo);
+            let page = app.page;
+            drop(app);
+            App::load_page(&shared, false);
+            let _ = page;
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_open_data_folder(move || {
+            let app = shared.borrow();
+            let _ = open::that(&app.data_dir);
+        });
+    }
+    {
+        ui.on_open_project(move || {
+            let _ = open::that("https://github.com/HELPMEEADICE/Pixiv-Desktop");
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_dismiss_notice(move || {
+            let app = shared.borrow();
+            app.ui().set_notice("".into());
         });
     }
     // ---- downloads ----
     {
         let shared = app.clone();
         ui.on_download_cancel(move |id| {
-            let a = shared.borrow();
-            a.downloads.cancel(id as u64);
-            a.push_downloads();
+            let app = shared.borrow();
+            app.downloads.cancel(id.max(0) as u64);
+            app.push_downloads();
         });
     }
     {
         let shared = app.clone();
         ui.on_download_retry(move |id| {
-            let a = shared.borrow();
-            a.downloads.retry(id as u64);
-            a.push_downloads();
+            let app = shared.borrow();
+            app.downloads.retry(id.max(0) as u64);
+            app.push_downloads();
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_download_retry_all(move || {
+            let app = shared.borrow();
+            let failed: Vec<u64> = app
+                .downloads
+                .tasks()
+                .into_iter()
+                .filter(|task| matches!(task.state, pixiv_download::TaskState::Failed(_)))
+                .map(|task| task.id)
+                .collect();
+            for id in failed {
+                app.downloads.retry(id);
+            }
+            app.push_downloads();
         });
     }
     {
         let shared = app.clone();
         ui.on_download_clear_finished(move || {
-            let a = shared.borrow();
-            a.downloads.clear_finished();
-            a.push_downloads();
+            let app = shared.borrow();
+            app.downloads.clear_finished();
+            app.push_downloads();
         });
     }
     {
         let shared = app.clone();
-        ui.on_download_open_task(move |_id| {
-            let a = shared.borrow();
-            let _ = open::that(&a.download_dir);
-        });
-    }
-    // ---- grid ----
-    {
-        let shared = app.clone();
-        ui.on_grid_retry(move || {
-            let page = shared.borrow().page;
-            App::load_page(&shared, page);
+        ui.on_download_open_folder(move || {
+            let app = shared.borrow();
+            let _ = open::that(&app.download_dir);
         });
     }
     {
         let shared = app.clone();
-        ui.on_grid_action(move || {
-            App::navigate(&shared, Destination::Settings);
-        });
-    }
-    {
-        let shared = app.clone();
-        ui.on_load_more(move || {
-            let page = {
-                let mut a = shared.borrow_mut();
-                a.page_cursor += 1;
-                a.page_cursor
-            };
-            let a = shared.borrow();
-            if a.mode == Mode::Demo {
-                let next = a.demo_items(page);
-                if next.is_empty() {
-                    a.ui().set_grid_loading_more(false);
-                    return;
+        ui.on_download_open_task(move |id| {
+            let app = shared.borrow();
+            let task = app
+                .downloads
+                .tasks()
+                .into_iter()
+                .find(|task| task.id == id.max(0) as u64);
+            // Reveal the actual file when it exists; otherwise fall back to the
+            // directory rather than opening nothing at all.
+            match task.and_then(|task| task.destination) {
+                Some(path) if path.exists() => {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(format!("/select,{}", path.display()))
+                        .spawn();
                 }
-                drop(a);
-                let mut a = shared.borrow_mut();
-                let mut all = a.items.clone();
-                all.extend(next);
-                a.render_grid(all, false);
-                a.items = a.items.clone();
+                _ => {
+                    let _ = open::that(&app.download_dir);
+                }
             }
-        });
-    }
-    {
-        let shared = app.clone();
-        ui.on_open_author(move |_id| {
-            let a = shared.borrow();
-            a.ui()
-                .set_status_text("画师主页：见详情页“关注”与浏览器入口".into());
         });
     }
 }
 
-impl App {
-    /// Apply a pasted PHPSESSID: validate it against a real endpoint before
-    /// trusting it, then persist it out-of-band of the database.
-    fn apply_cookie(&mut self, cookie: String) {
-        let session = Session {
-            phpsessid: Some(cookie.clone()),
-            user_id: None,
-            user_name: None,
-        };
-        let Ok(client) = Client::new(ClientConfig::default(), session.clone()) else {
-            self.ui().set_status_text("无法创建网络客户端".into());
-            return;
-        };
-
-        // Verify by exercising an authenticated endpoint. Without a valid session
-        // Pixiv answers 400, so a success here is real proof the cookie works.
-        let rt = self.rt.clone();
-        let weak = self.ui.clone();
-        let data_dir = self.data_dir.clone();
-        let client_probe = client.clone();
-        rt.spawn(async move {
-            let probe = client_probe.bookmarks(Id(0), false, 1).await;
-            let mut verified = Session {
-                phpsessid: Some(String::new()),
-                user_id: None,
-                user_name: None,
-            };
-            let message = match &probe {
-                // Any structured answer means the cookie was accepted; a 0-id
-                // lookup legitimately fails with Api/NotFound.
-                Ok(_) => "会话已验证".to_string(),
-                Err(pixiv_types::PixivError::Unauthorized) => "会话无效或已过期".to_string(),
-                Err(pixiv_types::PixivError::Api(m)) => format!("会话无效：{m}"),
-                Err(e) => format!("会话验证失败：{e}"),
-            };
-            let ok = !matches!(probe, Err(pixiv_types::PixivError::Unauthorized));
-            verified.phpsessid = if ok { Some(cookie) } else { None };
-            let _ = invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade() {
-                    if ok {
-                        let _ = save_session(&data_dir, &verified);
-                        ui.set_authenticated(true);
-                        ui.set_demo_mode(false);
-                        ui.set_cookie_input("".into());
-                    }
-                    ui.set_status_text(message.into());
-                }
-            });
-        });
-
-        self.client = Some(client);
-        self.refresh_chrome();
+/// Current page's intrinsic size, needed to clamp panning.
+fn current_image_size(ui: &AppWindow, app: &App) -> (f32, f32) {
+    let index = ui.get_detail_page_index().max(0) as usize;
+    if let Some(models) = &app.detail_models
+        && let Some(page) = models.row_data(index)
+    {
+        return (page.width.max(1) as f32, page.height.max(1) as f32);
     }
-
-    fn drag_to(&self, px: f32, py: f32) {
-        // Panning uses the previous cursor position captured by the viewer.
-        let ui = self.ui();
-        if (ui.get_detail_zoom() - 1.0).abs() < 0.001 && ui.get_detail_fit_mode() {
-            // Nothing to pan while fitted.
-            return;
-        }
-        let _ = (px, py);
-    }
+    (1.0, 1.0)
 }
 
 // ---------------------------------------------------------------- timers
 
-/// Recompute the responsive layout for a new logical window width.
-fn apply_width(shared: &Shared, width: f32) {
-    let Ok(mut a) = shared.try_borrow_mut() else {
-        return;
-    };
-    if (width - a.last_width).abs() < 1.0 {
-        return;
-    }
-    a.last_width = width;
-    let compact = width < RAIL_BREAKPOINT;
-    let card = a.card_width();
-    {
-        let ui = a.ui();
-        ui.set_rail_compact(compact);
-        ui.set_grid_card_width(card);
-    }
-    if a.items.is_empty() || a.page == Destination::Detail {
-        return;
-    }
-    let items = a.items.clone();
-    a.render_grid(items, false);
-}
 fn start_timers(app: &Shared) {
-    // Resize watch. Slint 1.18 emits no resize event and `Window::size()` reads
-    // 0x0 before the window is mapped, so the logical width is polled instead.
-    // 250 ms is imperceptible while dragging and costs nothing when idle because
-    // the callback returns immediately unless the width actually changed.
-    {
+    // Layout diagnostics for high-DPI verification: `PIXIV_DESKTOP_TRACE=1` logs
+    // the numbers the layout actually resolved to, once a second. This is how the
+    // 100/125/150/200% scaling matrix is checked without a debugger.
+    if std::env::var("PIXIV_DESKTOP_TRACE").is_ok() {
         let shared = app.clone();
-        let watch = slint::Timer::default();
-        watch.start(
+        let trace = slint::Timer::default();
+        trace.start(
             slint::TimerMode::Repeated,
-            Duration::from_millis(250),
+            Duration::from_millis(1000),
             move || {
-                let Ok(a) = shared.try_borrow() else { return };
-                let ui = a.ui();
-                let physical = ui.window().size().width as f32;
-                if physical <= 0.0 {
+                let Ok(app) = shared.try_borrow() else {
                     return;
-                }
-                let logical = physical / ui.window().scale_factor();
-                drop(a);
-                apply_width(&shared, logical);
+                };
+                let window = app.ui();
+                let window = window.window();
+                window.request_redraw();
+                eprintln!(
+                    "trace size={:?} physical scale={} shell_h={} measured_body={} columns={} card={:.1}",
+                    window.size(),
+                    window.scale_factor(),
+                    app.ui().get_shell_height(),
+                    app.measured_width,
+                    app.geometry.columns,
+                    app.geometry.card_width
+                );
             },
         );
-        std::mem::forget(watch);
+        std::mem::forget(trace);
     }
-    // Download queue refresh.
+
+    // The download queue is the only thing that needs polling: it is written by
+    // a worker thread and read by a `VecModel`, and 500ms is far below the
+    // threshold at which a progress bar looks stuck.
     let shared = app.clone();
     let tick = slint::Timer::default();
     tick.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(500),
         move || {
-            let Ok(a) = shared.try_borrow() else { return };
-            if !a.downloads.tasks().is_empty() {
-                a.push_downloads();
+            let Ok(app) = shared.try_borrow() else {
+                return;
+            };
+            if !app.downloads.tasks().is_empty() {
+                app.push_downloads();
             }
         },
     );
@@ -1422,6 +2274,18 @@ fn start_timers(app: &Shared) {
 }
 
 // ---------------------------------------------------------------- helpers
+
+fn ranking_index(kind: RankingKind) -> i32 {
+    RankingKind::ALL
+        .iter()
+        .position(|candidate| *candidate == kind)
+        .map(|index| index as i32)
+        .unwrap_or(0)
+}
+
+fn persisted(store: &Store, key: &str) -> Option<String> {
+    store.get_setting(key).ok().flatten()
+}
 
 fn human_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
@@ -1431,22 +2295,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn page_titles(page: Destination) -> (&'static str, &'static str) {
-    match page {
-        Destination::Home => ("首页", "为你推荐"),
-        Destination::Discovery => ("发现", "热门标签与精选作品"),
-        Destination::Ranking => ("排行榜", "Pixiv 官方榜单"),
-        Destination::Search => ("搜索", "按关键词查找作品"),
-        Destination::Bookmarks => ("收藏", "你的收藏作品"),
-        Destination::History => ("浏览历史", "本地记录"),
-        Destination::Artist => ("画师主页", ""),
-        Destination::Detail => ("作品详情", ""),
-        Destination::Downloads => ("下载管理", ""),
-        Destination::Settings => ("设置", ""),
-    }
-}
-
-fn illust_to_item(illust: &Illust) -> IllustItem {
+fn illust_to_item(illust: &Illust, rank: i32) -> IllustItem {
     IllustItem {
         id: illust.id.to_string().into(),
         title: illust.title.clone().into(),
@@ -1456,21 +2305,50 @@ fn illust_to_item(illust: &Illust) -> IllustItem {
         kind: illust.kind.code(),
         page_count: illust.page_count as i32,
         bookmarked: illust.bookmark.bookmarked,
+        rank,
         width: illust.width as i32,
         height: illust.height as i32,
         state: 1,
     }
 }
 
-async fn fetch_raw(cache: &ImageCache, url: &str) -> Option<RawImage> {
+fn extension_for(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    for candidate in ["png", "webp", "gif", "jpeg", "jpg"] {
+        if lower.contains(&format!(".{candidate}")) {
+            return candidate.to_string();
+        }
+    }
+    "jpg".to_string()
+}
+
+async fn fetch_sized(cache: &ImageCache, url: &str, target: u32) -> Option<RawImage> {
     if url.is_empty() {
         return None;
     }
-    let decoded = cache.load(url, Priority::Visible).await.ok()?;
+    let decoded = cache
+        .load_sized(url, Priority::Visible, Some(target))
+        .await
+        .ok()?;
     Some(RawImage {
         width: decoded.width,
         height: decoded.height,
-        rgba: decoded.rgba.to_vec(),
+        rgba: Arc::clone(&decoded.rgba),
+    })
+}
+
+async fn fetch_sized_viewer(cache: &ImageCache, url: &str) -> Option<RawImage> {
+    if url.is_empty() {
+        return None;
+    }
+    let decoded = cache
+        .load_sized(url, Priority::Visible, Some(VIEWER_MAX_WIDTH))
+        .await
+        .ok()?;
+    Some(RawImage {
+        width: decoded.width,
+        height: decoded.height,
+        rgba: Arc::clone(&decoded.rgba),
     })
 }
 
@@ -1487,56 +2365,38 @@ async fn demo_raw(seed_id: Id, width: u32, height: u32, page: u64) -> Option<Raw
     Some(RawImage {
         width: w,
         height: h,
-        rgba: decoded.into_raw(),
+        rgba: Arc::from(decoded.into_raw()),
     })
-}
-fn download_requests(
-    illust: &Illust,
-    pages: &[pixiv_types::domain::PageMeta],
-) -> Vec<DownloadRequest> {
-    let count = pages.len().max(1) as u32;
-    pages
-        .iter()
-        .map(|p| DownloadRequest {
-            illust_id: illust.id.to_string(),
-            title: illust.title.clone(),
-            author: illust.author.name.clone(),
-            page_index: p.index,
-            page_count: count,
-            url: p.urls.largest().to_string(),
-            extension: "jpg".to_string(),
-        })
-        .collect()
 }
 
 fn to_download_rows(tasks: Vec<pixiv_download::DownloadTask>) -> Vec<DownloadRow> {
     tasks
         .into_iter()
-        .map(|t| {
-            let (state, message) = match &t.state {
+        .map(|task| {
+            let (state, message) = match &task.state {
                 pixiv_download::TaskState::Queued => (0, String::new()),
                 pixiv_download::TaskState::Running => (1, String::new()),
                 pixiv_download::TaskState::Completed => (2, String::new()),
-                pixiv_download::TaskState::Failed(m) => (3, m.clone()),
+                pixiv_download::TaskState::Failed(message) => (3, message.clone()),
                 pixiv_download::TaskState::Cancelled => (4, String::new()),
                 pixiv_download::TaskState::Skipped => (5, String::new()),
             };
             DownloadRow {
-                id: t.id as i32,
-                title: t.request.title.clone().into(),
-                author: t.request.author.clone().into(),
+                id: task.id as i32,
+                title: task.request.title.clone().into(),
+                author: task.request.author.clone().into(),
                 subtitle: format!(
                     "第 {} / {} 页",
-                    t.request.page_index + 1,
-                    t.request.page_count.max(1)
+                    task.request.page_index + 1,
+                    task.request.page_count.max(1)
                 )
                 .into(),
-                progress: t.percent().map(|p| p as i32).unwrap_or(-1),
+                progress: task.percent().map(|percent| percent as i32).unwrap_or(-1),
                 state,
                 message: message.into(),
-                path: t
+                path: task
                     .destination
-                    .map(|p| p.display().to_string())
+                    .map(|path| path.display().to_string())
                     .unwrap_or_default()
                     .into(),
             }
@@ -1546,55 +2406,19 @@ fn to_download_rows(tasks: Vec<pixiv_download::DownloadTask>) -> Vec<DownloadRow
 
 fn data_dir() -> PathBuf {
     directories::ProjectDirs::from("dev", "pixivdesktop", "PixivDesktop")
-        .map(|d| d.data_dir().to_path_buf())
+        .map(|dirs| dirs.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn downloads_dir() -> PathBuf {
     directories::UserDirs::new()
-        .and_then(|u| u.picture_dir().map(|p| p.join("PixivDesktop")))
+        .and_then(|dirs| dirs.picture_dir().map(|path| path.join("PixivDesktop")))
         .unwrap_or_else(|| PathBuf::from("PixivDesktop"))
 }
 
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
-}
-
-fn load_session(dir: &Path) -> Session {
-    let mut session = Session::default();
-    let Ok(raw) = std::fs::read_to_string(dir.join("session")) else {
-        return session;
-    };
-    for line in raw.lines() {
-        if let Some(v) = line.strip_prefix("phpsessid=") {
-            session.phpsessid = Some(v.trim().to_string());
-        } else if let Some(v) = line.strip_prefix("user_id=") {
-            session.user_id = v.trim().parse::<u64>().ok().map(Id);
-        } else if let Some(v) = line.strip_prefix("user_name=") {
-            session.user_name = Some(v.trim().to_string());
-        }
-    }
-    session
-}
-
-fn save_session(dir: &Path, session: &Session) -> std::io::Result<()> {
-    use std::io::Write;
-    let path = dir.join("session");
-    let mut file = std::fs::File::create(&path)?;
-    if let Some(cookie) = &session.phpsessid {
-        writeln!(file, "phpsessid={cookie}")?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
-}
-
-fn clear_session(dir: &Path) {
-    let _ = std::fs::remove_file(dir.join("session"));
 }
