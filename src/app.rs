@@ -104,6 +104,8 @@ struct App {
     detail_pages: Vec<PageMeta>,
     detail_models: Option<Rc<VecModel<ViewerPage>>>,
     detail_epoch: u64,
+    /// Reused so a burst of notices does not leak one timer per message.
+    notice_timer: slint::Timer,
 }
 
 type Shared = Rc<RefCell<App>>;
@@ -205,6 +207,29 @@ pub fn run() -> Result<(), slint::PlatformError> {
     {
         let a = app.borrow();
         a.start_download_worker();
+    }
+    // One honest line about the state the app is in, deferred until the event loop
+    // is up so the auto-dismiss timer is actually scheduled. It also doubles as the
+    // visual proof that the shell-level notification bar works.
+    {
+        let shared = app.clone();
+        let hello = slint::Timer::default();
+        hello.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(400),
+            move || {
+                let Ok(app) = shared.try_borrow() else {
+                    return;
+                };
+                if !app.session.is_authenticated() {
+                    app.notify(
+                        2,
+                        "未登录：可以浏览公开作品；收藏、关注与下载需要先在设置页完成登录",
+                    );
+                }
+            },
+        );
+        std::mem::forget(hello);
     }
 
     ui.run()
@@ -343,6 +368,7 @@ impl App {
             detail_pages: Vec::new(),
             detail_models: None,
             detail_epoch: 0,
+            notice_timer: slint::Timer::default(),
         }
     }
 
@@ -388,13 +414,48 @@ impl App {
         } else {
             "未登录 · 只读"
         };
-        format!("{mode} · {auth} · {} 项", self.items.len())
+        // The item count only means something on a page that shows a feed.
+        if matches!(
+            self.page,
+            Destination::Home
+                | Destination::Discovery
+                | Destination::Ranking
+                | Destination::Search
+                | Destination::Bookmarks
+                | Destination::History
+        ) {
+            format!("{mode} · {auth} · {} 项", self.items.len())
+        } else {
+            format!("{mode} · {auth}")
+        }
     }
 
+    /// Show a shell-level notification. The shell renders it above the status bar
+    /// so it is visible on every page — a bookmark result happens on the detail
+    /// page, a cache result on the settings page, and a page-local bar meant the
+    /// other one was silently invisible.
+    ///
+    /// Auto-dismisses after a few seconds, but only if the message has not been
+    /// replaced in the meantime (compared by value, so a second identical notice
+    /// still gets its own full timeout).
     fn notify(&self, kind: i32, message: impl Into<slint::SharedString>) {
+        let message: slint::SharedString = message.into();
         let ui = self.ui();
-        ui.set_notice(message.into());
+        ui.set_notice(message.clone());
         ui.set_notice_kind(kind);
+
+        let weak = self.ui.clone();
+        self.notice_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(4500),
+            move || {
+                if let Some(ui) = weak.upgrade()
+                    && ui.get_notice() == message
+                {
+                    ui.set_notice("".into());
+                }
+            },
+        );
     }
 
     // ------------------------------------------------------------- pages

@@ -31,10 +31,6 @@ export component SettingsPage inherits Rectangle {
     in property <bool> busy: false;
     in property <string> session-user: "";
     in-out property <string> cookie-input: "";
-    /// Latest human-readable result of a session/clear action. Rendered in-page
-    /// so the user never has to notice the status bar at the bottom.
-    in property <string> notice: "";
-    in property <int> notice-kind: 0;
 
     // images
     in property <string> cache-summary: "";
@@ -62,7 +58,7 @@ export component SettingsPage inherits Rectangle {
     callback toggle-demo(bool);
     callback open-data-folder();
     callback open-project();
-    callback dismiss-notice();
+
 
     background: Theme.canvas;
 
@@ -92,18 +88,8 @@ export component SettingsPage inherits Rectangle {
             }
         }
 
-        // ---- transient notice ----
-        if root.notice != "" : InfoBar {
-            kind: root.notice-kind == 1 ? InfoKind.Success
-                : root.notice-kind == 2 ? InfoKind.Warning
-                : root.notice-kind == 3 ? InfoKind.Error
-                : InfoKind.Info;
-            title: root.notice;
-            dismissible: true;
-            dismissed => { root.dismiss-notice(); }
-        }
-
-        // ---- inline confirmation for destructive actions ----
+        // Notices are rendered by the shell (main.slint) so they are visible on
+        // every page, not just this one.
         if root.confirm != "" : Rectangle {
             height: 52px;
             border-radius: Theme.radius-sm;

@@ -585,8 +585,6 @@ export component AppWindow inherits Window {
                         busy: root.busy;
                         session-user: root.session-user;
                         cookie-input <=> root.cookie-input;
-                        notice: root.notice;
-                        notice-kind: root.notice-kind;
                         cache-summary: root.cache-summary;
                         memory-mb: root.cache-memory-mb;
                         disk-mb: root.cache-disk-mb;
@@ -607,7 +605,66 @@ export component AppWindow inherits Window {
                         toggle-demo(v) => { root.toggle-demo(v); }
                         open-data-folder => { root.open-data-folder(); }
                         open-project => { root.open-project(); }
-                        dismiss-notice => { root.dismiss-notice(); }
+                    }
+
+                    // ---- floating notification ----
+                    // An overlay anchored to the bottom of the content area, not a
+                    // row in the shell layout: as a row it pushed the status bar out
+                    // of a 480px-tall window. As an overlay it is visible on every
+                    // page and steals no layout space.
+                    if root.notice != "" : Rectangle {
+                        x: Theme.space-3;
+                        // Literal 44px rather than `self.height`: a self-referencing
+                        // binding in `y` resolves against height 0 and puts the bar outside
+                        // the clip.
+                        y: parent.height - 44px - Theme.space-3;
+                        width: parent.width - Theme.space-3 * 2;
+                        height: 44px;
+                        border-radius: Theme.radius-md;
+                        background: root.notice-kind == 3 ? Theme.danger-subtle
+                            : root.notice-kind == 2 ? Theme.warning-subtle
+                            : root.notice-kind == 1 ? Theme.success-subtle
+                            : Theme.accent-subtle;
+                        border-width: 1px;
+                        border-color: root.notice-kind == 3 ? Theme.danger
+                            : root.notice-kind == 2 ? Theme.warning
+                            : root.notice-kind == 1 ? Theme.success
+                            : Theme.border;
+
+                        HorizontalLayout {
+                            padding-left: Theme.space-3;
+                            padding-right: Theme.space-2;
+                            spacing: Theme.space-2;
+
+                            FluentGlyph {
+                                name: root.notice-kind == 3 ? "warning"
+                                    : root.notice-kind == 2 ? "warning"
+                                    : root.notice-kind == 1 ? "check"
+                                    : "info";
+                                width: Theme.icon-size;
+                                height: Theme.icon-size;
+                                tint: root.notice-kind == 3 ? Theme.danger
+                                    : root.notice-kind == 2 ? Theme.warning
+                                    : root.notice-kind == 1 ? Theme.success
+                                    : Theme.accent;
+                            }
+
+                            Text {
+                                text: root.notice;
+                                color: Theme.text;
+                                font-size: Theme.font-small;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+
+                            IconButton {
+                                icon: "dismiss";
+                                size: 24px;
+                                tip: "关闭";
+                                clicked => { root.dismiss-notice(); }
+                            }
+                        }
                     }
                 }
             }
