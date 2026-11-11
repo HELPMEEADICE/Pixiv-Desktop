@@ -1560,5 +1560,3 @@ fn save_session(dir: &Path, session: &Session) -> std::io::Result<()> {
 fn clear_session(dir: &Path) {
     let _ = std::fs::remove_file(dir.join("session"));
 }
-
-
