@@ -60,17 +60,14 @@ export component HomePage inherits Rectangle {
         }
 
         // ---------------- hero ----------------
+        // A plain header, not a coloured panel. A full-width accent wash was the
+        // single largest block of colour in the app and competed with the artwork
+        // for attention, which is the opposite of what a Pixiv client should do.
         hero := Rectangle {
-            height: 96px;
-            border-radius: Theme.radius-xl;
-            background: Theme.accent-subtle;
-            border-width: 1px;
-            border-color: Theme.accent-subtle-hover;
-            clip: true;
+            height: 84px;
+            background: transparent;
 
             HorizontalLayout {
-                padding-left: Theme.space-5;
-                padding-right: Theme.space-4;
                 spacing: Theme.space-4;
 
                 VerticalLayout {

@@ -71,7 +71,11 @@ export component AppButton inherits Rectangle {
     callback clicked();
 
     height: root.compact ? Theme.control-height-sm : Theme.control-height;
-    min-width: root.compact ? 44px : 64px;
+    // Hug the label, with a floor for icon-only and short labels. Without an
+    // explicit width a button is a stretch candidate in any enclosing layout,
+    // which is how "换一批" ended up as a 600px white slab across the home hero
+    // with its label floating in the middle.
+    width: max(root.compact ? 44px : 64px, content.preferred-width);
     border-radius: Theme.radius-sm;
     border-width: (root.kind == ButtonKind.Secondary) ? 1px : 0px;
     border-color: ta.has-hover ? Theme.border-strong : Theme.border;
@@ -93,7 +97,7 @@ export component AppButton inherits Rectangle {
         background: transparent;
     }
 
-    HorizontalLayout {
+    content := HorizontalLayout {
         padding-left: root.compact ? Theme.space-2 : Theme.space-3;
         padding-right: root.compact ? Theme.space-2 : Theme.space-3;
         spacing: Theme.space-2;

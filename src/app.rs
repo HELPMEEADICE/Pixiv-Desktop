@@ -2483,6 +2483,90 @@ fn to_download_rows(tasks: Vec<pixiv_download::DownloadTask>) -> Vec<DownloadRow
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::to_download_rows;
+    use pixiv_download::{DownloadRequest, DownloadTask, TaskState};
+    use std::path::PathBuf;
+
+    fn task(state: TaskState, bytes_done: u64, bytes_total: Option<u64>) -> DownloadTask {
+        DownloadTask {
+            id: 7,
+            request: DownloadRequest {
+                illust_id: "700000001".into(),
+                title: "题目".into(),
+                author: "作者".into(),
+                page_index: 1,
+                page_count: 4,
+                url: "demo://illust/1/800x600/regular.png".into(),
+                extension: "png".into(),
+            },
+            state,
+            bytes_done,
+            bytes_total,
+            destination: Some(PathBuf::from(r"C:\out\700000001_p2.png")),
+        }
+    }
+
+    /// The integers here are a contract with `ui/pages/downloads.slint`, which
+    /// switches its badge text and its action buttons on them. If the mapping
+    /// drifts, a finished task renders as "下载中" or offers a cancel button that
+    /// does nothing - exactly the stuck-queue symptom this app had.
+    #[test]
+    fn task_states_map_to_the_integers_the_ui_switches_on() {
+        assert_eq!(to_download_rows(vec![task(TaskState::Queued, 0, None)])[0].state, 0);
+        assert_eq!(to_download_rows(vec![task(TaskState::Running, 5, Some(10))])[0].state, 1);
+        assert_eq!(to_download_rows(vec![task(TaskState::Completed, 10, Some(10))])[0].state, 2);
+        assert_eq!(
+            to_download_rows(vec![task(TaskState::Failed("boom".into()), 0, None)])[0].state,
+            3
+        );
+        assert_eq!(to_download_rows(vec![task(TaskState::Cancelled, 0, None)])[0].state, 4);
+        assert_eq!(to_download_rows(vec![task(TaskState::Skipped, 0, None)])[0].state, 5);
+    }
+
+    #[test]
+    fn unknown_progress_is_indeterminate_rather_than_zero() {
+        // The UI draws a spinning bar for -1 and a determinate bar otherwise, so a
+        // running task with no content-length must not report "0%".
+        let row = &to_download_rows(vec![task(TaskState::Running, 0, None)])[0];
+        assert_eq!(row.progress, -1);
+        let row = &to_download_rows(vec![task(TaskState::Running, 3, Some(4))])[0];
+        assert_eq!(row.progress, 75);
+        // A zero-length body is also unknown, not a divide-by-zero.
+        let row = &to_download_rows(vec![task(TaskState::Running, 0, Some(0))])[0];
+        assert_eq!(row.progress, -1);
+    }
+
+    #[test]
+    fn failure_message_reaches_the_row_and_success_does_not_carry_one() {
+        let row = &to_download_rows(vec![task(TaskState::Failed("磁盘已满".into()), 0, None)])[0];
+        assert_eq!(row.message.as_str(), "磁盘已满");
+        let row = &to_download_rows(vec![task(TaskState::Completed, 1, Some(1))])[0];
+        assert_eq!(row.message.as_str(), "");
+    }
+
+    #[test]
+    fn page_numbers_are_one_based_and_never_zero() {
+        let row = &to_download_rows(vec![task(TaskState::Queued, 0, None)])[0];
+        // page_index 1 of 4 pages reads as "第 2 / 4 页".
+        assert_eq!(row.subtitle.as_str(), "第 2 / 4 页");
+        let mut broken = task(TaskState::Queued, 0, None);
+        broken.request.page_count = 0;
+        let row = &to_download_rows(vec![broken])[0];
+        assert_eq!(row.subtitle.as_str(), "第 2 / 1 页");
+    }
+
+    #[test]
+    fn finished_rows_keep_the_destination_path_for_reveal() {
+        let row = &to_download_rows(vec![task(TaskState::Completed, 1, Some(1))])[0];
+        assert_eq!(row.path.as_str(), r"C:\out\700000001_p2.png");
+        let mut no_path = task(TaskState::Cancelled, 0, None);
+        no_path.destination = None;
+        assert_eq!(to_download_rows(vec![no_path])[0].path.as_str(), "");
+    }
+}
+
 fn data_dir() -> PathBuf {
     directories::ProjectDirs::from("dev", "pixivdesktop", "PixivDesktop")
         .map(|dirs| dirs.data_dir().to_path_buf())

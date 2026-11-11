@@ -41,7 +41,7 @@ $env:PIXIV_DESKTOP_START_PAGE = $Page
 Remove-Item Env:\PIXIV_DESKTOP_START_ILLUST -ErrorAction SilentlyContinue
 Remove-Item Env:\PIXIV_DESKTOP_SIZE -ErrorAction SilentlyContinue
 if ($Trace) { $env:PIXIV_DESKTOP_TRACE = "1" } else { Remove-Item Env:\PIXIV_DESKTOP_TRACE -ErrorAction SilentlyContinue }
-if ($Dark) { $env:PIXIV_DESKTOP_DARK = "1" } else { Remove-Item Env:\PIXIV_DESKTOP_DARK -ErrorAction SilentlyContinue }
+if ($Dark) { $env:PIXIV_DESKTOP_THEME = "dark" } else { Remove-Item Env:\PIXIV_DESKTOP_THEME -ErrorAction SilentlyContinue }
 
 $log = [System.IO.Path]::GetTempFileName()
 $proc = Start-Process -FilePath $Exe -PassThru -RedirectStandardError $log
