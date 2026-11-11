@@ -57,9 +57,11 @@ Flow:
 1. The user signs in at `pixiv.net` in their **system browser** (the app opens it
    with `open`). The application never renders a login form and never sees a
    password.
-2. The user supplies the resulting `PHPSESSID` cookie value, which is stored in a
-   dedicated credentials file with `0600`-style handling — not in SQLite, not in
-   logs.
+2. The user supplies the resulting `PHPSESSID` cookie value. It is sealed with
+   DPAPI (`CryptProtectData`, user-scoped) into `session.bin`, validated against
+   an authenticated endpoint before it is trusted, and never written to SQLite or
+   to a log line. On a copy of the file from another account or machine the DPAPI
+   blob is undecryptable, which is the point.
 3. Requests that need identity carry `Cookie: PHPSESSID=…`.
 
 Consequences that are visible in the code:
@@ -110,18 +112,73 @@ the cache testable headlessly.
 
 The visual target is *70 % Pixiv web layout + 30 % WinUI 3 desktop idiom*.
 
-- `ui/theme.slint` — design tokens (colour, spacing, radius, type scale) and the
-  light/dark palette in one switchable global.
+- `ui/theme.slint` — design tokens (colour, spacing, radius, type scale, control
+  sizes, card-width bounds) and the light/dark palette in one switchable global.
+  No page hard-codes a colour or a spacing value.
 - `ui/icons.slint` — **generated** from Microsoft Fluent UI System Icons (MIT).
   Only path geometry is embedded, so icons take their colour from the theme and
   stay crisp at any DPI. No emoji, no hand-drawn substitutes, no mixed icon sets.
-- `ui/components.slint` — Fluent-flavoured primitives: buttons, icon buttons,
-  search field, nav rail item, chips, skeleton, empty/error states, tooltips.
-- `ui/pages/*.slint` — one file per page.
-- `ui/main.slint` — the shell: title bar, navigation rail, top bar, page router.
+- `ui/components.slint` — Fluent 2 primitives: buttons, icon buttons, text field,
+  toggle, nav item, chips, badges, `InfoBar`, `ProgressBar`, four-state
+  `StateView`, skeleton, `IllustCard`, `SettingsCard`/`SettingsRow`, and
+  `PageScroll`.
+- `ui/pages/*.slint` — one file per page; `gallery.slint` holds the single
+  masonry renderer (`ArtworkGrid`) shared by Discovery / Ranking / Search /
+  Bookmarks / History, `home.slint` adds the hero + trending-tag band.
+- `ui/main.slint` — the shell: command bar, NavigationView pane, page router,
+  status bar, keyboard shortcuts.
+
+### 6.1 The responsive contract (why the old layout was broken)
+
+Every layout defect this rewrite fixes came from the same two mistakes:
+
+1. **The content decided its own width.** A `ScrollView` whose child sizes itself
+   from its children's *preferred* width inherits the widest child's minimum. One
+   long unwrapped `Text`, or one `HorizontalLayout` of chips, was enough to make
+   the content wider than the viewport. The result was the pair of symptoms the
+   screenshots showed: a horizontal scrollbar along the bottom of the page, and a
+   grid laid out at `card-width` inside an over-wide content box, leaving a large
+   blank strip on the right.
+2. **Rust guessed the window width.** `column_count()`/`card_width()` were
+   computed from a `last_width` field fed by *both* a Slint `width-changed`
+   callback and a 250 ms `Window::size()` poll, initialised to a hard-coded 1280.
+   The two sources could disagree for a quarter of a second on every resize, and
+   the initial value was wrong before the first callback.
+
+The contract now:
+
+- `PageScroll` binds its body to `ScrollView.visible-width` (the viewport, which
+  does not depend on the content) and reports `body-width` — the content box after
+  padding — through a callback. Horizontal scrolling is `always-off` on page
+  scrollers by construction, not by luck.
+- `src/layout.rs` turns that measured number into a column count, a card width
+  and a height-balanced masonry assignment. The grid is unit tested at
+  640/800/1024/1140/1280/1920/2560 px of content box.
+- The column count only rebuilds the row models when it *changes*. A pure width
+  change updates one property (`grid-card-width`) and lets the cards re-derive
+  their own height, so dragging a window edge does not rebuild the feed.
+- The navigation pane collapses from `rail-compact`, which Rust sets from the
+  `width-changed` event. Nothing polls, and nothing derives layout from its own
+  width (that is a binding loop Slint reports as such).
 
 Density follows Pixiv, not a touch UI: 4/8/12/16 spacing scale, 13 px body text,
 8 px card radius, 1 px borders.
+
+### 6.2 Rust-side controllers
+
+`src/app.rs` is the only file that touches Slint, and it delegates the parts that
+can be tested without a window:
+
+| Module | Owns |
+| --- | --- |
+| `src/layout.rs` | column count, card width, masonry distribution |
+| `src/zoom.rs` | fit scale, cursor-anchored wheel zoom, pan clamping |
+| `src/images.rs` | cover de-duplication, decode target width |
+| `src/route.rs` | back/forward history |
+| `src/session.rs` | DPAPI-sealed session file |
+| `src/picker.rs` | Win32 folder chooser |
+| `src/app.rs` | state, background work, model plumbing, epoch guards |
+
 
 ## 7. Demo Mode
 

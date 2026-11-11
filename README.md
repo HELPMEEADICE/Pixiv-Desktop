@@ -9,7 +9,9 @@ WinUI 3 / Fluent Design** desktop idiom. Pixiv's blue accent, white canvas, dens
 illustration-first grid and compact type scale survive; Fluent contributes layered
 surfaces, 1 px borders, 6–8 px radii, a real light/dark pairing and a NavigationView-style rail.
 
-![Home](docs/screenshots/03-home-grid.png)
+Screenshots are kept locally in `docs/screenshots/` (git-ignored to avoid binary
+churn); the engineering record for the layout work — root causes, fixes and what
+could not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
 
 ---
 
@@ -19,7 +21,7 @@ surfaces, 1 px borders, 6–8 px radii, a real light/dark pairing and a Navigati
 | --- | --- |
 | Native window, Fluent shell, collapsible nav rail, responsive reflow | **Implemented** |
 | Light / dark theme, switchable at runtime, persisted | **Implemented** |
-| Illustration grid with true masonry (per-card aspect ratio, no cropping) | **Implemented** |
+| Illustration grid with height-balanced masonry (per-card aspect ratio, no cropping, column count measured from the real content box) | **Implemented** |
 | Demo Mode with procedurally generated artwork | **Implemented** |
 | Real Pixiv data: illustration detail, page list, search, ranking, artist work ids, tag metadata | **Implemented** (verified against the live API) |
 | Zoomable image viewer: wheel zoom anchored at cursor, drag pan, double-click toggle, fit / 1:1, fullscreen | **Implemented** |
@@ -59,23 +61,22 @@ worse than one that says what it does not know.
 4. **`/ajax/discovery/artworks`, related works and comments returned no usable shape**
    (400/404 for every parameter combination tried). Discovery is therefore composed from
    ranking + search + tag metadata rather than guessed. See `docs/API-NOTES.md`.
-5. **No native folder picker.** Choosing the download directory opens the current folder
-   in Explorer; the directory itself comes from the OS Pictures folder. A proper picker
-   needs an extra dialog crate, which was out of scope here.
-6. **The ugoira player is not wired to the detail page UI yet.** The codec, frame timing
-   and GIF export are implemented and tested in `crates/pixiv-ugoira`; the UI currently
-   shows ugoira works as still images.
+5. **Native folder picker — implemented** (`SHBrowseForFolderW`, the resizable shell
+   dialog). The chosen directory is persisted and applies to the next task immediately;
+   `DownloadManager::set_directory()` exists, so no restart is needed.
+6. **Ugoira — static preview plus GIF export.** The detail page shows ugoira works as
+   still frames and offers **导出动图 GIF**, which fetches the archive, rebuilds the film
+   with `crates/pixiv-ugoira` and writes a GIF next to your other downloads. In-app
+   animated playback is still not wired into the viewer.
 7. Ugoira export writes **animated GIF only** (WebP animation encoding is not in the
    `image` crate).
-8. **On a desktop narrower than the window's `min-width`, the right edge of the UI is
-   clipped.** This was measured, not guessed: Slint lays out at its `min-width` /
-   `preferred-width` while the window manager draws into a smaller client area, so the
-   chrome past that width is cut off. `preferred-width` is 1000 px and `min-width` 380 px,
-   so this only appears on very small / heavily scaled displays — the development VM
-   reports a ~333 logical-px desktop, where it is visible. The fix belongs in a
-   `GetClientRect` round-trip that pushes the real size back into Slint; it is not
-   implemented yet, and the screenshots in `docs/screenshots/` were taken on that VM, so
-   the right-hand controls are cropped in them.
+8. **The layout is measured, not assumed.** Slint reports the content box it actually
+   resolved and Rust derives the column count from that number; there is no polling and
+   no second source of truth for the window width. The remaining caveat is environmental
+   and is recorded in `docs/UI-NOTES.md` § *Not verified here*: this VM's **software**
+   renderer paints only the top ~460 px of the client area at 150 % DPI. The layout itself
+   is correct (traced: `shell_height == client height`), and the same binary paints the
+   full shell at 640×480.
 
 ---
 
@@ -95,7 +96,7 @@ The debug binary also runs and is what the screenshots above were taken with.
 
 ```powershell
 cargo fmt --all -- --check
-cargo test --workspace                       # 159 tests
+cargo test --workspace                       # 195 tests
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)
@@ -117,9 +118,10 @@ reuses the session you already have:
 4. Paste it into the session field and press **保存会话**.
 
 The app validates the cookie against a real authenticated endpoint before storing it, and
-writes it to a dedicated file in the app data directory (mode `0600` on Unix). It is
-never written to SQLite and never logged. **退出登录** deletes the file and reverts to
-Demo Mode.
+writes it to `session.bin` in the app data directory, sealed with DPAPI
+(`CryptProtectData`, user-scoped) so the file is useless on another account or machine;
+on non-Windows targets it falls back to a `0600` file. It is never written to SQLite and
+never logged. **退出登录** deletes the file and reverts to Demo Mode.
 
 Nothing about the app is required to sign in: detail pages, pages, search, ranking and
 artist work lists all work unauthenticated.
