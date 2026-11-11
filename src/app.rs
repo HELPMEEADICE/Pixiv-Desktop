@@ -2305,12 +2305,25 @@ fn start_timers(app: &Shared) {
                 let window = app.ui();
                 let window = window.window();
                 window.request_redraw();
+                let ui = app.ui();
+                let phys = window.size();
+                let scale = window.scale_factor();
+                // `gap` is the invariant the shell must hold: the status bar's
+                // bottom edge has to land exactly on the shell's bottom edge. A
+                // positive gap is the blank strip the layout bug used to produce.
+                let shell = ui.get_shell_height();
+                let bottom = ui.get_status_y() + ui.get_status_height();
                 eprintln!(
-                    "trace size={:?} physical scale={} shell_h={} measured_body={} columns={} card={:.1}",
-                    window.size(),
-                    window.scale_factor(),
-                    app.ui().get_shell_height(),
-                    app.measured_width,
+                    "trace phys={}x{} scale={} logical={:.0}x{:.0} shell={:.0} body={:.0} status_y={:.0} gap={:.0} cols={} card={:.1}",
+                    phys.width,
+                    phys.height,
+                    scale,
+                    phys.width as f32 / scale,
+                    phys.height as f32 / scale,
+                    shell,
+                    ui.get_body_height(),
+                    ui.get_status_y(),
+                    shell - bottom,
                     app.geometry.columns,
                     app.geometry.card_width
                 );

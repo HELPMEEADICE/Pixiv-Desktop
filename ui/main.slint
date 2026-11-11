@@ -203,6 +203,10 @@ export component AppWindow inherits Window {
     // Diagnostics: the sizes the shell actually resolved to. Used by the DPI
     // verification trace and by the capture harness.
     out property <length> shell-height: shell.height;
+    out property <length> body-height: body-row.height;
+    out property <length> status-y: status-row.y;
+    out property <length> status-height: status-row.height;
+
     out property <length> measured-width: 0px;
 
     /// Fired when the window size changes. Slint has no resize event, so the
@@ -367,7 +371,18 @@ export component AppWindow inherits Window {
             }
 
             // ================= body =================
-            HorizontalLayout {
+            body-row := HorizontalLayout {
+                // Height is *derived from the window*, not negotiated with the
+                // layout system. Slint walks constraints up from content: this row
+                // contains the navigation column, whose preferred height is the sum
+                // of its fixed rows (≈379px). That becomes the row's implicit
+                // max-height, so `vertical-stretch: 1` cannot grow it — the layout
+                // keeps the row at its content height, parks the status bar right
+                // under it and leaves every pixel below unpainted. Stating the
+                // height as "window minus the two fixed bars" is exact, monotone in
+                // the window height, and leaves no leftover for a stretch rule to
+                // get wrong.
+                height: root.height - Theme.topbar-height - Theme.statusbar-height;
                 spacing: 0px;
 
                 // ---- NavigationView pane ----
@@ -670,7 +685,7 @@ export component AppWindow inherits Window {
             }
 
             // ================= status bar =================
-            Rectangle {
+            status-row := Rectangle {
                 height: Theme.statusbar-height;
                 background: Theme.chrome;
                 border-width: 1px;
