@@ -1,0 +1,204 @@
+import { ScrollView } from "std-widgets.slint";
+// Download manager.
+//
+// Shows the queue as a table with per-task progress, and exposes cancel/retry.
+// Kept deliberately close to a WinUI ListView: rows, not big tiles.
+
+import { Theme, Type } from "../theme.slint";
+import {
+    AppButton, IconButton, ButtonKind, Divider, StateView, StateKind, Badge, Skeleton,
+} from "../components.slint";
+
+export struct DownloadRow {
+    id: int,
+    title: string,
+    author: string,
+    /// e.g. "第 2 / 5 页"
+    subtitle: string,
+    /// 0..100, -1 when indeterminate
+    progress: int,
+    /// 0 queued, 1 running, 2 done, 3 failed, 4 cancelled, 5 skipped
+    state: int,
+    message: string,
+    path: string,
+}
+
+export component DownloadsPage inherits Rectangle {
+    in property <[DownloadRow]> rows: [];
+    in property <int> active-count: 0;
+    in property <int> done-count: 0;
+    in property <int> failed-count: 0;
+    in property <string> directory: "";
+    in property <string> template-text: "";
+
+    callback cancel(int);
+    callback retry(int);
+    callback clear-finished();
+    callback choose-directory();
+    callback open-folder();
+    callback open-task(int);
+
+    background: Theme.canvas;
+
+    VerticalLayout {
+        padding: Theme.page-padding;
+        spacing: Theme.space-3;
+
+        Text {
+            text: "下载管理";
+            color: Theme.text;
+            font-size: Theme.font-page;
+            font-weight: Type.semibold;
+        }
+
+        // Summary + actions
+        Rectangle {
+            height: 52px;
+            border-radius: Theme.radius-lg;
+            background: Theme.layer;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            HorizontalLayout {
+                padding: Theme.space-3;
+                spacing: Theme.space-3;
+
+                Text {
+                    text: "进行中 " + root.active-count + " · 已完成 " + root.done-count
+                        + " · 失败 " + root.failed-count;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                AppButton {
+                    label: "选择目录";
+                    icon: "folder";
+                    clicked => { root.choose-directory(); }
+                }
+                AppButton {
+                    label: "打开目录";
+                    icon: "open";
+                    clicked => { root.open-folder(); }
+                }
+                AppButton {
+                    label: "清空已完成";
+                    icon: "delete";
+                    kind: ButtonKind.Subtle;
+                    clicked => { root.clear-finished(); }
+                }
+            }
+        }
+
+        // Where files land + naming, so the user never has to guess.
+        Text {
+            text: "保存到：" + root.directory + "　文件名模板：" + root.template-text;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-caption;
+            overflow: elide;
+        }
+
+        Divider { }
+
+        if root.rows.length == 0 : StateView {
+            kind: StateKind.Empty;
+            title: "还没有下载任务";
+            description: "在作品详情页点击“下载”即可加入队列。下载用于个人离线浏览，请尊重作品版权。";
+        }
+
+        if root.rows.length > 0 : ScrollView {
+            VerticalLayout {
+                spacing: Theme.space-2;
+
+                for row in root.rows : Rectangle {
+                    height: 64px;
+                    border-radius: Theme.radius-md;
+                    background: Theme.layer;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    HorizontalLayout {
+                        padding: Theme.space-3;
+                        spacing: Theme.space-3;
+
+                        VerticalLayout {
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            alignment: center;
+
+                            Text {
+                                text: row.title;
+                                color: Theme.text;
+                                font-size: Theme.font-body;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: row.author + " · " + row.subtitle;
+                                color: Theme.text-tertiary;
+                                font-size: Theme.font-caption;
+                                overflow: elide;
+                            }
+
+                            // Progress bar
+                            if row.state == 1 || row.state == 0 : Rectangle {
+                                height: 4px;
+                                border-radius: Theme.radius-pill;
+                                background: Theme.layer-alt;
+
+                                Rectangle {
+                                    width: row.progress < 0
+                                        ? parent.width * 0.3
+                                        : parent.width * (row.progress * 1.0 / 100.0);
+                                    height: parent.height;
+                                    border-radius: Theme.radius-pill;
+                                    background: Theme.accent;
+                                }
+                            }
+                            if row.state == 3 && row.message != "" : Text {
+                                text: row.message;
+                                color: Theme.danger;
+                                font-size: Theme.font-caption;
+                                overflow: elide;
+                            }
+                        }
+
+                        Badge {
+                            label: row.state == 0 ? "排队"
+                                : row.state == 1 ? (row.progress < 0 ? "下载中" : (row.progress + "%"))
+                                : row.state == 2 ? "完成"
+                                : row.state == 3 ? "失败"
+                                : row.state == 5 ? "已存在"
+                                : "已取消";
+                            fill: row.state == 3 ? #22d13438
+                                : row.state == 2 ? #22107c10
+                                : Theme.accent-subtle;
+                            ink: row.state == 3 ? Theme.danger
+                                : row.state == 2 ? Theme.success
+                                : Theme.accent;
+                        }
+
+                        IconButton {
+                            icon: "folder";
+                            tip: "打开文件所在位置";
+                            clicked => { root.open-task(row.id); }
+                        }
+                        if row.state == 3 || row.state == 4 : IconButton {
+                            icon: "refresh";
+                            tip: "重试";
+                            clicked => { root.retry(row.id); }
+                        }
+                        if row.state == 0 || row.state == 1 : IconButton {
+                            icon: "dismiss";
+                            tip: "取消";
+                            clicked => { root.cancel(row.id); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+

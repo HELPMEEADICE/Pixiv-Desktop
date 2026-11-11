@@ -1,33 +1,517 @@
-// Smoke view: proves the generated Fluent icon set compiles as themeable Path elements.
-import { IconHome, IconDiscover, IconRanking, IconBookmark, IconSettings, IconSearch } from "icons.slint";
+// Application shell: title/top bar, navigation rail, page router, status bar.
+//
+// Window chrome note: the window keeps the *native* frame. Slint can draw a custom
+// one via `no-frame: true`, but then window dragging, Snap Layouts, per-monitor
+// DPI changes and accessibility all have to be reimplemented against
+// `Window::set_position`, which is jittery and loses Win11 snapping. Keeping the
+// native frame and putting Fluent chrome inside it gives correct DPI behaviour and
+// real Snap Layouts; the in-app top bar supplies the Windows-11 chrome look.
+//
+// Page instances are kept alive and toggled with `visible:` rather than rebuilt,
+// so switching pages preserves scroll position and loaded content.
+
+import { Theme, Type } from "theme.slint";
+import { FluentGlyph } from "icons.slint";
+import {
+    AppButton, IconButton, SearchField, ButtonKind, NavItem, Badge, Divider, HoverTip,
+    IllustItem,
+} from "components.slint";
+import { IllustGrid } from "pages/illust_grid.slint";
+import { DetailPage, ViewerPage } from "pages/detail.slint";
+import { DownloadsPage, DownloadRow } from "pages/downloads.slint";
+import { SettingsPage } from "pages/settings.slint";
+
+export enum Destination {
+    Home,
+    Discovery,
+    Ranking,
+    Search,
+    Bookmarks,
+    History,
+    Artist,
+    Detail,
+    Downloads,
+    Settings,
+}
 
 export component AppWindow inherits Window {
     title: "Pixiv Desktop";
-    width: 1280px;
-    height: 800px;
-    background: #ffffff;
+    min-width: 760px;
+    min-height: 560px;
+    preferred-width: 1360px;
+    preferred-height: 880px;
+    background: Theme.canvas;
 
-    in property <string> status-text: "booting";
-    in property <brush> ink: #1a1a1a;
+    in property <Destination> page: Destination.Home;
+    in property <bool> rail-compact: false;
+    in property <bool> demo-mode: false;
+    in property <string> status-text: "";
+    in property <string> session-user: "";
+    in property <bool> authenticated: false;
+    in-out property <bool> dark <=> Theme.dark;
+    in-out property <string> search-text: "";
+
+    // ---- grid page state ----
+    in property <[[IllustItem]]> grid-columns: [];
+    in property <length> grid-card-width: 220px;
+    in property <int> grid-state: 0;
+    in property <string> grid-title: "首页";
+    in property <string> grid-subtitle: "";
+    in property <string> grid-message: "";
+    in property <string> grid-action-label: "";
+    in property <[string]> grid-tags: [];
+    in property <string> grid-active-tag: "";
+    in property <bool> grid-loading-more: false;
+    in-out property <length> grid-scroll-y: 0px;
+
+    // ---- detail state ----
+    in property <[ViewerPage]> detail-pages: [];
+    in-out property <int> detail-page-index: 0;
+    in property <int> detail-state: 0;
+    in property <string> detail-message: "";
+    in property <string> detail-title: "";
+    in property <string> detail-author: "";
+    in property <string> detail-author-id: "";
+    in property <string> detail-description: "";
+    in property <[string]> detail-tags: [];
+    in property <string> detail-posted: "";
+    in property <int> detail-kind: 0;
+    in property <int> detail-page-count: 1;
+    in property <int> detail-views: 0;
+    in property <int> detail-bookmarks: 0;
+    in property <int> detail-likes: 0;
+    in property <bool> detail-bookmarked: false;
+    in-out property <float> detail-zoom: 1.0;
+    in-out property <length> detail-pan-x: 0px;
+    in-out property <length> detail-pan-y: 0px;
+    in property <bool> detail-fit-mode: true;
+
+    // ---- downloads ----
+    in property <[DownloadRow]> download-rows: [];
+    in property <int> downloads-active: 0;
+    in property <int> downloads-done: 0;
+    in property <int> downloads-failed: 0;
+    in property <string> download-directory: "";
+    in property <string> download-template: "";
+
+    // ---- settings ----
+    in property <string> cache-summary: "";
+    in property <int> cache-memory-mb: 192;
+    in property <int> cache-disk-mb: 1024;
+    in property <bool> follow-system-theme: true;
+    in property <string> app-version: "0.1.0";
+    in-out property <string> cookie-input: "";
+
+    // ---- navigation / actions ----
+    callback navigate(Destination);
+    callback go-back();
+    callback go-forward();
+    callback search-submitted(string);
+    callback toggle-theme(bool);
+    callback toggle-rail();
+    callback open-settings();
+
+    // ---- grid ----
+    callback open-illust(string);
+    callback open-author(string);
+    callback toggle-bookmark(string);
+    callback open-tag(string);
+    callback grid-retry();
+    callback grid-action();
+    callback load-more();
+
+    // ---- detail ----
+    callback detail-back();
+    callback detail-toggle-bookmark();
+    callback detail-open-author();
+    callback detail-open-tag(string);
+    callback detail-download-page();
+    callback detail-download-all();
+    callback detail-open-external();
+    callback detail-follow();
+    callback detail-retry();
+    callback detail-select-page(int);
+    callback detail-request-zoom(length, length, float);
+    callback detail-request-pan(length, length);
+    callback detail-request-toggle-zoom(length, length);
+    callback detail-set-fit-mode(bool);
+    callback detail-set-zoom(float);
+    callback toggle-fullscreen();
+
+    // ---- downloads ----
+    callback download-cancel(int);
+    callback download-retry(int);
+    callback download-clear-finished();
+    callback download-choose-directory();
+    callback download-open-folder();
+    callback download-open-task(int);
+
+    // ---- settings ----
+    callback toggle-follow-system(bool);
+    callback sign-in-browser();
+    callback submit-cookie();
+    callback sign-out();
+    callback clear-cache();
+    callback clear-history();
+    callback clear-downloads();
+    callback choose-directory();
+    callback apply-template(string);
+    callback toggle-demo(bool);
+    callback open-data-folder();
+    callback open-about();
+
+    out property <bool> is-grid-page:
+        root.page == Destination.Home || root.page == Destination.Discovery
+        || root.page == Destination.Ranking || root.page == Destination.Search
+        || root.page == Destination.Bookmarks || root.page == Destination.History
+        || root.page == Destination.Artist;
+
+    /// Fired whenever the window width changes, so Rust can recompute the column
+    /// count. Slint has no resize event; binding to `width` and reporting it from
+    /// the element that owns the property is the event-driven alternative to
+    /// polling.
+    callback width-changed(length);
+    changed width => {
+        root.width-changed(root.width);
+    }
 
     VerticalLayout {
-        spacing: 12px;
-        padding: 16px;
+        // ================= top bar =================
+        Rectangle {
+            height: Theme.topbar-height;
+            background: Theme.chrome;
+            border-width: 1px;
+            border-color: Theme.border;
 
-        HorizontalLayout {
-            spacing: 16px;
-            IconHome { tint: root.ink; }
-            IconDiscover { tint: root.ink; }
-            IconRanking { tint: root.ink; }
-            IconBookmark { tint: root.ink; }
-            IconSearch { tint: root.ink; }
-            IconSettings { tint: root.ink; }
+            HorizontalLayout {
+                padding-left: Theme.space-2;
+                padding-right: Theme.space-2;
+                spacing: Theme.space-1;
+
+                // Logo
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: Theme.radius-md;
+                    background: Theme.accent;
+                    Text {
+                        text: "P";
+                        color: Theme.on-accent;
+                        font-size: Theme.font-title;
+                        font-weight: Type.bold;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                IconButton { icon: "back"; tip: "后退 (Alt+←)"; clicked => { root.go-back(); } }
+                IconButton { icon: "forward"; tip: "前进 (Alt+→)"; clicked => { root.go-forward(); } }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: Theme.topbar-height;
+
+                    SearchField {
+                        height: Theme.control-height;
+                        y: (parent.height - self.height) / 2;
+                        placeholder: "搜索插画、漫画、动图或标签…";
+                        text <=> root.search-text;
+                        accepted(t) => { root.search-submitted(t); }
+                    }
+                }
+
+                if root.demo-mode : Rectangle {
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: #229d5d00;
+                    HorizontalLayout {
+                        padding-left: Theme.space-2;
+                        padding-right: Theme.space-2;
+                        alignment: center;
+                        Text {
+                            text: "DEMO 演示数据";
+                            color: Theme.warning;
+                            font-size: Theme.font-caption;
+                            font-weight: Type.semibold;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                IconButton {
+                    icon: root.dark ? "light" : "dark";
+                    tip: root.dark ? "切换到浅色" : "切换到深色";
+                    clicked => { root.toggle-theme(!root.dark); }
+                }
+                IconButton {
+                    icon: "notification";
+                    tip: "通知";
+                }
+
+                // Avatar / sign-in affordance
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: Theme.radius-pill;
+                    background: root.authenticated ? Theme.accent : Theme.layer-alt;
+                    border-width: root.authenticated ? 0px : 1px;
+                    border-color: Theme.border-strong;
+
+                    Text {
+                        text: root.authenticated ? root.session-user : "登";
+                        color: root.authenticated ? Theme.on-accent : Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    av := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-settings(); }
+                    }
+                    HoverTip {
+                        show: av.has-hover;
+                        tip: root.authenticated ? "账户与设置" : "未登录，点击前往设置";
+                        x: -self.width + 30px;
+                        y: 34px;
+                    }
+                }
+            }
         }
 
-        Text {
-            text: root.status-text;
-            color: root.ink;
-            font-size: 16px;
+        // ================= body =================
+        HorizontalLayout {
+            spacing: 0px;
+
+            // ---- navigation rail ----
+            Rectangle {
+                width: root.rail-compact ? Theme.rail-width-compact : Theme.rail-width;
+                background: Theme.chrome;
+                border-width: 1px;
+                border-color: Theme.border;
+                clip: true;
+
+                VerticalLayout {
+                    padding-top: Theme.space-2;
+                    padding-bottom: Theme.space-2;
+                    padding-left: Theme.space-2;
+                    padding-right: Theme.space-2;
+                    spacing: 2px;
+
+                    NavItem {
+                        icon: "home"; label: "首页"; compact: root.rail-compact;
+                        selected: root.page == Destination.Home;
+                        clicked => { root.navigate(Destination.Home); }
+                    }
+                    NavItem {
+                        icon: "discover"; label: "发现"; compact: root.rail-compact;
+                        selected: root.page == Destination.Discovery;
+                        clicked => { root.navigate(Destination.Discovery); }
+                    }
+                    NavItem {
+                        icon: "ranking"; label: "排行榜"; compact: root.rail-compact;
+                        selected: root.page == Destination.Ranking;
+                        clicked => { root.navigate(Destination.Ranking); }
+                    }
+                    NavItem {
+                        icon: "follow"; label: "关注动态"; compact: root.rail-compact;
+                        selected: root.page == Destination.Search;
+                        clicked => { root.navigate(Destination.Search); }
+                    }
+                    NavItem {
+                        icon: "search"; label: "搜索"; compact: root.rail-compact;
+                        clicked => { root.navigate(Destination.Search); }
+                    }
+                    NavItem {
+                        icon: "star"; label: "收藏"; compact: root.rail-compact;
+                        selected: root.page == Destination.Bookmarks;
+                        clicked => { root.navigate(Destination.Bookmarks); }
+                    }
+                    NavItem {
+                        icon: "history"; label: "浏览历史"; compact: root.rail-compact;
+                        selected: root.page == Destination.History;
+                        clicked => { root.navigate(Destination.History); }
+                    }
+                    NavItem {
+                        icon: "downloads"; label: "下载管理"; compact: root.rail-compact;
+                        selected: root.page == Destination.Downloads;
+                        clicked => { root.navigate(Destination.Downloads); }
+                    }
+
+                    Rectangle { vertical-stretch: 1; }
+
+                    Divider { }
+                    NavItem {
+                        icon: "settings"; label: "设置"; compact: root.rail-compact;
+                        selected: root.page == Destination.Settings;
+                        clicked => { root.navigate(Destination.Settings); }
+                    }
+                    NavItem {
+                        icon: root.rail-compact ? "forward" : "chevron-left";
+                        label: "收起侧栏";
+                        compact: root.rail-compact;
+                        clicked => { root.toggle-rail(); }
+                    }
+                }
+            }
+
+            // ---- content router ----
+            Rectangle {
+                horizontal-stretch: 1;
+                background: Theme.canvas;
+                clip: true;
+
+                // Grid pages share one instance so scroll position and loaded
+                // pages survive navigation.
+                g := IllustGrid {
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.is-grid-page;
+                    columns: root.grid-columns;
+                    card-width: root.grid-card-width;
+                    state: root.grid-state;
+                    title: root.grid-title;
+                    subtitle: root.grid-subtitle;
+                    message: root.grid-message;
+                    action-label: root.grid-action-label;
+                    tags: root.grid-tags;
+                    active-tag: root.grid-active-tag;
+                    loading-more: root.grid-loading-more;
+                    scroll-y <=> root.grid-scroll-y;
+                    open-illust(id) => { root.open-illust(id); }
+                    open-author(id) => { root.open-author(id); }
+                    toggle-bookmark(id) => { root.toggle-bookmark(id); }
+                    open-tag(t) => { root.open-tag(t); }
+                    retry => { root.grid-retry(); }
+                    action => { root.grid-action(); }
+                    load-more => { root.load-more(); }
+                }
+
+                d := DetailPage {
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == Destination.Detail;
+                    title: root.detail-title;
+                    author: root.detail-author;
+                    author-id: root.detail-author-id;
+                    description: root.detail-description;
+                    tags: root.detail-tags;
+                    posted: root.detail-posted;
+                    kind: root.detail-kind;
+                    page-count: root.detail-page-count;
+                    views: root.detail-views;
+                    bookmarks: root.detail-bookmarks;
+                    likes: root.detail-likes;
+                    bookmarked: root.detail-bookmarked;
+                    authenticated: root.authenticated;
+                    state: root.detail-state;
+                    message: root.detail-message;
+                    pages: root.detail-pages;
+                    current-page <=> root.detail-page-index;
+                    zoom <=> root.detail-zoom;
+                    pan-x <=> root.detail-pan-x;
+                    pan-y <=> root.detail-pan-y;
+                    fit-mode: root.detail-fit-mode;
+                    back => { root.detail-back(); }
+                    toggle-bookmark => { root.detail-toggle-bookmark(); }
+                    open-author => { root.detail-open-author(); }
+                    open-tag(t) => { root.detail-open-tag(t); }
+                    download-page => { root.detail-download-page(); }
+                    download-all => { root.detail-download-all(); }
+                    open-external => { root.detail-open-external(); }
+                    follow => { root.detail-follow(); }
+                    retry => { root.detail-retry(); }
+                    select-page(i) => { root.detail-select-page(i); }
+                    request-zoom(px, py, dy) => { root.detail-request-zoom(px, py, dy); }
+                    request-pan(px, py) => { root.detail-request-pan(px, py); }
+                    request-toggle-zoom(px, py) => { root.detail-request-toggle-zoom(px, py); }
+                    set-fit-mode(m) => { root.detail-set-fit-mode(m); }
+                    set-zoom(z) => { root.detail-set-zoom(z); }
+                    toggle-fullscreen => { root.toggle-fullscreen(); }
+                }
+
+                DownloadsPage {
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == Destination.Downloads;
+                    rows: root.download-rows;
+                    active-count: root.downloads-active;
+                    done-count: root.downloads-done;
+                    failed-count: root.downloads-failed;
+                    directory: root.download-directory;
+                    template-text: root.download-template;
+                    cancel(id) => { root.download-cancel(id); }
+                    retry(id) => { root.download-retry(id); }
+                    clear-finished => { root.download-clear-finished(); }
+                    choose-directory => { root.download-choose-directory(); }
+                    open-folder => { root.download-open-folder(); }
+                    open-task(id) => { root.download-open-task(id); }
+                }
+
+                SettingsPage {
+                    width: parent.width;
+                    height: parent.height;
+                    visible: root.page == Destination.Settings;
+                    dark <=> root.dark;
+                    follow-system-theme: root.follow-system-theme;
+                    authenticated: root.authenticated;
+                    session-user: root.session-user;
+                    cookie-input <=> root.cookie-input;
+                    cache-summary: root.cache-summary;
+                    memory-mb: root.cache-memory-mb;
+                    disk-mb: root.cache-disk-mb;
+                    download-directory: root.download-directory;
+                    template-text: root.download-template;
+                    demo-mode: root.demo-mode;
+                    app-version: root.app-version;
+                    toggle-theme(v) => { root.toggle-theme(v); }
+                    toggle-follow-system(v) => { root.toggle-follow-system(v); }
+                    sign-in-browser => { root.sign-in-browser(); }
+                    submit-cookie => { root.submit-cookie(); }
+                    sign-out => { root.sign-out(); }
+                    clear-cache => { root.clear-cache(); }
+                    clear-history => { root.clear-history(); }
+                    clear-downloads => { root.clear-downloads(); }
+                    choose-directory => { root.choose-directory(); }
+                    apply-template(t) => { root.apply-template(t); }
+                    toggle-demo(v) => { root.toggle-demo(v); }
+                    open-data-folder => { root.open-data-folder(); }
+                    open-about => { root.open-about(); }
+                }
+            }
+        }
+
+        // ================= status bar =================
+        Rectangle {
+            height: 24px;
+            background: Theme.chrome;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            HorizontalLayout {
+                padding-left: Theme.space-3;
+                padding-right: Theme.space-3;
+                spacing: Theme.space-3;
+
+                Text {
+                    text: root.status-text;
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.demo-mode-label;
+                    color: root.demo-mode ? Theme.warning : Theme.success;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+            }
         }
     }
+
+    out property <string> demo_mode_label: root.demo-mode ? "演示模式（本地数据）" : "真实 Pixiv 会话";
 }
+
+

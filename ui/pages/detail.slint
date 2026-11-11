@@ -1,0 +1,585 @@
+import { ScrollView } from "std-widgets.slint";
+// Illustration detail page — the most important screen in the app.
+//
+// Layout follows Pixiv: the artwork dominates, metadata sits in a compact column
+// on the right, page thumbnails run along the bottom. The viewer follows WinUI
+// idiom: fit / actual-size modes, wheel zoom anchored at the cursor, drag to pan,
+// double-click to toggle, and a distraction-free fullscreen mode.
+//
+// All zoom/pan arithmetic lives in Rust (`viewer.rs`) so it can be unit tested;
+// this file only forwards pointer events and renders the resulting transform.
+
+import { Theme, Type } from "../theme.slint";
+import {
+    AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind,
+    Skeleton, HoverTip,
+} from "../components.slint";
+
+/// One viewable page. `thumb` is the thumbnail-strip image; `source` is either
+/// the tier the cache currently has or empty while it loads.
+export struct ViewerPage {
+    source: image,
+    thumb: image,
+    width: int,
+    height: int,
+    loaded: bool,
+    failed: bool,
+}
+
+/// The pannable, zoomable image surface.
+export component ZoomViewer inherits Rectangle {
+    in property <ViewerPage> page;
+    in property <bool> fit-mode: true;
+    /// Multiplier applied on top of the fit scale.
+    in-out property <float> zoom: 1.0;
+    in-out property <length> pan-x: 0px;
+    in-out property <length> pan-y: 0px;
+    in property <bool> show-controls: true;
+
+    /// Cursor position and wheel delta; Rust owns the transform maths.
+    callback request-zoom(length, length, float);
+    callback request-pan(length, length);
+    callback request-toggle-zoom(length, length);
+    callback set-fit-mode(bool);
+    callback set-zoom(float);
+    callback toggle-fullscreen();
+
+    clip: true;
+    background: Theme.dark ? #0e0e11 : #eef0f3;
+
+    // Fit scale: the largest scale that shows the whole page.
+    out property <float> fit-scale:
+        (root.page.width <= 0 || root.page.height <= 0)
+            ? 1.0
+            : Math.min((root.width / 1px) / (root.page.width * 1.0), (root.height / 1px) / (root.page.height * 1.0));
+    out property <float> scale: root.fit-mode ? root.fit-scale * root.zoom : root.zoom;
+
+    img := Image {
+        source: root.page.source;
+        x: (root.width - self.width) / 2 + root.pan-x;
+        y: (root.height - self.height) / 2 + root.pan-y;
+        width: max(1px, root.page.width * root.scale * 1px);
+        height: max(1px, root.page.height * root.scale * 1px);
+        // Exact size is imposed above, so `fill` cannot distort beyond that box.
+        image-fit: fill;
+    }
+
+    // Non-image states must never look like a broken image.
+    if root.page.failed : VerticalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        Text {
+            text: "图片加载失败";
+            color: Theme.text-secondary;
+            font-size: Theme.font-body;
+            horizontal-alignment: center;
+        }
+        AppButton {
+            label: "重试";
+            icon: "refresh";
+            clicked => { root.request-toggle-zoom(0px, 0px); }
+        }
+    }
+    if !root.page.loaded && !root.page.failed : VerticalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        Text {
+            text: "正在载入图片…";
+            color: Theme.text-tertiary;
+            font-size: Theme.font-small;
+            horizontal-alignment: center;
+        }
+        Skeleton { width: 120px; height: 8px; radius: Theme.radius-pill; }
+    }
+
+    ta := TouchArea {
+        scroll-event(e) => {
+            // dy > 0 means wheel-down; forward raw values, Rust clamps and anchors.
+            root.request-zoom(ta.mouse-x, ta.mouse-y, e.delta-y / 1px);
+            EventResult.accept
+        }
+        moved => {
+            if (ta.pressed) {
+                root.request-pan(ta.mouse-x, ta.mouse-y);
+            }
+        }
+        pointer-event(e) => {
+            // Remember where a drag begins so pan deltas are relative.
+            if (e.kind == PointerEventKind.down) {
+                root.request-pan(ta.mouse-x, ta.mouse-y);
+            }
+            EventResult.accept
+        }
+        double-clicked => {
+            root.request-toggle-zoom(ta.mouse-x, ta.mouse-y);
+        }
+        mouse-cursor: root.zoom > 1.0 ? MouseCursor.grab : MouseCursor.default;
+    }
+
+    // Floating control bar, as in WinUI's media surfaces.
+    if root.show-controls : Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - Theme.space-3;
+        height: 36px;
+        border-radius: Theme.radius-lg;
+        background: Theme.dark ? #cc1c1c20 : #e6ffffff;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        HorizontalLayout {
+            padding-left: Theme.space-1;
+            padding-right: Theme.space-1;
+            spacing: Theme.space-1;
+            alignment: center;
+
+            IconButton {
+                icon: "fit";
+                tip: "适应窗口 (F)";
+                active: root.fit-mode;
+                size: 28px;
+                clicked => { root.set-fit-mode(true); root.set-zoom(1.0); }
+            }
+            IconButton {
+                icon: "actual-size";
+                tip: "实际尺寸 (1)";
+                active: !root.fit-mode;
+                size: 28px;
+                clicked => { root.set-fit-mode(false); root.set-zoom(1.0); }
+            }
+            IconButton {
+                icon: "zoom-out";
+                tip: "缩小 (-)";
+                size: 28px;
+                clicked => { root.set-zoom(Math.max(0.2, root.zoom - 0.2)); }
+            }
+            Text {
+                text: Math.round(root.scale * 100) + "%";
+                color: Theme.text-secondary;
+                font-size: Theme.font-caption;
+                vertical-alignment: center;
+                min-width: 44px;
+                horizontal-alignment: center;
+            }
+            IconButton {
+                icon: "zoom-in";
+                tip: "放大 (+)";
+                size: 28px;
+                clicked => { root.set-zoom(Math.min(8.0, root.zoom + 0.2)); }
+            }
+            IconButton {
+                icon: "fullscreen";
+                tip: "全屏 (F11)";
+                size: 28px;
+                clicked => { root.toggle-fullscreen(); }
+            }
+        }
+    }
+}
+
+/// Right-hand metadata column.
+export component InfoPanel inherits Rectangle {
+    in property <string> title: "";
+    in property <string> author: "";
+    in property <string> author-id: "";
+    in property <string> description: "";
+    in property <[string]> tags: [];
+    in property <string> posted: "";
+    in property <int> kind: 0;
+    in property <int> page-count: 1;
+    in property <int> views: 0;
+    in property <int> bookmarks: 0;
+    in property <int> likes: 0;
+    in property <bool> bookmarked: false;
+    in property <bool> authenticated: false;
+
+    callback toggle-bookmark();
+    callback open-author();
+    callback open-tag(string);
+    callback download-page();
+    callback download-all();
+    callback open-external();
+    callback follow();
+
+    background: Theme.canvas;
+
+    ScrollView {
+        VerticalLayout {
+            padding: Theme.space-4;
+            spacing: Theme.space-3;
+
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.font-title;
+                font-weight: Type.semibold;
+                wrap: word-wrap;
+            }
+
+            // Author row
+            Rectangle {
+                height: 40px;
+                background: transparent;
+
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        border-radius: Theme.radius-pill;
+                        background: Theme.accent-subtle;
+                        Text {
+                            text: "画";
+                            color: Theme.accent;
+                            font-size: Theme.font-small;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 0px;
+                        Text {
+                            text: root.author;
+                            color: Theme.text;
+                            font-size: Theme.font-body;
+                            font-weight: Type.medium;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "@" + root.author-id;
+                            color: Theme.text-tertiary;
+                            font-size: Theme.font-caption;
+                            overflow: elide;
+                        }
+                    }
+
+                    ta-author := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-author(); }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                AppButton {
+                    label: root.bookmarked ? "已收藏" : "收藏";
+                    icon: "follow";
+                    kind: root.bookmarked ? ButtonKind.Primary : ButtonKind.Secondary;
+                    clicked => { root.toggle-bookmark(); }
+                }
+                AppButton {
+                    label: "关注";
+                    icon: "artist";
+                    clicked => { root.follow(); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                AppButton {
+                    label: "保存本页";
+                    icon: "downloads";
+                    clicked => { root.download-page(); }
+                }
+                AppButton {
+                    label: root.page-count > 1 ? ("下载全部 " + root.page-count) : "下载";
+                    icon: "downloads";
+                    clicked => { root.download-all(); }
+                }
+            }
+
+            AppButton {
+                label: "在浏览器中打开";
+                icon: "open";
+                kind: ButtonKind.Subtle;
+                clicked => { root.open-external(); }
+            }
+
+            if !root.authenticated : Rectangle {
+                border-radius: Theme.radius-md;
+                background: Theme.accent-subtle;
+                HorizontalLayout {
+                    padding: Theme.space-2;
+                    spacing: Theme.space-2;
+                    Text {
+                        text: "未登录：收藏与关注需要先在设置中完成登录。";
+                        color: Theme.accent;
+                        font-size: Theme.font-caption;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Divider { }
+
+            // Stats
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                Text { text: "浏览 " + root.views; color: Theme.text-secondary; font-size: Theme.font-small; }
+                Text { text: "收藏 " + root.bookmarks; color: Theme.text-secondary; font-size: Theme.font-small; }
+                Text { text: "赞 " + root.likes; color: Theme.text-secondary; font-size: Theme.font-small; }
+                Text { text: root.posted; color: Theme.text-tertiary; font-size: Theme.font-small; }
+            }
+
+            if root.description != "" : Text {
+                text: root.description;
+                color: Theme.text-secondary;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
+            }
+
+            if root.tags.length > 0 : HorizontalLayout {
+                spacing: Theme.space-2;
+                
+                for t in root.tags : TagChip {
+                    label: t;
+                    clicked => { root.open-tag(t); }
+                }
+            }
+        }
+    }
+}
+
+/// Full page: viewer + metadata + thumbnail strip.
+export component DetailPage inherits Rectangle {
+    in property <string> title: "";
+    in property <string> author: "";
+    in property <string> author-id: "";
+    in property <string> description: "";
+    in property <[string]> tags: [];
+    in property <string> posted: "";
+    in property <int> kind: 0;
+    in property <int> page-count: 1;
+    in property <int> views: 0;
+    in property <int> bookmarks: 0;
+    in property <int> likes: 0;
+    in property <bool> bookmarked: false;
+    in property <bool> authenticated: false;
+    /// 0 content, 1 loading, 3 error
+    in property <int> state: 0;
+    in property <string> message: "";
+
+    in property <[ViewerPage]> pages: [];
+    in-out property <int> current-page: 0;
+
+    in-out property <float> zoom: 1.0;
+    in-out property <length> pan-x: 0px;
+    in-out property <length> pan-y: 0px;
+    in property <bool> fit-mode: true;
+
+    callback back();
+    callback toggle-bookmark();
+    callback open-author();
+    callback open-tag(string);
+    callback download-page();
+    callback download-all();
+    callback open-external();
+    callback follow();
+    callback retry();
+    callback select-page(int);
+    callback request-zoom(length, length, float);
+    callback request-pan(length, length);
+    callback request-toggle-zoom(length, length);
+    callback set-fit-mode(bool);
+    callback set-zoom(float);
+    callback toggle-fullscreen();
+
+    background: Theme.canvas;
+
+    VerticalLayout {
+        // ---- toolbar ----
+        Rectangle {
+            height: 44px;
+            background: Theme.canvas;
+
+            HorizontalLayout {
+                padding-left: Theme.space-2;
+                padding-right: Theme.space-2;
+                spacing: Theme.space-1;
+
+                IconButton { icon: "back"; tip: "返回"; clicked => { root.back(); } }
+
+                Text {
+                    text: root.title;
+                    color: Theme.text;
+                    font-size: Theme.font-body;
+                    font-weight: Type.medium;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+
+                if root.page-count > 1 : Text {
+                    text: (root.current-page + 1) + " / " + root.page-count;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                }
+
+                IconButton {
+                    icon: "open";
+                    tip: "在浏览器中打开";
+                    clicked => { root.open-external(); }
+                }
+                IconButton {
+                    icon: "refresh";
+                    tip: "重新载入";
+                    clicked => { root.retry(); }
+                }
+            }
+        }
+
+        Divider { }
+
+        if root.state == 1 : VerticalLayout {
+            alignment: center;
+            Text { text: "正在载入作品…"; color: Theme.text-secondary; horizontal-alignment: center; }
+        }
+
+        if root.state == 3 : StateView {
+            kind: StateKind.Error;
+            title: "无法载入作品";
+            description: root.message;
+            action-label: "重试";
+            retry => { root.retry(); }
+        }
+
+        if root.state == 0 && root.pages.length > 0 : Rectangle {
+            // Side-by-side on a wide window, stacked on a narrow one.
+            if root.width > 1000px : HorizontalLayout {
+                spacing: 0px;
+
+                ZoomViewer {
+                    horizontal-stretch: 1;
+                    page: root.pages[root.current-page];
+                    fit-mode: root.fit-mode;
+                    zoom <=> root.zoom;
+                    pan-x <=> root.pan-x;
+                    pan-y <=> root.pan-y;
+                    request-zoom(px, py, dy) => { root.request-zoom(px, py, dy); }
+                    request-pan(px, py) => { root.request-pan(px, py); }
+                    request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
+                    set-fit-mode(m) => { root.set-fit-mode(m); }
+                    set-zoom(z) => { root.set-zoom(z); }
+                    toggle-fullscreen => { root.toggle-fullscreen(); }
+                }
+
+                Rectangle {
+                    width: 340px;
+                    InfoPanel {
+                        width: parent.width;
+                        height: parent.height;
+                        title: root.title;
+                        author: root.author;
+                        author-id: root.author-id;
+                        description: root.description;
+                        tags: root.tags;
+                        posted: root.posted;
+                        kind: root.kind;
+                        page-count: root.page-count;
+                        views: root.views;
+                        bookmarks: root.bookmarks;
+                        likes: root.likes;
+                        bookmarked: root.bookmarked;
+                        authenticated: root.authenticated;
+                        toggle-bookmark => { root.toggle-bookmark(); }
+                        open-author => { root.open-author(); }
+                        open-tag(t) => { root.open-tag(t); }
+                        download-page => { root.download-page(); }
+                        download-all => { root.download-all(); }
+                        open-external => { root.open-external(); }
+                        follow => { root.follow(); }
+                    }
+                }
+            }
+
+            if root.width <= 1000px : VerticalLayout {
+                ZoomViewer {
+                    height: root.height * 0.55;
+                    page: root.pages[root.current-page];
+                    fit-mode: root.fit-mode;
+                    zoom <=> root.zoom;
+                    pan-x <=> root.pan-x;
+                    pan-y <=> root.pan-y;
+                    request-zoom(px, py, dy) => { root.request-zoom(px, py, dy); }
+                    request-pan(px, py) => { root.request-pan(px, py); }
+                    request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
+                    set-fit-mode(m) => { root.set-fit-mode(m); }
+                    set-zoom(z) => { root.set-zoom(z); }
+                    toggle-fullscreen => { root.toggle-fullscreen(); }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    InfoPanel {
+                        width: parent.width;
+                        height: parent.height;
+                        title: root.title;
+                        author: root.author;
+                        author-id: root.author-id;
+                        description: root.description;
+                        tags: root.tags;
+                        posted: root.posted;
+                        kind: root.kind;
+                        page-count: root.page-count;
+                        views: root.views;
+                        bookmarks: root.bookmarks;
+                        likes: root.likes;
+                        bookmarked: root.bookmarked;
+                        authenticated: root.authenticated;
+                        toggle-bookmark => { root.toggle-bookmark(); }
+                        open-author => { root.open-author(); }
+                        open-tag(t) => { root.open-tag(t); }
+                        download-page => { root.download-page(); }
+                        download-all => { root.download-all(); }
+                        open-external => { root.open-external(); }
+                        follow => { root.follow(); }
+                    }
+                }
+            }
+        }
+
+        // ---- page thumbnail strip ----
+        if root.state == 0 && root.page-count > 1 : Rectangle {
+            height: 72px;
+            background: Theme.layer-alt;
+
+            HorizontalLayout {
+                padding: Theme.space-2;
+                spacing: Theme.space-2;
+
+                for p[i] in root.pages : Rectangle {
+                    width: 52px;
+                    height: 52px;
+                    border-radius: Theme.radius-md;
+                    border-width: (i == root.current-page) ? 2px : 1px;
+                    border-color: (i == root.current-page) ? Theme.accent : Theme.border;
+                    background: Theme.layer;
+                    clip: true;
+
+                    Image {
+                        source: p.thumb;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: cover;
+                    }
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.select-page(i); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+
+
+

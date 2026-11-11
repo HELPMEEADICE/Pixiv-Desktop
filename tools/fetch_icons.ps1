@@ -123,6 +123,7 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("}")
 [void]$sb.AppendLine("")
 
+$entries = New-Object System.Collections.Generic.List[object]
 $ok = 0; $failed = @()
 foreach ($kv in $icons.GetEnumerator()) {
     $name = $kv.Key; $folder = $kv.Value
@@ -136,12 +137,32 @@ foreach ($kv in $icons.GetEnumerator()) {
 
     $pascal = ($name -split '[-_]') | Where-Object { $_ -ne '' } | ForEach-Object { $_.Substring(0,1).ToUpper() + $_.Substring(1) }
     $comp = "Icon" + ($pascal -join '')
-    [void]$sb.AppendLine("export component $comp inherits FluentIcon {")
-    [void]$sb.AppendLine("    commands: `"$cmdText`";")
-    [void]$sb.AppendLine("}")
-    [void]$sb.AppendLine("")
+    $entries.Add([pscustomobject]@{ Name = $name; Comp = $comp; Cmd = $cmdText })
     $ok++
 }
+
+# 1) one component per icon, for direct use
+foreach ($e in $entries) {
+    [void]$sb.AppendLine("export component $($e.Comp) inherits FluentIcon {")
+    [void]$sb.AppendLine("    commands: `"$($e.Cmd)`";")
+    [void]$sb.AppendLine("}")
+    [void]$sb.AppendLine("")
+}
+
+# 2) a path-constant global, so icons can be selected by name at runtime
+[void]$sb.AppendLine("// Path geometry as string constants; used by FluentGlyph below.")
+[void]$sb.AppendLine("export global IconPaths {")
+foreach ($e in $entries) { [void]$sb.AppendLine("    out property <string> $($e.Name): `"$($e.Cmd)`";") }
+[void]$sb.AppendLine("}")
+[void]$sb.AppendLine("")
+
+# 3) a single name-dispatched glyph, so buttons/nav can pick an icon by string
+[void]$sb.AppendLine("// One reusable glyph: pick any icon by name. Unknown names render nothing.")
+[void]$sb.AppendLine("export component FluentGlyph inherits FluentIcon {")
+[void]$sb.AppendLine("    in property <string> name: `"`";")
+$chain = ($entries | ForEach-Object { "name == `"$($_.Name)`" ? IconPaths.$($_.Name)" }) -join " : `n        "
+[void]$sb.AppendLine("    commands: $chain : `"`";")
+[void]$sb.AppendLine("}")
 
 if ($failed.Count -gt 0) { Write-Host "MISSING: $($failed -join ', ')" -ForegroundColor Yellow }
 Set-Content -Path $OutSlint -Value $sb.ToString() -Encoding utf8

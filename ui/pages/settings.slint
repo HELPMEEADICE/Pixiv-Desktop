@@ -1,0 +1,350 @@
+import { ScrollView } from "std-widgets.slint";
+// Settings.
+//
+// Organised the way Windows 11 apps do it: grouped cards, one concern per group,
+// a toggle switch where the value is boolean and a field where it is text.
+//
+// The authentication group is the important one and is written to be honest:
+// the app never renders a password form. It opens pixiv.net in the system
+// browser and stores the resulting session cookie.
+
+import { Theme, Type } from "../theme.slint";
+import {
+    AppButton, IconButton, ButtonKind, ToggleSwitch, Divider, Badge, SearchField,
+} from "../components.slint";
+
+/// A titled group of rows, as in the Win11 settings app.
+component SettingsCard inherits Rectangle {
+    in property <string> title: "";
+    in property <string> description: "";
+
+    border-radius: Theme.radius-lg;
+    background: Theme.layer;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-3;
+
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.font-subhead;
+            font-weight: Type.semibold;
+        }
+        if root.description != "" : Text {
+            text: root.description;
+            color: Theme.text-secondary;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+        }
+
+        @children
+    }
+}
+
+/// Label on the left, control on the right.
+component SettingsRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> hint: "";
+    in property <length> control-width: 220px;
+
+    height: max(40px, self-layout.preferred-height);
+    self-layout := HorizontalLayout {
+        spacing: Theme.space-3;
+        VerticalLayout {
+            spacing: 1px;
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.label;
+                color: Theme.text;
+                font-size: Theme.font-body;
+                vertical-alignment: center;
+            }
+            if root.hint != "" : Text {
+                text: root.hint;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-caption;
+                wrap: word-wrap;
+            }
+        }
+        Rectangle {
+            width: root.control-width;
+            @children
+        }
+    }
+}
+
+export component SettingsPage inherits Rectangle {
+    // appearance
+    in-out property <bool> dark: false;
+    in property <bool> follow-system-theme: true;
+
+    // session
+    in property <bool> authenticated: false;
+    in property <string> session-user: "";
+    in-out property <string> cookie-input: "";
+
+    // images
+    in property <string> cache-summary: "";
+    in property <int> memory-mb: 192;
+    in property <int> disk-mb: 1024;
+
+    // downloads
+    in property <string> download-directory: "";
+    in property <string> template-text: "";
+
+    // mode
+    in property <bool> demo-mode: false;
+    in property <string> app-version: "";
+
+    callback toggle-theme(bool);
+    callback toggle-follow-system(bool);
+    callback sign-in-browser();
+    callback submit-cookie();
+    callback sign-out();
+    callback clear-cache();
+    callback clear-history();
+    callback clear-downloads();
+    callback choose-directory();
+    callback apply-template(string);
+    callback toggle-demo(bool);
+    callback open-data-folder();
+    callback open-about();
+
+    background: Theme.canvas;
+
+    ScrollView {
+        VerticalLayout {
+            padding: Theme.page-padding;
+            spacing: Theme.space-4;
+
+            Text {
+                text: "设置";
+                color: Theme.text;
+                font-size: Theme.font-page;
+                font-weight: Type.semibold;
+            }
+
+            // ---- 账户 ----
+            SettingsCard {
+                title: "账户";
+                description: "本应用不提供登录表单，也不会接触你的密码。请用系统浏览器登录 Pixiv，然后把浏览器中的 PHPSESSID 会话值粘贴到下方。";
+
+                Rectangle {
+                    height: 44px;
+                    border-radius: Theme.radius-md;
+                    background: root.authenticated ? #14107c10 : Theme.layer-alt;
+
+                    HorizontalLayout {
+                        padding: Theme.space-3;
+                        spacing: Theme.space-2;
+                        Text {
+                            text: root.authenticated
+                                ? ("已登录：" + root.session-user)
+                                : "未登录（可以浏览，但收藏与关注需要登录）";
+                            color: root.authenticated ? Theme.success : Theme.text-secondary;
+                            font-size: Theme.font-small;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        if root.authenticated : Badge { label: "已连接"; }
+                        if !root.authenticated : Badge {
+                            label: "只读模式";
+                            fill: #229d5d00;
+                            ink: Theme.warning;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    AppButton {
+                        label: "在浏览器中登录";
+                        icon: "open";
+                        kind: ButtonKind.Primary;
+                        clicked => { root.sign-in-browser(); }
+                    }
+                    AppButton {
+                        label: "退出登录";
+                        icon: "delete";
+                        enabled: root.authenticated;
+                        clicked => { root.sign-out(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    cookie-field := SearchField {
+                        placeholder: "粘贴 PHPSESSID 的值";
+                        text <=> root.cookie-input;
+                        horizontal-stretch: 1;
+                    }
+                    AppButton {
+                        label: "保存会话";
+                        icon: "key";
+                        clicked => { root.submit-cookie(); }
+                    }
+                }
+            }
+
+            // ---- 外观 ----
+            SettingsCard {
+                title: "外观";
+                SettingsRow {
+                    label: "深色模式";
+                    hint: "也可以随时用顶部栏的按钮切换";
+                    ToggleSwitch {
+                        checked <=> root.dark;
+                        toggled(v) => { root.toggle-theme(v); }
+                    }
+                }
+                Divider { }
+                SettingsRow {
+                    label: "跟随系统主题";
+                    ToggleSwitch {
+                        checked: root.follow-system-theme;
+                        toggled(v) => { root.toggle-follow-system(v); }
+                    }
+                }
+            }
+
+            // ---- 图片与缓存 ----
+            SettingsCard {
+                title: "图片与缓存";
+                description: "缩略图与原图分级缓存：网格只取中等尺寸，仅在看图时请求原图。";
+                SettingsRow {
+                    label: "缓存占用";
+                    hint: root.cache-summary;
+                    AppButton {
+                        label: "清理缓存";
+                        icon: "delete";
+                        clicked => { root.clear-cache(); }
+                    }
+                }
+                Divider { }
+                SettingsRow {
+                    label: "内存上限";
+                    hint: root.memory-mb + " MB（超出后按最近最少使用淘汰）";
+                    Text {
+                        text: root.memory-mb + " MB";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-small;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+                Divider { }
+                SettingsRow {
+                    label: "磁盘上限";
+                    hint: root.disk-mb + " MB";
+                    Text {
+                        text: root.disk-mb + " MB";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-small;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ---- 下载 ----
+            SettingsCard {
+                title: "下载";
+                description: "仅用于个人离线浏览你在账号内已经可以查看的作品，请勿用于批量抓取或再分发。";
+                SettingsRow {
+                    label: "保存目录";
+                    hint: root.download-directory;
+                    AppButton {
+                        label: "更改";
+                        icon: "folder";
+                        clicked => { root.choose-directory(); }
+                    }
+                }
+                Divider { }
+                SettingsRow {
+                    label: "文件名模板";
+                    hint: "可用：{illust_id} {title} {author} {page} {page_count}";
+                    Text {
+                        text: root.template-text;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-caption;
+                        overflow: elide;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ---- 数据与模式 ----
+            SettingsCard {
+                title: "数据与本地状态";
+                SettingsRow {
+                    label: "演示模式";
+                    hint: "使用本地生成的示例数据，所有演示图片均标记为 [DEMO]，不会连接 Pixiv";
+                    ToggleSwitch {
+                        checked: root.demo-mode;
+                        toggled(v) => { root.toggle-demo(v); }
+                    }
+                }
+                Divider { }
+                SettingsRow {
+                    label: "清除浏览历史";
+                    AppButton {
+                        label: "清除";
+                        icon: "delete";
+                        kind: ButtonKind.Subtle;
+                        clicked => { root.clear-history(); }
+                    }
+                }
+                Divider { }
+                SettingsRow {
+                    label: "清除下载记录";
+                    AppButton {
+                        label: "清除";
+                        icon: "delete";
+                        kind: ButtonKind.Subtle;
+                        clicked => { root.clear-downloads(); }
+                    }
+                }
+                Divider { }
+                SettingsRow {
+                    label: "打开数据目录";
+                    hint: "日志、缓存与本地数据库所在位置";
+                    AppButton {
+                        label: "打开";
+                        icon: "folder";
+                        clicked => { root.open-data-folder(); }
+                    }
+                }
+            }
+
+            // ---- 关于 ----
+            SettingsCard {
+                title: "关于";
+                Text {
+                    text: "Pixiv Desktop " + root.app-version;
+                    color: Theme.text;
+                    font-size: Theme.font-body;
+                }
+                Text {
+                    text: "使用 Rust + Slint 构建的原生桌面客户端。图标来自 Microsoft Fluent UI System Icons（MIT）。本应用与 Pixiv Inc. 无隶属关系。";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    wrap: word-wrap;
+                }
+                AppButton {
+                    label: "已知限制";
+                    icon: "info";
+                    kind: ButtonKind.Subtle;
+                    clicked => { root.open-about(); }
+                }
+            }
+        }
+    }
+}
+
+

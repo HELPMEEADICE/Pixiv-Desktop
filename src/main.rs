@@ -1,7 +1,23 @@
+// Pixiv Desktop — native Rust + Slint client.
+//
+// Keep `main` thin: everything interesting lives in `app`.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
+mod app;
+
 slint::include_modules!();
 
 fn main() -> Result<(), slint::PlatformError> {
-    let ui = AppWindow::new()?;
-    ui.set_status_text("toolchain gate ok".into());
-    ui.run()
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,pixiv=info")),
+        )
+        .with_target(false)
+        .init();
+
+    app::run()
 }

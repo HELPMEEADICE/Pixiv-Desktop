@@ -1,0 +1,710 @@
+// Fluent-flavoured primitives shared by every page.
+//
+// Rules encoded here (so pages cannot get them wrong):
+//   * Hover/press feedback changes `background` only, never size — a bookmark
+//     toggle must not shift the layout of the card underneath it.
+//   * Every interactive element has a hover state, a pressed state and a cursor.
+//   * Nothing is a fixed pixel size that would clip at 150% DPI scaling; sizes
+//     come from the type scale and the 4px spacing grid.
+
+import { Theme, Type } from "theme.slint";
+import { FluentGlyph } from "icons.slint";
+
+/// Minimal hover hint. Slint's built-in `Tooltip` takes `styled-text`, which
+/// cannot be fed a dynamic `string` without markdown wrapping, so the app uses
+/// this fully-themeable equivalent instead.
+export component HoverTip inherits Rectangle {
+    in property <string> tip: "";
+    in property <bool> show: false;
+    in property <length> max-tip-width: 260px;
+
+    visible: root.show && root.tip != "";
+    height: 22px;
+    // Sized from the text itself; Slint has no string-length operator.
+    width: Math.min(label.preferred-width + Theme.space-4, root.max-tip-width);
+    border-radius: Theme.radius-sm;
+    background: Theme.dark ? #ececec : #2b2b2b;
+    opacity: 0.97;
+
+    label := Text {
+        x: Theme.space-2;
+        y: (root.height - self.height) / 2;
+        width: root.width - Theme.space-4;
+        text: root.tip;
+        color: Theme.dark ? #16161a : #ffffff;
+        font-size: Theme.font-caption;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// ---------------------------------------------------------------- buttons
+
+export enum ButtonKind {
+    Primary,
+    Secondary,
+    Subtle,
+    Danger,
+}
+
+/// Fluent button. 32px tall, 6px radius, 1px border, accent when primary.
+export component AppButton inherits Rectangle {
+    in property <string> label: "";
+    in property <ButtonKind> kind: ButtonKind.Secondary;
+    /// A FluentGlyph name; empty for no icon.
+    in property <string> icon: "";
+    in property <bool> compact: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: compact ? Theme.control-height - 4px : Theme.control-height;
+    min-width: 60px;
+    border-radius: Theme.radius-md;
+    border-width: (root.kind == ButtonKind.Secondary) ? 1px : 0px;
+    border-color: ta.has-hover ? Theme.border-strong : Theme.border;
+
+    background: (root.kind == ButtonKind.Primary)
+        ? (ta.pressed ? Theme.accent-pressed : (ta.has-hover ? Theme.accent-hover : Theme.accent))
+        : (root.kind == ButtonKind.Danger)
+            ? (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent))
+            : (root.kind == ButtonKind.Subtle)
+                ? (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent))
+                : (ta.pressed ? Theme.layer-alt : (ta.has-hover ? Theme.layer-alt : Theme.layer));
+
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    HorizontalLayout {
+        padding-left: root.compact ? Theme.space-2 : Theme.space-3;
+        padding-right: root.compact ? Theme.space-2 : Theme.space-3;
+        spacing: Theme.space-2;
+        alignment: center;
+
+        if root.icon != "" : FluentGlyph {
+            name: root.icon;
+            width: Theme.icon-size;
+            height: Theme.icon-size;
+            tint: (root.kind == ButtonKind.Primary) ? Theme.on-accent
+                : (root.kind == ButtonKind.Danger) ? Theme.danger
+                : Theme.text;
+        }
+
+        Text {
+            text: root.label;
+            color: (root.kind == ButtonKind.Primary) ? Theme.on-accent
+                : (root.kind == ButtonKind.Danger) ? Theme.danger
+                : Theme.text;
+            font-size: Theme.font-body;
+            font-weight: Type.medium;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// Square icon-only button, used in the title bar and image viewer.
+export component IconButton inherits Rectangle {
+    in property <string> icon: "";
+    in property <string> tip: "";
+    in property <bool> active: false;
+    in property <length> size: Theme.control-height;
+    in property <color> tint: Theme.text;
+    callback clicked();
+
+    width: size;
+    height: size;
+    border-radius: Theme.radius-md;
+    background: ta.pressed ? Theme.pressed
+        : ta.has-hover ? Theme.hover
+        : (root.active ? Theme.accent-subtle : transparent);
+
+    FluentGlyph {
+        name: root.icon;
+        width: Theme.icon-size;
+        height: Theme.icon-size;
+        tint: root.active ? Theme.accent : root.tint;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HoverTip {
+        show: ta.has-hover;
+        tip: root.tip;
+        x: (root.width - self.width) / 2;
+        y: -self.height - 4px;
+    }
+}
+
+/// Window control in the custom title bar (minimise / maximise / close).
+export component CaptionButton inherits Rectangle {
+    in property <string> icon: "";
+    in property <bool> danger: false;
+    callback clicked();
+
+    width: 46px;
+    height: Theme.titlebar-height;
+    border-radius: 0px;
+    background: ta.pressed
+        ? (root.danger ? #c42b1c : Theme.pressed)
+        : ta.has-hover
+            ? (root.danger ? #e81123 : (Theme.dark ? #2a2a30 : #e9ebee))
+            : transparent;
+
+    FluentGlyph {
+        name: root.icon;
+        width: 12px;
+        height: 12px;
+        tint: (root.danger && ta.has-hover) ? #ffffff : Theme.text;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// ---------------------------------------------------------------- inputs
+
+/// Fluent search field with a leading glyph and a clear affordance.
+export component SearchField inherits Rectangle {
+    in property <string> placeholder: "搜索作品、标签或画师";
+    in-out property <string> text <=> input.text;
+    in property <string> hint: "";
+    callback edited(string);
+    callback accepted(string);
+    callback cleared();
+
+    height: Theme.control-height-lg;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : (ta.has-hover ? Theme.border-strong : Theme.border);
+    background: input.has-focus ? Theme.layer : Theme.layer-alt;
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-2;
+        alignment: start;
+
+        FluentGlyph {
+            name: "search";
+            width: Theme.icon-size;
+            height: Theme.icon-size;
+            tint: input.has-focus ? Theme.accent : Theme.text-tertiary;
+        }
+
+        input := TextInput {
+            color: Theme.text;
+            font-size: Theme.font-body;
+            vertical-alignment: center;
+            single-line: true;
+            edited => { root.edited(root.text); }
+            accepted => { root.accepted(root.text); }
+        }
+
+        if root.text != "" : IconButton {
+            icon: "dismiss";
+            tint: Theme.text-secondary;
+            size: 24px;
+            clicked => {
+                root.text = "";
+                root.cleared();
+            }
+        }
+    }
+
+    // TextInput has no placeholder of its own, so it is drawn underneath.
+    if root.text == "" : Text {
+        x: Theme.space-3 + Theme.icon-size + Theme.space-2;
+        y: (root.height - self.height) / 2;
+        text: root.placeholder;
+        color: Theme.text-tertiary;
+        font-size: Theme.font-body;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        // Let the text input own the pointer; this only provides hover/intent.
+        mouse-cursor: MouseCursor.text;
+        clicked => { input.focus(); }
+    }
+}
+
+/// WinUI-style toggle switch.
+export component ToggleSwitch inherits Rectangle {
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+
+    width: 40px;
+    height: 20px;
+    border-radius: Theme.radius-pill;
+    border-width: root.checked ? 0px : 1px;
+    border-color: Theme.border-strong;
+    background: root.checked
+        ? (ta.pressed ? Theme.accent-pressed : Theme.accent)
+        : (ta.has-hover ? Theme.layer-alt : transparent);
+
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        border-radius: Theme.radius-pill;
+        x: root.checked ? parent.width - self.width - 4px : 4px;
+        y: (parent.height - self.height) / 2;
+        background: root.checked ? Theme.on-accent : Theme.text-secondary;
+        animate x { duration: 120ms; easing: ease-out; }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- chrome
+
+/// One entry in the navigation rail. In compact mode the label is dropped and
+/// the glyph centres, which keeps the rail usable at narrow widths.
+export component NavItem inherits Rectangle {
+    in property <string> icon: "";
+    in property <string> label: "";
+    in property <bool> selected: false;
+    in property <bool> compact: false;
+    callback clicked();
+
+    height: 36px;
+    border-radius: Theme.radius-md;
+    background: root.selected
+        ? Theme.accent-subtle
+        : (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent));
+
+    // Accent bar marking the active destination, as in WinUI NavigationView.
+    if root.selected && !root.compact : Rectangle {
+        x: 0px;
+        y: (parent.height - 16px) / 2;
+        width: 3px;
+        height: 16px;
+        border-radius: Theme.radius-pill;
+        background: Theme.accent;
+    }
+
+    HorizontalLayout {
+        padding-left: root.compact ? 0px : Theme.space-3;
+        padding-right: root.compact ? 0px : Theme.space-3;
+        spacing: Theme.space-3;
+        alignment: root.compact ? center : start;
+
+        FluentGlyph {
+            name: root.icon;
+            width: Theme.icon-size-lg;
+            height: Theme.icon-size-lg;
+            tint: root.selected ? Theme.accent : Theme.text-secondary;
+        }
+
+        if !root.compact : Text {
+            text: root.label;
+            color: root.selected ? Theme.accent : Theme.text;
+            font-size: Theme.font-body;
+            font-weight: root.selected ? Type.semibold : Type.regular;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HoverTip {
+        show: root.compact && ta.has-hover;
+        tip: root.label;
+        x: root.width + 8px;
+        y: (root.height - self.height) / 2;
+    }
+}
+
+/// Pill-shaped tag, clickable to run a search.
+export component TagChip inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 26px;
+    border-radius: Theme.radius-pill;
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : Theme.border;
+    background: root.active
+        ? Theme.accent-subtle
+        : (ta.has-hover ? Theme.layer-alt : transparent);
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: root.active ? Theme.accent : Theme.text-secondary;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// Small count/type badge.
+export component Badge inherits Rectangle {
+    in property <string> label: "";
+    in property <color> fill: Theme.accent-subtle;
+    in property <color> ink: Theme.accent;
+
+    height: 18px;
+    min-width: 18px;
+    border-radius: Theme.radius-sm;
+    background: root.fill;
+
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: root.ink;
+            font-size: Theme.font-caption;
+            font-weight: Type.semibold;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.border;
+}
+
+/// Section heading with optional trailing action, e.g. "查看更多".
+export component SectionHeader inherits Rectangle {
+    in property <string> title: "";
+    in property <string> subtitle: "";
+    in property <string> action-label: "";
+    callback action();
+
+    height: root.subtitle == "" ? 32px : 44px;
+
+    HorizontalLayout {
+        alignment: space-between;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 0px;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.font-title;
+                font-weight: Type.semibold;
+                vertical-alignment: center;
+            }
+            if root.subtitle != "" : Text {
+                text: root.subtitle;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-small;
+            }
+        }
+
+        if root.action-label != "" : AppButton {
+            label: root.action-label;
+            kind: ButtonKind.Subtle;
+            icon: "chevron-right";
+            clicked => { root.action(); }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- states
+
+export enum StateKind {
+    Loading,
+    Empty,
+    Error,
+    Locked,
+}
+
+/// The four states every page must be able to show. `Locked` is the "sign in to
+/// see this" case, which is distinct from a network error.
+export component StateView inherits Rectangle {
+    in property <StateKind> kind: StateKind.Empty;
+    in property <string> title: "";
+    in property <string> description: "";
+    in property <string> action-label: "";
+    callback retry();
+    callback action();
+
+    VerticalLayout {
+        alignment: center;
+        spacing: Theme.space-3;
+        padding: Theme.space-6;
+
+        FluentGlyph {
+            name: (root.kind == StateKind.Loading) ? "refresh"
+                : (root.kind == StateKind.Error) ? "warning"
+                : (root.kind == StateKind.Locked) ? "key"
+                : "image-off";
+            width: 28px;
+            height: 28px;
+            tint: root.kind == StateKind.Error ? Theme.danger : Theme.text-tertiary;
+        }
+
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.font-subhead;
+            font-weight: Type.medium;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        if root.description != "" : Text {
+            text: root.description;
+            color: Theme.text-secondary;
+            font-size: Theme.font-small;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            max-width: 420px;
+        }
+
+        if root.action-label != "" : AppButton {
+            label: root.action-label;
+            kind: (root.kind == StateKind.Locked) ? ButtonKind.Primary : ButtonKind.Secondary;
+            icon: (root.kind == StateKind.Error) ? "refresh" : ((root.kind == StateKind.Locked) ? "key" : "");
+            clicked => {
+                if (root.kind == StateKind.Error) { root.retry(); }
+                else { root.action(); }
+            }
+        }
+    }
+}
+
+/// Static loading placeholder. Intentionally not animated: a shimmer would wake
+/// the compositor every frame for no information gain.
+export component Skeleton inherits Rectangle {
+    in property <length> radius: Theme.radius-lg;
+    height: 120px;
+    border-radius: root.radius;
+    background: Theme.layer-alt;
+}
+
+// ---------------------------------------------------------------- card
+
+/// Presentation model for one illustration card.
+///
+/// Ids are `string` because Pixiv ids exceed 32 bits and Slint's `int` is i32.
+/// The raw ids would silently overflow if passed as numbers.
+export struct IllustItem {
+    id: string,
+    title: string,
+    author: string,
+    author-id: string,
+    cover: image,
+    /// 0 illustration, 1 manga, 2 ugoira.
+    kind: int,
+    page-count: int,
+    bookmarked: bool,
+    /// Intrinsic size, used to derive the card's own aspect ratio.
+    width: int,
+    height: int,
+    state: int, // 0 ok, 1 loading, 2 failed
+}
+
+/// The heart toggle that sits on a card's corner.
+export component BookmarkPill inherits Rectangle {
+    in property <bool> marked: false;
+    callback clicked();
+
+    width: 26px;
+    height: 26px;
+    border-radius: Theme.radius-pill;
+    background: ta.has-hover ? #e6ffffff : #b3ffffff;
+
+    FluentGlyph {
+        name: "follow";
+        width: 13px;
+        height: 13px;
+        // Outlined when not marked, accent when marked: no layout shift, only colour.
+        tint: root.marked ? Theme.accent : #4a4a4a;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HoverTip {
+        show: ta.has-hover;
+        tip: root.marked ? "取消收藏" : "收藏";
+        x: (root.width - self.width) / 2;
+        y: -self.height - 4px;
+        width: 90px;
+    }
+}
+
+/// An illustration card.
+///
+/// Height is derived from width and the illustration's own aspect ratio, so a
+/// masonry column layout needs no row alignment and no image is ever cropped or
+/// stretched. The aspect is clamped so a 1:5 panorama cannot blow up the grid.
+export component IllustCard inherits Rectangle {
+    in property <IllustItem> item;
+    in property <bool> show-author: true;
+    /// Column width; the card sizes itself from it.
+    in property <length> column-width: 220px;
+    callback open();
+    callback open-author();
+    callback toggle-bookmark();
+
+    // Clamp to a sane band: very tall banners and very wide panoramas both stay
+    // readable in a grid.
+    out property <float> clamped-aspect:
+        (root.item.width <= 0 || root.item.height <= 0)
+            ? 1.0
+            : Math.max(0.62, Math.min(1.55, root.item.height / root.item.width));
+
+    width: column-width;
+    // Image area + a compact caption band.
+    height: column-width * clamped-aspect + 44px;
+    border-radius: Theme.radius-lg;
+    background: Theme.layer;
+    border-width: 1px;
+    border-color: ta.has-hover ? Theme.border-strong : Theme.border;
+    clip: true;
+
+    VerticalLayout {
+        // Cover
+        Rectangle {
+            // Square-ish neutral backing so the letterbox is never white-on-white.
+            background: Theme.layer-alt;
+
+            Image {
+                source: root.item.cover;
+                image-fit: cover;
+                // `cover` fills the derived aspect box, which already matches the
+                // source ratio; only the clamp band can crop, and only slightly.
+                width: 100%;
+                height: 100%;
+            }
+
+            // Loading / failure overlays, so a card is never an empty hole.
+            if root.item.state == 1 : Rectangle {
+                background: Theme.layer-alt;
+                Text {
+                    text: "加载中";
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            if root.item.state == 2 : Rectangle {
+                background: Theme.layer-alt;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: Theme.space-1;
+                    FluentGlyph {
+                        name: "image-off";
+                        width: Theme.icon-size-lg;
+                        height: Theme.icon-size-lg;
+                        tint: Theme.text-tertiary;
+                    }
+                    Text {
+                        text: "加载失败";
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // Type badge: only shown for multi-page, manga and ugoira.
+            if root.item.page-count > 1 || root.item.kind != 0 : Rectangle {
+                x: parent.width - self.width - 6px;
+                y: 6px;
+                width: self-label.width + 10px;
+                height: 18px;
+                border-radius: Theme.radius-sm;
+                background: #a6000000;
+
+                self-label := Text {
+                    x: 5px;
+                    y: 2px;
+                    text: (root.item.kind == 1) ? "漫画"
+                        : (root.item.kind == 2) ? "动图"
+                        : ("共" + root.item.page-count + "张");
+                    color: #ffffff;
+                    font-size: Theme.font-caption;
+                    font-weight: Type.medium;
+                }
+            }
+
+            // Bookmark button. Absolutely positioned and hit-tested separately so
+            // toggling it never reflows the card or its title.
+            BookmarkPill {
+                x: parent.width - self.width - 6px;
+                y: parent.height - self.height - 6px;
+                marked: root.item.bookmarked;
+                clicked => { root.toggle-bookmark(); }
+            }
+        }
+
+        // Caption
+        VerticalLayout {
+            padding-left: Theme.space-2;
+            padding-right: Theme.space-2;
+            padding-top: Theme.space-1;
+            spacing: 1px;
+
+            Text {
+                text: root.item.title;
+                color: Theme.text;
+                font-size: Theme.font-small;
+                font-weight: Type.medium;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            if root.show-author : Text {
+                text: root.item.author;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-caption;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open(); }
+        double-clicked => { root.open(); }
+    }
+
+    HoverTip {
+        show: ta.has-hover && root.item.title != "";
+        tip: root.item.title;
+        x: 4px;
+        y: root.height - self.height - 4px;
+        max-tip-width: root.width - 8px;
+    }
+}
+
