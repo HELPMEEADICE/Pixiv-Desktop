@@ -108,6 +108,7 @@ export component DownloadsPage inherits Rectangle {
 
         if root.rows.length > 0 : ScrollView {
             VerticalLayout {
+                width: root.width - 14px;
                 spacing: Theme.space-2;
 
                 for row in root.rows : Rectangle {
@@ -199,6 +200,7 @@ export component DownloadsPage inherits Rectangle {
         }
     }
 }
+
 
 
 

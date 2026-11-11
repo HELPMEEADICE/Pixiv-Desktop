@@ -48,7 +48,7 @@ component SettingsCard inherits Rectangle {
 component SettingsRow inherits Rectangle {
     in property <string> label: "";
     in property <string> hint: "";
-    in property <length> control-width: 220px;
+    in property <length> control-width: 168px;
 
     height: max(40px, self-layout.preferred-height);
     self-layout := HorizontalLayout {
@@ -118,6 +118,9 @@ export component SettingsPage inherits Rectangle {
 
     ScrollView {
         VerticalLayout {
+            // Constrained to the viewport so long paragraphs wrap instead of
+            // running under the scrollbar and being clipped.
+            width: root.width - 20px;
             padding: Theme.page-padding;
             spacing: Theme.space-4;
 
@@ -346,5 +349,7 @@ export component SettingsPage inherits Rectangle {
         }
     }
 }
+
+
 
 

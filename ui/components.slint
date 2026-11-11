@@ -182,6 +182,7 @@ export component SearchField inherits Rectangle {
     callback cleared();
 
     height: Theme.control-height-lg;
+    min-width: 120px;
     border-radius: Theme.radius-md;
     border-width: 1px;
     border-color: input.has-focus ? Theme.accent : (ta.has-hover ? Theme.border-strong : Theme.border);
@@ -221,9 +222,14 @@ export component SearchField inherits Rectangle {
     }
 
     // TextInput has no placeholder of its own, so it is drawn underneath.
+    // The width must be explicit: an absolutely positioned Text with no width
+    // reports its full text width as a *minimum* width for the whole field,
+    // which pushed the top bar's trailing actions out of the window.
     if root.text == "" : Text {
         x: Theme.space-3 + Theme.icon-size + Theme.space-2;
         y: (root.height - self.height) / 2;
+        width: max(0px, root.width - self.x - 34px);
+        overflow: elide;
         text: root.placeholder;
         color: Theme.text-tertiary;
         font-size: Theme.font-body;
@@ -707,4 +713,5 @@ export component IllustCard inherits Rectangle {
         max-tip-width: root.width - 8px;
     }
 }
+
 

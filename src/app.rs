@@ -131,14 +131,30 @@ pub fn run() -> Result<(), slint::PlatformError> {
     start_timers(&app);
 
     {
+        // `Window::size()` reports 0x0 before the window is mapped, so the real
+        // width is picked up by a one-shot timer just after the event loop starts
+        // (`start_timers`). Slint does not emit a resize event here.
         let mut a = app.borrow_mut();
-        // `Window::size()` is physical; layout maths is logical.
-        let logical = ui.window().size().width as f32 / ui.window().scale_factor();
         a.last_width = 0.0;
-        drop(a);
-        apply_width(&app, logical);
     }
-    App::navigate(&app, Destination::Home);
+    // Optional deep link for smoke-testing and scripting:
+    //   PIXIV_DESKTOP_START_PAGE=settings
+    //   PIXIV_DESKTOP_START_ILLUST=700000003   (opens that illustration's detail)
+    // Both default to the normal Home entry point when unset.
+    let start = std::env::var("PIXIV_DESKTOP_START_PAGE").ok();
+    match start.as_deref() {
+        Some("discovery") => App::navigate(&app, Destination::Discovery),
+        Some("ranking") => App::navigate(&app, Destination::Ranking),
+        Some("search") => App::navigate(&app, Destination::Search),
+        Some("bookmarks") => App::navigate(&app, Destination::Bookmarks),
+        Some("history") => App::navigate(&app, Destination::History),
+        Some("downloads") => App::navigate(&app, Destination::Downloads),
+        Some("settings") => App::navigate(&app, Destination::Settings),
+        _ => App::navigate(&app, Destination::Home),
+    }
+    if let Ok(id) = std::env::var("PIXIV_DESKTOP_START_ILLUST") {
+        App::open_detail(&app, &id);
+    }
 
     {
         let a = app.borrow();
@@ -1365,8 +1381,30 @@ fn apply_width(shared: &Shared, width: f32) {
     a.render_grid(items, false);
 }
 fn start_timers(app: &Shared) {
-    // Width changes arrive as a Slint callback (see `width-changed`), so no
-    // resize polling is needed.
+    // Resize watch. Slint 1.18 emits no resize event and `Window::size()` reads
+    // 0x0 before the window is mapped, so the logical width is polled instead.
+    // 250 ms is imperceptible while dragging and costs nothing when idle because
+    // the callback returns immediately unless the width actually changed.
+    {
+        let shared = app.clone();
+        let watch = slint::Timer::default();
+        watch.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(250),
+            move || {
+                let Ok(a) = shared.try_borrow() else { return };
+                let ui = a.ui();
+                let physical = ui.window().size().width as f32;
+                if physical <= 0.0 {
+                    return;
+                }
+                let logical = physical / ui.window().scale_factor();
+                drop(a);
+                apply_width(&shared, logical);
+            },
+        );
+        std::mem::forget(watch);
+    }
     // Download queue refresh.
     let shared = app.clone();
     let tick = slint::Timer::default();

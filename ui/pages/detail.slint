@@ -54,13 +54,25 @@ export component ZoomViewer inherits Rectangle {
             : Math.min((root.width / 1px) / (root.page.width * 1.0), (root.height / 1px) / (root.page.height * 1.0));
     out property <float> scale: root.fit-mode ? root.fit-scale * root.zoom : root.zoom;
 
+    // Fit mode: let Slint's own `contain` centring do the geometry. Hand-rolled
+    // sizing is only needed once the user zooms or pans, and it is what produced
+    // off-centre, undersized images when a page's declared size disagreed with
+    // its decoded size.
+    if root.fit-mode : Image {
+        source: root.page.source;
+        width: 100%;
+        height: 100%;
+        image-fit: contain;
+    }
+
     img := Image {
+        visible: !root.fit-mode;
         source: root.page.source;
         x: (root.width - self.width) / 2 + root.pan-x;
         y: (root.height - self.height) / 2 + root.pan-y;
         width: max(1px, root.page.width * root.scale * 1px);
         height: max(1px, root.page.height * root.scale * 1px);
-        // Exact size is imposed above, so `fill` cannot distort beyond that box.
+        // Width and height are already aspect-correct, so `fill` cannot distort.
         image-fit: fill;
     }
 
@@ -500,7 +512,11 @@ export component DetailPage inherits Rectangle {
 
             if root.width <= 1000px : VerticalLayout {
                 ZoomViewer {
-                    height: root.height * 0.55;
+                    // Stretch-based rather than `root.height * 0.55`: deriving a
+                    // child height from the parent height made the page taller
+                    // than the viewport and pushed the status bar out of view.
+                    vertical-stretch: 3;
+                    min-height: 200px;
                     page: root.pages[root.current-page];
                     fit-mode: root.fit-mode;
                     zoom <=> root.zoom;
@@ -577,6 +593,8 @@ export component DetailPage inherits Rectangle {
         }
     }
 }
+
+
 
 
 

@@ -36,10 +36,14 @@ export enum Destination {
 
 export component AppWindow inherits Window {
     title: "Pixiv Desktop";
-    min-width: 760px;
-    min-height: 560px;
-    preferred-width: 1360px;
-    preferred-height: 880px;
+    min-width: 380px;
+    min-height: 420px;
+    // A preferred size larger than the desktop work area gets clamped by the
+    // window manager while Slint keeps laying out at the *preferred* width, which
+    // silently clips the right-hand chrome. Staying modest avoids that entirely;
+    // the user can still maximise.
+    preferred-width: 1000px;
+    preferred-height: 680px;
     background: Theme.canvas;
 
     in property <Destination> page: Destination.Home;
@@ -209,6 +213,9 @@ export component AppWindow inherits Window {
 
                 Rectangle {
                     horizontal-stretch: 1;
+                    // Bounded so the trailing actions can never be pushed out of
+                    // the window at narrow widths.
+                    min-width: 120px;
                     height: Theme.topbar-height;
 
                     SearchField {
@@ -513,5 +520,11 @@ export component AppWindow inherits Window {
 
     out property <string> demo_mode_label: root.demo-mode ? "演示模式（本地数据）" : "真实 Pixiv 会话";
 }
+
+
+
+
+
+
 
 

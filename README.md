@@ -67,6 +67,15 @@ worse than one that says what it does not know.
    shows ugoira works as still images.
 7. Ugoira export writes **animated GIF only** (WebP animation encoding is not in the
    `image` crate).
+8. **On a desktop narrower than the window's `min-width`, the right edge of the UI is
+   clipped.** This was measured, not guessed: Slint lays out at its `min-width` /
+   `preferred-width` while the window manager draws into a smaller client area, so the
+   chrome past that width is cut off. `preferred-width` is 1000 px and `min-width` 380 px,
+   so this only appears on very small / heavily scaled displays — the development VM
+   reports a ~333 logical-px desktop, where it is visible. The fix belongs in a
+   `GetClientRect` round-trip that pushes the real size back into Slint; it is not
+   implemented yet, and the screenshots in `docs/screenshots/` were taken on that VM, so
+   the right-hand controls are cropped in them.
 
 ---
 
