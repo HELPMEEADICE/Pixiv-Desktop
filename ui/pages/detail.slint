@@ -413,23 +413,25 @@ export component InfoPanel inherits Rectangle {
                 font-size: Theme.font-caption;
                 font-weight: Type.semibold;
             }
-            Rectangle {
-                height: 60px;
-                clip: true;
-                ScrollView {
-                    width: 100%;
-                    height: 100%;
-                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
-                    horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
-                    // Chips flow left-to-right and are reachable by scrolling the
-                    // strip; a wrapping row is not expressible in Slint layouts.
-                    HorizontalLayout {
-                        spacing: Theme.space-2;
-                        alignment: start;
-                        for t in root.tags : TagChip {
-                            label: t;
-                            clicked => { root.open-tag(t); }
-                        }
+            // Two chips per row, emitted as explicit cells. A horizontal ScrollView
+            // was tried first (a strip fixed at 60px that grows a scrollbar as soon
+            // as the labels are a few pixels too wide looks like a broken control),
+            // and so was `GridLayout` (it lays every child on a single row and just
+            // overflows). Conditional children are excluded from the layout, so a
+            // row with one tag renders as one chip and never truncates.
+            VerticalLayout {
+                spacing: 6px;
+                for r in Math.ceil(root.tags.length / 2) : HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    if r * 2 < root.tags.length : TagChip {
+                        label: root.tags[r * 2];
+                        clicked => { root.open-tag(root.tags[r * 2]); }
+                    }
+                    if r * 2 + 1 < root.tags.length : TagChip {
+                        label: root.tags[r * 2 + 1];
+                        clicked => { root.open-tag(root.tags[r * 2 + 1]); }
                     }
                 }
             }
