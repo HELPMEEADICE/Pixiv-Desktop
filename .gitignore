@@ -1,5 +1,8 @@
 target/
 .DS_Store
 *.pdb
-/docs/screenshots/
+# Screenshots are captured locally. Only the curated set used by the README is
+# tracked, because everything else churns on every visual change.
+/docs/screenshots/*
+!/docs/screenshots/readme/
 target-rel/

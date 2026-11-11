@@ -3,8 +3,7 @@
 This is the engineering record for the WinUI 3 / Fluent redesign. It lists what
 was actually broken, why, what changed, and what could and could not be verified
 in this environment. Screenshots live in `docs/screenshots/` (git-ignored).
-
-## 1. The layout bugs, and their single root cause
+## 1. The layout bugs, and their single root cause
 
 The reported symptoms were: a large blank strip on the right of every page, a
 vertical scrollbar *inside* the artwork area, a horizontal scrollbar along the
@@ -96,75 +95,131 @@ the viewport.
 | Keyboard shortcuts were advertised but absent | tooltips claimed Alt+←/Ctrl+F/F11 | one ancestor `FocusScope` handles them |
 | Binding-loop warnings | layout info derived from the window width | window width is pushed in as `narrow`; the shell is not derived from its own size |
 
-## 3. Verification
+## 3. The half-empty window (round two)
+
+The symptom the user kept hitting was different from §1 and worse: the window
+maximised, the top ~450 logical pixels were painted (navigation, one row of
+cards, the status bar stranded mid-window) and everything below was blank canvas.
+
+Round one had attributed this to the VM's software renderer ("paints only the top
+~460 px at 150% DPI"). That was wrong, and the error was in the measuring tool,
+not in the app. `PrintWindow` renders the application's *own* surface, which can
+legitimately be a different size than the window; a capture built on it cannot
+distinguish "the app painted a small surface" from "the app painted a small
+area". Two habits made the artifact disappear:
+
+* capture the screen (`BitBlt` of the window rect), not the app's surface;
+* `ShowWindow(SW_RESTORE)` before resizing - a resize delivered to a window that
+  has never been restored is dropped by the backend, so the app never sees it.
+
+With a truthful capture the bug reproduced every time, and the trace showed it
+was not a rendering problem at all:
+
+```
+phys=2560x1506 scale=1.5 logical=1707x1004 shell=1004 body=379 status_y=427
+```
+
+The shell was the full 1004px tall; the body row was 379px and the status bar sat
+at 427. `body-row.max-height` also reported 379: the row was **clamped**, not
+mis-measured.
+
+**Root cause.** Slint propagates layout constraints up from content. The body row
+sat in the shell's `VerticalLayout` with `vertical-stretch: 1`, but it contains
+the navigation column, whose preferred height is the sum of its fixed rows
+(~379px). That becomes the row's implicit *max*-height, so stretch had nothing to
+give: the row stayed at its content height, the status bar was placed directly
+under it, and the remaining 552px of the shell were never claimed by anything.
+
+**Fix.** The row's height is derived from the window rather than negotiated:
+
+```slint
+height: root.height - Theme.topbar-height - Theme.statusbar-height;
+```
+
+Exact at every size, monotone in the window height, and no leftover space for a
+stretch rule to lose. `vertical-stretch` cannot be rescued with a percentage
+either - Slint only accepts percentages for `width`, `height` and `preferred-*`,
+not `max-height` - which is why the clamp cannot be expressed away.
+
+An isolated reproduction lives in the probe used to find this: a
+`FocusScope`-hosted column with seven fixed rows produced `body_h = 292` (the sum
+of the rows) where the same tree with plain rectangles produced `body_h = 932`.
+
+## 4. Defects found by screenshotting every page afterwards
+
+| Defect | Cause | Fix |
+| --- | --- | --- |
+| Settings labels floated ~180px in from the card edge | `alignment: center` on the row's `HorizontalLayout` makes the row pack children at their preferred widths, dropping the label column's stretch | no `alignment` on that row |
+| Settings labels still indented | `alignment: center` on the label column's `VerticalLayout` (cross-axis) shrank each `Text` to its own width | `alignment: start` |
+| The "saved to" card was 280px tall for two lines | the page body is stretched to the viewport, and the card was the only flexible child left to absorb the leftover | `SettingsCard` pins its height to its own content |
+| Empty-state icon sat at the left edge while its text was centred | a layout's `alignment` does not centre a fixed-width child | paired stretch spacers in `StateView` and in the detail viewer's states |
+| `换一批` was a 600px white slab | `AppButton` had no `width`, so it was a stretch candidate in every layout | `width: max(floor, content.preferred-width)` |
+| Tag strip grew a scrollbar and hid labels | a 60px-high horizontal `ScrollView` | explicit two-chip rows; `GridLayout` was tried and lays everything on one row |
+| Home hero was the largest block of colour in the app | full-width `accent-subtle` panel | plain header |
+| Demo covers were colour swatches | two-stop gradient | five composited motifs (§6) |
+
+## 5. Demo artwork
+
+`pixiv-demo` composes one of five motifs per seed - sunset, bloom, poster, night,
+drift - each with a harmonised three-hue palette, a vignette and film grain. Still
+one analytic function of `(width, height, seed)`: no textures, no bundled
+imagery, so the licensing position is unchanged and an illustration always renders
+identically. The three motifs that read badly at thumbnail size were iterated on a
+rendered contact sheet (petals that ringed the core, a halftone that swallowed the
+disc, a stray thin circle).
+
+## 6. Verification
 
 ### Automated
 
 ```
-cargo fmt --all -- --check      # clean
-cargo test --workspace          # 195 tests pass
-cargo check --workspace --all-targets   # clean, no Slint binding-loop warnings
+cargo fmt --all -- --check
+cargo test --workspace            # 197 tests
 RUSTC_WORKSPACE_WRAPPER=C:\msys64\ucrt64\bin\clippy-driver.exe \
-  cargo check --workspace --all-targets # clean
-cargo build --release           # succeeds
+  cargo check --workspace --all-targets
+cargo build --release
 ```
 
 `cargo clippy` itself cannot start in this MSYS2 + MSVC environment (it
 re-executes an MSVC toolchain and dies with `linker link.exe not found` before
-reaching project code — reproducible on dependency-only crates). The
-`clippy-driver` wrapper above is the documented equivalent gate and was verified
-to emit real lints, not a plain `rustc` check.
+reaching project code - reproducible on dependency-only crates). The
+`clippy-driver` wrapper above is the documented equivalent gate; it emits real
+lints (it found `approx_constant` in the new artwork code, which was fixed).
 
-New tests in this change:
+### Layout matrix
 
-- `src/layout.rs` — column count and card width at 640/800/1024/1140/1280/1920/2560,
-  "no blank strip wider than one card", masonry balance vs round-robin, aspect
-  clamping, per-column order preservation.
-- `src/zoom.rs` — fit scale, wheel bounds, cursor anchor invariance (the anchored
-  point stays under the cursor to 1e-3 px), pan clamping.
-- `src/images.rs` — request de-duplication, in-flight suppression, retry after
-  failure, reading order, decode target width.
-- `src/route.rs` — back/forward correctness, forward invalidation, bounded stack.
-- `src/session.rs` — round-trip, malformed input, DPAPI seal/unseal, and a check
-  that the cookie string does not appear in the file on disk.
+`tools/verify-layout.ps1` launches the app once per page per size, restores the
+window, resizes it, and asserts the shell invariant
+`status_y + status_height == shell_height` from the app's own
+`PIXIV_DESKTOP_TRACE=1` numbers. `gap=0` means the status bar's bottom edge is the
+shell's bottom edge, i.e. nothing below it is unpainted.
+
+All 24 cells pass (8 pages x {maximised 1707x1004, 1024x768, 800x600}).
 
 ### Visual
 
-`tools/capture.ps1` now sets the DPI awareness of the capture process before
-grabbing (without it a 1710×1329 window at 150 % DPI comes back as a 1140×886
-bitmap showing only the top-left two thirds), resizes the *client* area to an
-exact logical size with `SetWindowPos`, and uses `PrintWindow` with
-`PW_RENDERFULLCONTENT`.
+`tools/shot.ps1` takes ground-truth screen captures. Inspected at 800x600,
+1024x768, 1280x800, 1920x1200 and maximised, in light and dark:
 
-Captured and inspected at 640×480: home, discovery, ranking, search, bookmarks,
-history, downloads, settings, detail. Confirmed in those captures:
-
-- content fills the client width; no blank strip, no horizontal scrollbar;
-- 3 columns at 640 px of window (compact rail), cards unclipped, aspect correct;
-- badges sit inside the cover, captions directly under the image;
-- settings cards fit, descriptions wrap, no clipped control;
-- headers are left-aligned with the item count on the right;
-- tag strip keeps full chip labels and scrolls horizontally by design.
+* no blank strip at any size; the status bar is on the window edge everywhere;
+* masonry reflows 3 / 4 / 5 / 7 columns with correct card widths and no clipping;
+* settings rows align to the card edge with controls on the right;
+* downloads page hugs its card and centres its empty state;
+* detail page: viewer centred (measured 144px left gutter vs 143px right), tags
+  wrap, toolbar reachable;
+* dark mode restyles canvas, chrome, cards, chips, fields and scrollbars.
 
 ### Not verified here
 
-**Full-height painting above ~480 px of client height.** `Window::size()`,
-`scale_factor()` and the Slint-side shell height all report the correct values
-(traced: 1140×886 window → `shell_h = 886` → body 898 px → 4 columns × 212.5 =
-898, no leftover), and the same binary paints the whole shell at 640×480, but at
-larger sizes this VM's software renderer paints only the top ~460 px of the client
-area and leaves the rest blank. Forcing `SLINT_BACKEND=winit-software` reproduces
-it; `winit-femtovg` cannot start here (no OpenGL). It is a rendering artefact of
-this environment, not a layout result — but it means the *wide* detail layout
-(viewer + info side by side) and the >900 px card counts were verified
-numerically, not visually.
+**Pointer-driven interaction** (click, hover, wheel, drag, keyboard focus order)
+was exercised by code path and unit test only: this environment has no input
+automation. Pages were reached through `PIXIV_DESKTOP_START_PAGE` and
+`PIXIV_DESKTOP_START_ILLUST`.
 
-**Interactions requiring real input** (click, hover, wheel, drag) were verified by
-code path and unit test, not by driving the window: this environment has no
-input-automation path, and every page was exercised through the
-`PIXIV_DESKTOP_START_PAGE` deep link instead.
+**The DPI ladder.** Only 150% is available on this host. Layout maths is
+scale-independent (Slint reports logical px) and the image pipeline's
+`target_width()` is unit tested at 1.0/1.5/2.0, but 100%, 125% and 200% were not
+exercised on a real display.
 
-**DPI ladder.** Only 150 % was available (the host display). The layout maths is
-scale-independent (Slint reports logical px), and `images::target_width()` is
-unit tested at 1.0/1.5/2.0, but 100 %, 125 % and 200 % were not exercised on a
-real display.
+**Bookmark / follow against a live session** - unchanged from round one: no
+credential was available.

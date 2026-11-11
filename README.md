@@ -4,10 +4,14 @@ A native desktop client for [Pixiv](https://www.pixiv.net/), built with **Rust +
 No Electron, no CEF, no Tauri, no WebView — the UI is compiled Slint drawing directly
 through a GPU/software renderer.
 
-Visual target: **70 % Pixiv web layout and information architecture + 30 % Windows 11
-WinUI 3 / Fluent Design** desktop idiom. Pixiv's blue accent, white canvas, dense
-illustration-first grid and compact type scale survive; Fluent contributes layered
-surfaces, 1 px borders, 6–8 px radii, a real light/dark pairing and a NavigationView-style rail.
+Visual target: **60 % Windows 11 WinUI 3 / Fluent Design 2 + 40 % Pixiv web**. The
+shell is a native desktop one — NavigationView-style rail with a compact mode, a
+command bar with search/back/forward/account, a Settings page built from cards and
+toggles, InfoBars, flyout-style tooltips, real hover/pressed/disabled/focus states,
+and one light/dark pairing that covers every page. Pixiv supplies the part that
+matters for browsing: its blue accent, an illustration-first masonry feed with no
+chrome competing against the artwork, tag chips, and the detail page's
+image-dominant layout with a compact metadata column.
 
 Screenshots are kept locally in `docs/screenshots/` (git-ignored to avoid binary
 churn); the engineering record for the layout work — root causes, fixes and what
@@ -72,11 +76,11 @@ worse than one that says what it does not know.
    `image` crate).
 8. **The layout is measured, not assumed.** Slint reports the content box it actually
    resolved and Rust derives the column count from that number; there is no polling and
-   no second source of truth for the window width. The remaining caveat is environmental
-   and is recorded in `docs/UI-NOTES.md` § *Not verified here*: this VM's **software**
-   renderer paints only the top ~460 px of the client area at 150 % DPI. The layout itself
-   is correct (traced: `shell_height == client height`), and the same binary paints the
-   full shell at 640×480.
+   no second source of truth for the window width. The shell's three rows are pinned by
+   measurement, not by stretch: see `docs/UI-NOTES.md` § 3 for the constraint-propagation
+   bug that used to leave the bottom half of a maximised window unpainted, and § 6 for the
+   harness that now proves it is gone (`tools/verify-layout.ps1`: 8 pages × 3 sizes, all
+   with `gap=0`).
 
 ---
 
@@ -92,11 +96,29 @@ cargo run --release
 
 The debug binary also runs and is what the screenshots above were taken with.
 
+### Visual verification
+
+Layout claims are checked against the screen, not against a compiler exit code:
+
+```powershell
+# one screenshot, ground truth (BitBlt of the window rect)
+pwsh -File tools/shot.ps1 -Page home -Mode maximize -Out docs/screenshots/home.png
+pwsh -File tools/shot.ps1 -Page settings -Mode size -Size 1024x768 -Dark -Out .../s-dark.png
+
+# every page x every size, asserting the shell invariant from the app's own trace
+pwsh -File tools/verify-layout.ps1
+```
+
+`shot.ps1` restores the window before resizing (a resize delivered to a
+never-restored window is dropped by the backend) and copies the screen rather than
+calling `PrintWindow`, which renders the app's own surface and can therefore lie
+about layout.
+
 ### Verification gates
 
 ```powershell
 cargo fmt --all -- --check
-cargo test --workspace                       # 195 tests
+cargo test --workspace                       # 197 tests
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)
