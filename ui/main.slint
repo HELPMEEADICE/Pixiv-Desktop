@@ -1,0 +1,33 @@
+// Smoke view: proves the generated Fluent icon set compiles as themeable Path elements.
+import { IconHome, IconDiscover, IconRanking, IconBookmark, IconSettings, IconSearch } from "icons.slint";
+
+export component AppWindow inherits Window {
+    title: "Pixiv Desktop";
+    width: 1280px;
+    height: 800px;
+    background: #ffffff;
+
+    in property <string> status-text: "booting";
+    in property <brush> ink: #1a1a1a;
+
+    VerticalLayout {
+        spacing: 12px;
+        padding: 16px;
+
+        HorizontalLayout {
+            spacing: 16px;
+            IconHome { tint: root.ink; }
+            IconDiscover { tint: root.ink; }
+            IconRanking { tint: root.ink; }
+            IconBookmark { tint: root.ink; }
+            IconSearch { tint: root.ink; }
+            IconSettings { tint: root.ink; }
+        }
+
+        Text {
+            text: root.status-text;
+            color: root.ink;
+            font-size: 16px;
+        }
+    }
+}
