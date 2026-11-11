@@ -1,0 +1,21 @@
+[package]
+name = "pixiv-download"
+description = "Bounded-concurrency download queue with filename templating and duplicate detection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pixiv-types.workspace = true
+pixiv-api.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

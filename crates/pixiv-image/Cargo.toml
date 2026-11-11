@@ -1,0 +1,21 @@
+[package]
+name = "pixiv-image"
+description = "Asynchronous priority image cache with bounded memory and disk tiers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pixiv-types.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+image.workspace = true
+parking_lot.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

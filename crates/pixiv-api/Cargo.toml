@@ -1,0 +1,23 @@
+[package]
+name = "pixiv-api"
+description = "HTTP transport for pixiv.net: sessions, endpoints, retry and rate limiting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pixiv-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+urlencoding.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
