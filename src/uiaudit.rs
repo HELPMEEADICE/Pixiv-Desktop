@@ -647,6 +647,42 @@ mod tests {
         );
     }
 
+    /// Rule: an indeterminate "still working" row is `LoadingRow`, not a bar.
+    ///
+    /// Four footers - gallery, home, profile, detail - each wrote
+    /// `ProgressBar { indeterminate: true; width: 120px }` inside a
+    /// `VerticalLayout { alignment: center }`. A layout alignment orders children
+    /// along the main axis only, so the bar sat at the left edge of its row while
+    /// the label beside it was centred. `StateView` had already solved this exact
+    /// shape with paired stretch spacers; nobody applied it to the footers.
+    ///
+    /// The rule is about the component, not the arithmetic: a page may not build
+    /// a progress bar at all. `downloads.slint` is exempt because its bar is a
+    /// determinate per-row meter, not a loading indicator.
+    #[test]
+    fn indeterminate_loading_uses_the_shared_row() {
+        const EXEMPT: [&str; 2] = ["components.slint", "downloads.slint"];
+        let mut offenders = Vec::new();
+        for path in page_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if EXEMPT.contains(&name.as_str()) {
+                continue;
+            }
+            let source = read(&path);
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("").trim();
+                if code.contains("ProgressBar {") {
+                    offenders.push(format!("{name}:{}: {code}", index + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "use LoadingRow for an indeterminate row; a fixed-width bar in a centred layout is not centred:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Collect the double-quoted strings at the top level of an expression.
     ///
     /// Stops at the terminating `;` so a ternary's branches are all included but

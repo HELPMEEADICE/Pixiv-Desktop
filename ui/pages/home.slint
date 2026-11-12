@@ -16,7 +16,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme, Type } from "../theme.slint";
 import {
     AppButton, ButtonKind, IconSlot, TagChip, PageScroll, StateView, StateKind, Skeleton,
-    ProgressBar, IllustItem, IllustCard, RecommendTagItem, RecommendUserItem, UserCard,
+    ProgressBar, LoadingRow, IllustItem, IllustCard, RecommendTagItem, RecommendUserItem, UserCard,
 } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
 
@@ -262,9 +262,8 @@ export component HomePage inherits Rectangle {
 
         if root.feed-state == 0 && root.loading-more : Rectangle {
             height: 40px;
-            VerticalLayout {
-                alignment: center;
-                ProgressBar { indeterminate: true; width: 120px; }
+            LoadingRow {
+                y: (parent.height - self.height) / 2;
             }
         }
 

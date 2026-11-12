@@ -16,7 +16,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme, Type } from "../theme.slint";
 import {
     IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton,
-    ButtonKind, PageScroll, ProgressBar, Divider, RecommendUserItem, UserCard,
+    ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard,
 } from "../components.slint";
 
 /// The masonry columns themselves. No scroll view, no header: callers embed this
@@ -335,17 +335,12 @@ export component GalleryPage inherits Rectangle {
         if root.state == 0 && root.loading-more : Rectangle {
             height: 48px;
 
-            VerticalLayout {
-                alignment: center;
-                spacing: Theme.space-2;
-
-                ProgressBar { indeterminate: true; width: 120px; }
-                Text {
-                    text: "正在加载更多…";
-                    color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    horizontal-alignment: center;
-                }
+            // Centred by construction: see `LoadingRow`. A bare `ProgressBar`
+            // with an explicit width inside a centred vertical layout sits at the
+            // left edge, which is where all four of these footers were.
+            LoadingRow {
+                y: (parent.height - self.height) / 2;
+                label: "正在加载更多…";
             }
         }
     }

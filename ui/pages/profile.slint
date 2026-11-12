@@ -9,7 +9,7 @@
 import { Theme, Type } from "../theme.slint";
 import {
     AppButton, ButtonKind, IconButton, IconSlot, PageScroll, StateView, StateKind, Skeleton,
-    ProgressBar, Avatar, IllustItem, ProfileStatItem,
+    ProgressBar, LoadingRow, Avatar, IllustItem, ProfileStatItem,
 } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
 
@@ -303,16 +303,9 @@ export component ProfilePage inherits Rectangle {
 
         if root.state == 0 && root.loading-more : Rectangle {
             height: 48px;
-            VerticalLayout {
-                alignment: center;
-                spacing: Theme.space-2;
-                ProgressBar { indeterminate: true; width: 120px; }
-                Text {
-                    text: "正在加载更多作品…";
-                    color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    horizontal-alignment: center;
-                }
+            LoadingRow {
+                y: (parent.height - self.height) / 2;
+                label: "正在加载更多作品…";
             }
         }
     }

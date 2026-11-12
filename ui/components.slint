@@ -860,6 +860,41 @@ export component ProgressBar inherits Rectangle {
     }
 }
 
+/// One centred "still working" row: an indeterminate bar over a line of text.
+///
+/// `VerticalLayout { alignment: center }` does not centre a fixed-width child on
+/// the cross axis - it only orders children along the main one. That is how four
+/// "loading more" footers ended up with the bar hugging the left edge while their
+/// label was centred: in a vertical layout a 120px `ProgressBar` sits at the
+/// *start* of the row. Paired stretch spacers are the only construction in Slint
+/// that actually centres a fixed-size child, so the pattern lives here once
+/// instead of being re-derived - incorrectly - per page.
+export component LoadingRow inherits Rectangle {
+    in property <string> label: "";
+    in property <length> bar-width: 120px;
+    in property <length> spacing: Theme.space-2;
+
+    height: body.preferred-height;
+
+    body := VerticalLayout {
+        alignment: center;
+        spacing: root.spacing;
+
+        HorizontalLayout {
+            width: 100%;
+            Rectangle { horizontal-stretch: 1; }
+            ProgressBar { indeterminate: true; width: root.bar-width; }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        if root.label != "" : Text {
+            text: root.label;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-caption;
+            horizontal-alignment: center;
+        }
+    }
+}
 export enum StateKind {
     Loading,
     Empty,

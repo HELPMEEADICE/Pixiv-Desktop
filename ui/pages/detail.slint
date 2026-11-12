@@ -14,7 +14,7 @@ import { Theme, Type } from "../theme.slint";
 
 import {
     AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind,
-    Skeleton, HoverTip, InfoBar, InfoKind, PageScroll, ProgressBar, SectionHeader,
+    Skeleton, HoverTip, InfoBar, InfoKind, PageScroll, ProgressBar, LoadingRow, SectionHeader,
     IconPresenter, IconSlot,
 } from "../components.slint";
 
@@ -572,15 +572,12 @@ export component DetailPage inherits Rectangle {
 
         Divider { }
 
-        if root.state == 1 : VerticalLayout {
-            alignment: center;
-            spacing: Theme.space-2;
-            ProgressBar { indeterminate: true; width: 140px; }
-            Text {
-                text: "正在载入作品…";
-                color: Theme.text-secondary;
-                font-size: Theme.font-small;
-                horizontal-alignment: center;
+        if root.state == 1 : Rectangle {
+            height: 96px;
+            LoadingRow {
+                y: (parent.height - self.height) / 2;
+                bar-width: 140px;
+                label: "正在载入作品…";
             }
         }
 
