@@ -46,6 +46,10 @@ export component ZoomViewer inherits Rectangle {
     callback set-fit-mode(bool);
     callback set-zoom(float);
     callback toggle-fullscreen();
+    /// Re-fetch the page whose image failed. Distinct from the zoom callbacks:
+    /// this button used to call `request-toggle-zoom`, so pressing it changed the
+    /// scale and never requested the image again.
+    callback reload-image();
 
     clip: true;
     background: Theme.viewer-surface;
@@ -106,7 +110,7 @@ export component ZoomViewer inherits Rectangle {
             AppButton {
                 label: "重新载入";
                 icon: "refresh";
-                clicked => { root.request-toggle-zoom(0px / 1px, 0px / 1px); }
+                clicked => { root.reload-image(); }
             }
             Rectangle { horizontal-stretch: 1; }
         }
@@ -492,6 +496,7 @@ export component DetailPage inherits Rectangle {
     callback set-fit-mode(bool);
     callback set-zoom(float);
     callback toggle-fullscreen();
+    callback reload-image();
 
     background: Theme.canvas;
 
@@ -606,6 +611,7 @@ export component DetailPage inherits Rectangle {
                 set-fit-mode(m) => { root.set-fit-mode(m); }
                 set-zoom(z) => { root.set-zoom(z); }
                 toggle-fullscreen => { root.toggle-fullscreen(); }
+                reload-image => { root.reload-image(); }
             }
 
             Rectangle {
@@ -674,6 +680,7 @@ export component DetailPage inherits Rectangle {
                 set-fit-mode(m) => { root.set-fit-mode(m); }
                 set-zoom(z) => { root.set-zoom(z); }
                 toggle-fullscreen => { root.toggle-fullscreen(); }
+                reload-image => { root.reload-image(); }
             }
             InfoPanel {
                 vertical-stretch: 2;

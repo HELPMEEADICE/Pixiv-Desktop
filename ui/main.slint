@@ -304,6 +304,7 @@ export component AppWindow inherits Window {
     callback detail-request-zoom(float, float, float, float, float);
     callback detail-request-pan(float, float);
     callback detail-request-toggle-zoom(float, float);
+    callback detail-reload-image();
     callback detail-set-fit-mode(bool);
     callback detail-set-zoom(float);
     callback toggle-fullscreen();
@@ -814,6 +815,7 @@ export component AppWindow inherits Window {
                         request-zoom(px, py, dy, w, h) => { root.detail-request-zoom(px, py, dy, w, h); }
                         request-pan(dx, dy) => { root.detail-request-pan(dx, dy); }
                         request-toggle-zoom(px, py) => { root.detail-request-toggle-zoom(px, py); }
+                        reload-image => { root.detail-reload-image(); }
                         set-fit-mode(m) => { root.detail-set-fit-mode(m); }
                         set-zoom(z) => { root.detail-set-zoom(z); }
                         toggle-fullscreen => { root.toggle-fullscreen(); }

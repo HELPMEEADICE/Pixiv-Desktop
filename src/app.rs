@@ -1768,6 +1768,84 @@ impl App {
         self.refresh_chrome();
     }
 
+    /// Re-fetch the image of the page the viewer is showing.
+    ///
+    /// The failed state has had a 「重新载入」 button since the viewer was written,
+    /// but it was wired to `request-toggle-zoom`: pressing it flipped between fit
+    /// and 1:1 and never requested the image again. One page is retried, not the
+    /// whole work - a 40-page illustration should not refetch 40 images to recover
+    /// from one timeout.
+    fn reload_detail_page(&self) {
+        let Some(models) = self.detail_models.clone() else {
+            return;
+        };
+        let Some(illust) = self.detail.clone() else {
+            return;
+        };
+        let index = self.ui().get_detail_page_index().max(0) as usize;
+        let Some(mut page) = models.row_data(index) else {
+            return;
+        };
+
+        let Some(url) = retry_url(&self.detail_pages, illust.urls.largest(), index) else {
+            return;
+        };
+
+        // Back to "loading" first: leaving `failed` set would keep the error screen
+        // up while the retry is in flight, which is exactly the lie the old button
+        // told.
+        page.loaded = false;
+        page.failed = false;
+        models.set_row_data(index, page);
+
+        let mode = self.mode;
+        let cache = self.cache.clone();
+        let rt = self.rt.clone();
+        let epoch = self.detail_epoch;
+        let seed = illust.id;
+        rt.spawn(async move {
+            let raw = if mode == Mode::Demo {
+                demo_raw(
+                    Id(seed.get().wrapping_add(index as u64)),
+                    900,
+                    1200,
+                    index as u64,
+                )
+                .await
+            } else {
+                fetch_sized_viewer(&cache, &url).await
+            };
+            on_ui(move |shared| {
+                let Ok(app) = shared.try_borrow() else {
+                    return;
+                };
+                if app.detail_epoch != epoch {
+                    return;
+                }
+                let Some(model) = app.detail_models.clone() else {
+                    return;
+                };
+                let Some(mut page) = model.row_data(index) else {
+                    return;
+                };
+                match raw {
+                    Some(raw) => {
+                        let image = raw.to_slint();
+                        page.source = image.clone();
+                        page.thumb = image;
+                        page.loaded = true;
+                        page.failed = false;
+                    }
+                    None => {
+                        page.loaded = false;
+                        page.failed = true;
+                    }
+                }
+                model.set_row_data(index, page);
+            });
+        });
+    }
+
     // ------------------------------------------------------------- workers
 
     fn start_download_worker(&self) {
@@ -4153,6 +4231,13 @@ fn install_callbacks(app: &Shared) {
     }
     {
         let shared = app.clone();
+        ui.on_detail_reload_image(move || {
+            let app = shared.borrow();
+            app.reload_detail_page();
+        });
+    }
+    {
+        let shared = app.clone();
         ui.on_detail_set_fit_mode(move |fit| {
             let app = shared.borrow();
             app.ui().set_detail_fit_mode(fit);
@@ -4547,6 +4632,20 @@ fn start_timers(app: &Shared) {
 
 // ---------------------------------------------------------------- helpers
 
+/// Which image URL a reload of `index` should fetch.
+///
+/// A work with a page list has one real URL per page; a work without one has
+/// exactly one image, at the largest size the detail payload offered. Anything
+/// else is an index the page list does not have, and refusing is the honest
+/// answer - guessing a URL would download the wrong picture.
+fn retry_url(pages: &[PageMeta], largest: &str, index: usize) -> Option<String> {
+    match pages.get(index) {
+        Some(meta) => Some(meta.urls.regular.to_string()),
+        None if index == 0 => Some(largest.to_string()),
+        None => None,
+    }
+}
+
 fn ranking_index(kind: RankingKind) -> i32 {
     RankingKind::ALL
         .iter()
@@ -4714,8 +4813,9 @@ fn now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{describe_session_error, history_illust, to_download_rows};
+    use super::{describe_session_error, history_illust, retry_url, to_download_rows};
     use pixiv_download::{DownloadRequest, DownloadTask, TaskState};
+    use pixiv_types::domain::PageMeta;
     use std::path::PathBuf;
 
     #[test]
@@ -4764,6 +4864,20 @@ mod tests {
         assert_ne!(offline, changed);
     }
 
+    fn page_meta(id: &str) -> PageMeta {
+        PageMeta {
+            urls: pixiv_types::domain::PageUrls {
+                thumb_mini: String::new(),
+                small: String::new(),
+                regular: format!("regular-{id}"),
+                original: format!("original-{id}"),
+            },
+            index: 0,
+            width: 1000,
+            height: 1000,
+        }
+    }
+
     fn task(state: TaskState, bytes_done: u64, bytes_total: Option<u64>) -> DownloadTask {
         DownloadTask {
             id: 7,
@@ -4787,6 +4901,24 @@ mod tests {
     /// switches its badge text and its action buttons on them. If the mapping
     /// drifts, a finished task renders as "下载中" or offers a cancel button that
     /// does nothing - exactly the stuck-queue symptom this app had.
+    #[test]
+    fn reloading_a_page_never_invents_a_url() {
+        // A page list gives one URL per page, and the index is the page the viewer
+        // is showing - not always page one.
+        let pages = vec![page_meta("p0"), page_meta("p1")];
+        assert_eq!(
+            retry_url(&pages, "largest", 1).as_deref(),
+            Some("regular-p1")
+        );
+
+        // No page list: exactly one image exists, and only index 0 may ask for it.
+        assert_eq!(retry_url(&[], "largest", 0).as_deref(), Some("largest"));
+        assert_eq!(retry_url(&[], "largest", 1), None);
+
+        // Past the end of a real list: refuse rather than guess.
+        assert_eq!(retry_url(&pages, "largest", 5), None);
+    }
+
     #[test]
     fn task_states_map_to_the_integers_the_ui_switches_on() {
         assert_eq!(
