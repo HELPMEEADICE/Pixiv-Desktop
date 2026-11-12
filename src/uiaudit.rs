@@ -533,6 +533,75 @@ mod tests {
         );
     }
 
+    /// Rule: source files carry no stray control bytes.
+    ///
+    /// A real defect, found while reading \`gallery.slint\`: a comment in it contained
+    /// a raw ESC (0x1B) where a letter belonged. The Slint parser does not care -
+    /// it lives in a \`//\` comment - so nothing failed, and the byte survived three
+    /// rounds of review. It is invisible in an editor that renders escapes and it
+    /// silently poisons every line-based tool: \`grep -c\` counts a line, a diff shows
+    /// the line as changed, and a copy-paste through a terminal can eat the rest of
+    /// the line.
+    ///
+    /// The rule is deliberately about *source text*, not about the UI: tab, CR and
+    /// LF are the only control characters a source file may contain.
+    #[test]
+    fn sources_contain_no_stray_control_bytes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for (dir, extension) in [("ui", "slint"), ("src", "rs"), ("crates", "rs")] {
+            collect_with_extension(&root.join(dir), extension, &mut files);
+        }
+        assert!(
+            files.len() > 25,
+            "source tree looks empty ({} files)",
+            files.len()
+        );
+
+        let mut offenders = Vec::new();
+        for path in files {
+            let name = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            let mut line = 1_usize;
+            for (offset, byte) in bytes.iter().copied().enumerate() {
+                match byte {
+                    b'\n' => line += 1,
+                    b'\t' | b'\r' => {}
+                    0x00..=0x08 | 0x0b | 0x0c | 0x0e..=0x1f | 0x7f => offenders.push(format!(
+                        "{name}:{line}: byte 0x{byte:02X} at offset {offset}"
+                    )),
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "sources may only contain tab, CR and LF as control characters:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// Every file under \`dir\` whose extension matches, recursively.
+    fn collect_with_extension(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_with_extension(&path, extension, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some(extension) {
+                out.push(path);
+            }
+        }
+    }
+
     /// Collect the double-quoted strings at the top level of an expression.
     ///
     /// Stops at the terminating `;` so a ternary's branches are all included but
