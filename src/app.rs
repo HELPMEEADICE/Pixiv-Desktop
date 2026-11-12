@@ -944,18 +944,22 @@ impl App {
             return;
         }
         const NARROW_BREAKPOINT: f32 = 1000.0;
-        const RAIL_EXPANDED: f32 = 240.0;
-        const RAIL_COMPACT: f32 = 52.0;
 
         let narrow = width < NARROW_BREAKPOINT;
         let collapsed = self.ui().get_rail_collapsed();
-        let rail = if narrow || collapsed {
-            RAIL_COMPACT
-        } else {
-            RAIL_EXPANDED
+        // Read the rail widths from the theme rather than restating them here: they
+        // were duplicated as 240/52 while `theme.slint` said 232/52, so the content
+        // box this function reported was 8px wider than the one the layout used.
+        let ui = self.ui();
+        let rail = {
+            let theme = ui.global::<Theme>();
+            if narrow || collapsed {
+                theme.get_rail_width_compact()
+            } else {
+                theme.get_rail_width()
+            }
         };
         let content = (width - rail).max(0.0);
-        let ui = self.ui();
         ui.set_narrow(narrow);
         ui.set_content_width(content);
     }
