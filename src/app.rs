@@ -38,8 +38,11 @@ use pixiv_demo::DemoCatalog;
 use pixiv_download::{DownloadConfig, DownloadManager, DownloadRequest};
 use pixiv_image::{CacheConfig, ImageCache, Priority};
 use pixiv_store::{HistoryEntry, Store};
-use pixiv_types::Id;
-use pixiv_types::domain::{Illust, PageMeta, RankingKind, SearchQuery};
+use pixiv_types::domain::{
+    Author, Bookmark, BookmarkRestrict, Illust, IllustKind, IllustStats, IllustUrls, PageMeta,
+    RankingKind, SearchQuery,
+};
+use pixiv_types::{Id, PixivError};
 
 use crate::images::{COVER_CONCURRENCY, CoverLoader};
 use crate::layout::{self, GridGeometry};
@@ -130,6 +133,151 @@ thread_local! {
     static APP: std::cell::RefCell<Option<Shared>> = const { std::cell::RefCell::new(None) };
 }
 
+/// One sentence a user can act on, per failure class.
+///
+/// The three cases that used to collapse into "网络错误" are genuinely different:
+/// a rejected cookie needs a new cookie, an unreachable host needs a network
+/// check, and a changed payload needs a bug report. Saying which one it is is the
+/// difference between a fixable problem and a shrug.
+/// Turn one stored history row into a feed card.
+///
+/// The history table only kept the id, title, author and cover URL, so every
+/// other field stays at its default instead of being fabricated — asking the
+/// network to enrich a local list would make the page fail whenever it is offline.
+fn history_illust(entry: &HistoryEntry) -> Illust {
+    Illust {
+        id: entry.illust_id.parse::<u64>().map(Id).unwrap_or(Id(0)),
+        title: entry.title.clone(),
+        kind: IllustKind::Illustration,
+        page_count: 1,
+        width: 0,
+        height: 0,
+        urls: IllustUrls {
+            regular: entry.thumb_url.clone(),
+            ..IllustUrls::default()
+        },
+        author: Author {
+            id: Id(0),
+            name: entry.author.clone(),
+            account: String::new(),
+            avatar: None,
+        },
+        tags: Vec::new(),
+        description: String::new(),
+        create_date: None,
+        bookmark: Bookmark::default(),
+        stats: IllustStats::default(),
+        x_restrict: 0,
+        sl: 0,
+        is_masked: false,
+        is_bookmarkable: true,
+    }
+}
+
+fn describe_session_error(error: &PixivError) -> String {
+    match error {
+        PixivError::Unauthorized => {
+            "Pixiv 不接受这个 PHPSESSID：它可能已经退出登录或过期，请到浏览器重新复制".to_string()
+        }
+        PixivError::Network(message) => format!("无法连接 Pixiv：{message}"),
+        PixivError::Http { status, message } => {
+            if message.trim().is_empty() {
+                format!("Pixiv 返回 HTTP {status}")
+            } else {
+                format!("Pixiv 返回 HTTP {status}：{message}")
+            }
+        }
+        PixivError::RateLimited(after) => {
+            format!("请求过于频繁，请等待 {:.0} 秒后重试", after.as_secs_f32())
+        }
+        PixivError::Decode(message) => {
+            format!("Pixiv 的响应格式与预期不符（可能是接口变化）：{message}")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Re-validate the session loaded from disk before trusting it.
+///
+/// A stored cookie is a claim, not a fact: it may have been revoked in the
+/// browser months ago. This asks the server once at startup, quietly refreshes
+/// the account id and CSRF token when it is still good, and demotes the app to
+/// demo mode with an explanation when it is not.
+///
+/// A *network* failure is deliberately not treated as a dead session — being
+/// offline should not log the user out.
+fn verify_stored_session(app: &Shared) {
+    let (client, stored, data_dir, rt) = {
+        let app = app.borrow();
+        (
+            app.client.clone(),
+            app.session.clone(),
+            app.data_dir.clone(),
+            app.rt.clone(),
+        )
+    };
+    if !stored.is_authenticated() {
+        return;
+    }
+    let Some(client) = client else {
+        return;
+    };
+
+    rt.spawn(async move {
+        let outcome = client.account().await;
+        on_ui(move |shared| {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            match outcome {
+                Ok(account) => {
+                    let refreshed = Session {
+                        phpsessid: stored.phpsessid.clone(),
+                        user_id: Some(account.id),
+                        user_name: Some(account.name.clone()),
+                        csrf_token: account.csrf_token.clone(),
+                    };
+                    client.set_session(refreshed.clone());
+                    let _ = crate::session::save(&data_dir, &refreshed);
+                    app.session = refreshed;
+                    app.mode = Mode::Real;
+                    {
+                        let ui = app.ui();
+                        ui.set_authenticated(true);
+                        ui.set_demo_mode(false);
+                        ui.set_session_user(account.name.clone().into());
+                    }
+                    app.refresh_chrome();
+                }
+                Err(PixivError::Unauthorized) => {
+                    // The session is dead: forget it rather than pretending.
+                    crate::session::clear(&data_dir);
+                    app.session = Session::default();
+                    app.mode = Mode::Demo;
+                    app.feed_owner = None;
+                    {
+                        let ui = app.ui();
+                        ui.set_authenticated(false);
+                        ui.set_session_user("".into());
+                        ui.set_demo_mode(true);
+                    }
+                    app.refresh_chrome();
+                    app.notify(2, "保存的登录已失效，已切回演示模式；请重新登录");
+                    drop(app);
+                    App::load_page(shared, false);
+                }
+                Err(error) => {
+                    // Offline is not the same as signed out.
+                    app.notify(
+                        2,
+                        format!("暂未验证登录状态：{}", describe_session_error(&error)),
+                    );
+                }
+            }
+        });
+    });
+}
+
 /// Run `f` with the app handle on the UI thread.
 fn on_ui<F>(f: F)
 where
@@ -173,6 +321,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     install_callbacks(&app);
     start_timers(&app);
+    // The stored cookie is only a claim until Pixiv confirms it.
+    verify_stored_session(&app);
 
     // The window is not mapped yet, so a size applied here would be clamped by
     // the window manager. A single-shot timer after the loop starts is the
@@ -681,6 +831,42 @@ impl App {
             }
         }
 
+        // History never leaves this machine, so it is answered here rather than
+        // in a spawned task. It was previously wired to a stub that returned an
+        // empty vector, which is why the page stayed blank even though every
+        // opened artwork was recorded in SQLite.
+        if page == Destination::History {
+            let mut app = shared.borrow_mut();
+            let entries = app.store.view_history(60).unwrap_or_default();
+            let items: Vec<Illust> = entries
+                .iter()
+                // Rows written by earlier builds in demo mode carry `demo://`
+                // covers; they cannot be fetched, so they are dropped rather than
+                // rendered as permanently broken cards.
+                .filter(|entry| entry.thumb_url.starts_with("http"))
+                .map(history_illust)
+                .collect();
+            app.feed_owner = Some(page);
+            app.reached_end = true;
+            app.set_tags(Vec::new());
+            if items.is_empty() {
+                let ui = app.ui();
+                ui.set_grid_state(2);
+                ui.set_grid_state_title("还没有浏览记录".into());
+                ui.set_grid_state_glyph("history".into());
+                ui.set_grid_message("打开任意作品后，它会按时间出现在这里。".into());
+                ui.set_grid_action_label("".into());
+                ui.set_grid_count_label("".into());
+                ui.set_grid_columns(ModelRc::default());
+                app.columns.clear();
+                app.index.clear();
+            } else {
+                app.render_feed(items, false);
+            }
+            app.refresh_chrome();
+            return;
+        }
+
         match mode {
             Mode::Demo => {
                 let app = shared.borrow();
@@ -706,6 +892,8 @@ impl App {
                 let session = app.session.clone();
                 drop(app);
 
+                // The history page needs no network at all, so it is answered
+                // before a task is spawned.
                 rt.spawn(async move {
                     let result = match (client, page) {
                         (Some(client), _) => match page {
@@ -717,13 +905,20 @@ impl App {
                                 .search(&SearchQuery::new(&word))
                                 .await
                                 .map(|r| r.items),
-                            Destination::Bookmarks => client
-                                .bookmarks(session.user_id.unwrap_or_default(), false, 1)
-                                .await
-                                .map(|r| r.items),
-                            Destination::History => {
-                                Ok(App::history_items_dummy(1).into_iter().collect())
-                            }
+                            // Never fall back to a default id: user 0 does not
+                            // exist, so the request would either 404 or answer
+                            // somebody else's page.
+                            Destination::Bookmarks => match session.user_id {
+                                Some(user) => {
+                                    client.bookmarks(user, false, 1).await.map(|r| r.items)
+                                }
+                                None => Err(PixivError::Unauthorized),
+                            },
+                            // History is local, so there is nothing to ask
+                            // Pixiv. It used to return an empty vector, which made
+                            // the page permanently blank even though every opened
+                            // artwork was being written to SQLite.
+                            Destination::History => Ok(Vec::new()),
                             _ => client
                                 .ranking(RankingKind::Daily, 1)
                                 .await
@@ -753,11 +948,6 @@ impl App {
                 });
             }
         }
-    }
-
-    /// History is read from SQLite, not from Pixiv, so it needs no network.
-    fn history_items_dummy(_page: u32) -> Vec<Illust> {
-        Vec::new()
     }
 
     fn show_feed_error(&mut self, message: &str) {
@@ -1119,10 +1309,16 @@ impl App {
                                 query.page = cursor;
                                 client.search(&query).await.map(|r| r.items)
                             }
-                            Destination::Bookmarks => client
-                                .bookmarks(session.user_id.unwrap_or_default(), false, cursor)
-                                .await
-                                .map(|r| r.items),
+                            Destination::Bookmarks => match session.user_id {
+                                Some(user) => {
+                                    client.bookmarks(user, false, cursor).await.map(|r| r.items)
+                                }
+                                None => Err(PixivError::Unauthorized),
+                            },
+                            // A local list has no next page, and falling
+                            // through to the daily ranking would have appended
+                            // unrelated live works to the history.
+                            Destination::History => Ok(Vec::new()),
                             _ => client
                                 .ranking(RankingKind::Daily, cursor)
                                 .await
@@ -1302,13 +1498,19 @@ impl App {
             ui.set_detail_tags(ModelRc::from(Rc::new(VecModel::from(tags))));
         }
 
-        let _ = self.store.record_view(&HistoryEntry {
-            illust_id: illust.id.to_string(),
-            title: illust.title.clone(),
-            author: illust.author.name.clone(),
-            thumb_url: illust.urls.grid().to_string(),
-            viewed_at: now_secs(),
-        });
+        // Demo works must never enter the on-disk history: their cover URLs are
+        // `demo://` pseudo-URLs that cannot be fetched again, so a later real-mode
+        // History page would show cards that can never load. The two modes stay
+        // separate, which is the whole point of the demo badge.
+        if self.mode == Mode::Real {
+            let _ = self.store.record_view(&HistoryEntry {
+                illust_id: illust.id.to_string(),
+                title: illust.title.clone(),
+                author: illust.author.name.clone(),
+                thumb_url: illust.urls.grid().to_string(),
+                viewed_at: now_secs(),
+            });
+        }
 
         // Page skeletons, sized from the real page metadata when we have it.
         let count = (illust.page_count.max(1) as usize).max(pages.len());
@@ -1455,35 +1657,47 @@ impl App {
                 let Some(client) = self.client.clone() else {
                     return;
                 };
-                let currently = self.bookmarked_state(illust_id);
-                let next = !currently;
-                let weak = self.ui.clone();
+                // Decide the direction from what the server last told us, and
+                // carry the current visibility so a private bookmark stays
+                // private.
+                let current = self
+                    .detail
+                    .as_ref()
+                    .filter(|d| d.id == illust_id)
+                    .map(|d| d.bookmark)
+                    .unwrap_or_default();
+                let next = !current.bookmarked;
+                let restrict = if current.bookmarked {
+                    current.restrict
+                } else {
+                    BookmarkRestrict::Public
+                };
                 let rt = self.rt.clone();
                 rt.spawn(async move {
-                    let result = client.set_bookmark(illust_id, next, false).await;
-                    let _ = invoke_from_event_loop(move || {
-                        let Some(ui) = weak.upgrade() else {
+                    let result = client.set_bookmark(illust_id, next, restrict).await;
+                    on_ui(move |shared| {
+                        let Ok(mut app) = shared.try_borrow_mut() else {
                             return;
                         };
                         match result {
-                            Ok(()) => {
-                                ui.set_detail_bookmarked(next);
-                                ui.set_notice(
-                                    if next {
+                            Ok(state) => {
+                                // Apply the state the server reported, not the
+                                // one we asked for: if Pixiv refused, this is the
+                                // old value and the UI stays truthful.
+                                let now_bookmarked = state.bookmarked;
+                                app.apply_bookmark_state(illust_id, state);
+                                app.notify(
+                                    1,
+                                    if now_bookmarked {
                                         "已加入收藏"
                                     } else {
                                         "已取消收藏"
-                                    }
-                                    .into(),
+                                    },
                                 );
-                                ui.set_notice_kind(1);
                             }
                             Err(error) => {
-                                // No false success: the UI keeps the previous
-                                // state and says what happened.
-                                ui.set_detail_bookmarked(currently);
-                                ui.set_notice(format!("收藏失败：{error}").into());
-                                ui.set_notice_kind(3);
+                                // Leave the UI on the previous state and say why.
+                                app.notify(3, format!("收藏失败：{error}"));
                             }
                         }
                     });
@@ -1504,6 +1718,25 @@ impl App {
                     .map(|d| d.bookmark.bookmarked)
             })
             .unwrap_or(false)
+    }
+
+    /// Adopt the server's bookmark verdict everywhere the illustration appears.
+    ///
+    /// The feed card, the detail model and the metadata list each hold their own
+    /// copy, and they used to drift: toggling on the detail page left the card in
+    /// the grid showing the opposite state until the page was reloaded.
+    fn apply_bookmark_state(&mut self, id: Id, state: pixiv_types::BookmarkState) {
+        if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
+            item.apply_bookmark(state.bookmarked, state.restrict);
+        }
+        if let Some(detail) = self.detail.as_mut().filter(|d| d.id == id) {
+            detail.apply_bookmark(state.bookmarked, state.restrict);
+            let count = detail.bookmark.count as i32;
+            let ui = self.ui();
+            ui.set_detail_bookmarks(count);
+            ui.set_detail_bookmarked(state.bookmarked);
+        }
+        self.resync_bookmarks();
     }
 
     /// Push the in-memory bookmark state back into the visible cards.
@@ -1642,6 +1875,12 @@ impl App {
         });
     }
 
+    /// Toggle the follow state for the current author.
+    ///
+    /// The button's own label is not evidence of anything: it is a cached render.
+    /// The server is asked first, then told to change its mind, then asked again
+    /// to confirm — because `POST /ajax/user/follow` never existed, and the
+    /// version that assumed success reported a follow that had not happened.
     fn toggle_follow(&mut self) {
         let Some(illust) = self.detail.clone() else {
             return;
@@ -1653,27 +1892,47 @@ impl App {
         let Some(client) = self.client.clone() else {
             return;
         };
-        let next = !self.ui().get_detail_following();
+        let artist = illust.author.id;
         self.ui().set_detail_busy(true);
         let rt = self.rt.clone();
         rt.spawn(async move {
-            let result = client.follow(illust.author.id, next).await;
+            let outcome = async {
+                let current = client.follow_state(artist).await?;
+                let target = !current;
+                client.follow(artist, target).await?;
+                let confirmed = client.follow_state(artist).await?;
+                Ok::<_, PixivError>((target, confirmed))
+            }
+            .await;
             on_ui(move |shared| {
                 let Ok(app) = shared.try_borrow() else {
                     return;
                 };
                 app.ui().set_detail_busy(false);
-                match result {
-                    Ok(()) => {
-                        app.ui().set_detail_following(next);
-                        app.notify(
-                            1,
-                            if next {
-                                "已关注画师"
-                            } else {
-                                "已取消关注"
-                            },
-                        );
+                match outcome {
+                    Ok((target, confirmed)) => {
+                        app.ui().set_detail_following(confirmed);
+                        if confirmed == target {
+                            app.notify(
+                                1,
+                                if confirmed {
+                                    "已关注画师"
+                                } else {
+                                    "已取消关注"
+                                },
+                            );
+                        } else {
+                            // The server disagreed with the request: say so rather
+                            // than claim the click worked.
+                            app.notify(
+                                3,
+                                if confirmed {
+                                    "关注状态未改变：服务器仍然显示已关注"
+                                } else {
+                                    "关注状态未改变：服务器仍然显示未关注"
+                                },
+                            );
+                        }
                     }
                     Err(error) => app.notify(3, format!("关注失败：{error}")),
                 }
@@ -1681,73 +1940,98 @@ impl App {
         });
     }
 
+    /// Verify a pasted cookie against Pixiv and adopt the account it belongs to.
+    ///
+    /// The previous version called this "verified" after probing user id 0's
+    /// bookmarks and then asked for user id 0's *profile* to find out who the
+    /// user was, which of course failed — so the app announced a successful
+    /// sign-in with no name, no id and `session` never updated. Everything
+    /// downstream (the signed-in badge, the bookmark gate, the bookmarks page)
+    /// then behaved as if nobody was signed in.
+    ///
+    /// Now the only evidence that counts is `GET /ajax/user/self`: it either
+    /// names the account or it does not. Nothing is adopted optimistically, and
+    /// demo mode stays on until the server has answered.
     fn apply_cookie(&mut self, cookie: String) {
         let session = Session {
             phpsessid: Some(cookie.clone()),
             user_id: None,
             user_name: None,
+            csrf_token: None,
         };
         let Ok(client) = Client::new(ClientConfig::default(), session) else {
             self.notify(3, "无法创建网络客户端");
             return;
         };
+        // Install the client now so long-lived workers share one connection
+        // pool, but leave the mode alone until the server has answered.
+        self.client = Some(client.clone());
 
         self.ui().set_busy(true);
-        self.notify(0, "正在验证会话…");
+        self.notify(0, "正在向 Pixiv 验证会话…");
         let rt = self.rt.clone();
-        let weak = self.ui.clone();
         let data_dir = self.data_dir.clone();
-        let probe_client = client.clone();
         rt.spawn(async move {
-            // Exercising an authenticated endpoint is the only honest way to
-            // know a pasted cookie works; Pixiv answers Unauthorized otherwise.
-            let probe = probe_client.bookmarks(Id(0), false, 1).await;
-            let accepted = !matches!(
-                probe,
-                Err(pixiv_types::PixivError::Unauthorized) | Err(pixiv_types::PixivError::Api(_))
-            );
-            let message = match &probe {
-                Err(pixiv_types::PixivError::Unauthorized) => "会话无效或已过期".to_string(),
-                Err(pixiv_types::PixivError::Api(error)) => format!("会话无效：{error}"),
-                Err(error) => format!("会话验证失败：{error}"),
-                Ok(_) => "会话已验证".to_string(),
-            };
-            let (user_id, user_name) = if accepted {
-                match probe_client.user_profile(Id(0)).await {
-                    Ok(profile) => (Some(profile.id), Some(profile.name)),
-                    Err(_) => (None, None),
-                }
-            } else {
-                (None, None)
-            };
-            let verified = Session {
-                phpsessid: accepted.then_some(cookie),
-                user_id,
-                user_name,
-            };
-            let _ = invoke_from_event_loop(move || {
-                let Some(ui) = weak.upgrade() else {
+            let outcome = client.account().await;
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
                 };
-                ui.set_busy(false);
-                if accepted {
-                    let _ = crate::session::save(&data_dir, &verified);
-                    ui.set_authenticated(true);
-                    ui.set_demo_mode(false);
-                    ui.set_session_user(verified.user_name.clone().unwrap_or_default().into());
-                    ui.set_cookie_input("".into());
-                    ui.set_notice("会话已验证并保存".into());
-                    ui.set_notice_kind(1);
-                } else {
-                    ui.set_notice(message.into());
-                    ui.set_notice_kind(3);
+                app.ui().set_busy(false);
+                match outcome {
+                    Ok(account) => {
+                        let verified = Session {
+                            phpsessid: Some(cookie),
+                            user_id: Some(account.id),
+                            user_name: Some(account.name.clone()),
+                            csrf_token: account.csrf_token.clone(),
+                        };
+                        // The probe client and the stored session must agree, or
+                        // later mutations would run without a CSRF token.
+                        client.set_session(verified.clone());
+                        let _ = crate::session::save(&data_dir, &verified);
+                        app.session = verified;
+                        app.client = Some(client);
+                        app.mode = Mode::Real;
+                        app.feed_owner = None;
+                        {
+                            let ui = app.ui();
+                            ui.set_authenticated(true);
+                            ui.set_demo_mode(false);
+                            ui.set_session_user(account.name.clone().into());
+                            ui.set_cookie_input("".into());
+                        }
+                        app.refresh_chrome();
+                        let label = if account.account.trim().is_empty() {
+                            format!("{}（UID {}）", account.name, account.id.get())
+                        } else {
+                            format!(
+                                "{} @{}（UID {}）",
+                                account.name,
+                                account.account,
+                                account.id.get()
+                            )
+                        };
+                        app.notify(1, format!("已登录：{label}"));
+                        drop(app);
+                        App::load_page(shared, false);
+                    }
+                    Err(error) => {
+                        app.session = Session::default();
+                        app.mode = Mode::Demo;
+                        app.feed_owner = None;
+                        {
+                            let ui = app.ui();
+                            ui.set_authenticated(false);
+                            ui.set_session_user("".into());
+                            ui.set_demo_mode(true);
+                        }
+                        app.refresh_chrome();
+                        app.notify(3, format!("登录失败：{}", describe_session_error(&error)));
+                    }
                 }
             });
         });
-
-        self.client = Some(client);
-        self.mode = Mode::Real;
-        self.refresh_chrome();
     }
 }
 
@@ -2634,9 +2918,55 @@ fn now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::to_download_rows;
+    use super::{describe_session_error, history_illust, to_download_rows};
     use pixiv_download::{DownloadRequest, DownloadTask, TaskState};
     use std::path::PathBuf;
+
+    #[test]
+    fn history_rows_build_cards_and_demo_rows_are_excluded() {
+        use pixiv_store::HistoryEntry;
+        let real = HistoryEntry {
+            illust_id: "151942140".into(),
+            title: "Sky".into(),
+            author: "author".into(),
+            thumb_url: "https://i.pximg.net/img-master/x_p0_master1200.jpg".into(),
+            viewed_at: 1,
+        };
+        let demo = HistoryEntry {
+            illust_id: "4407147838939147252".into(),
+            title: "demo".into(),
+            author: "demo".into(),
+            thumb_url: "demo://illust/1/1000x1000/regular.png".into(),
+            viewed_at: 2,
+        };
+        let card = history_illust(&real);
+        assert_eq!(card.id, pixiv_types::Id(151_942_140));
+        assert_eq!(card.urls.grid(), real.thumb_url);
+        assert_eq!(card.author.name, "author");
+        // Demo covers are pseudo-URLs that can never be fetched, so the real-mode
+        // history must drop those rows instead of rendering broken cards.
+        let rows = [real, demo];
+        let kept: Vec<_> = rows
+            .iter()
+            .filter(|entry| entry.thumb_url.starts_with("http"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn session_failures_are_described_as_different_problems() {
+        use pixiv_types::PixivError;
+        // A dead cookie, an unreachable host and a changed payload need three
+        // different reactions from the user, so they must not share one sentence.
+        let unauthorized = describe_session_error(&PixivError::Unauthorized);
+        let offline = describe_session_error(&PixivError::Network("dns".into()));
+        let changed = describe_session_error(&PixivError::Decode("shape".into()));
+        assert!(unauthorized.contains("PHPSESSID"), "{unauthorized}");
+        assert!(offline.contains("无法连接"), "{offline}");
+        assert!(changed.contains("格式"), "{changed}");
+        assert_ne!(unauthorized, offline);
+        assert_ne!(offline, changed);
+    }
 
     fn task(state: TaskState, bytes_done: u64, bytes_total: Option<u64>) -> DownloadTask {
         DownloadTask {
