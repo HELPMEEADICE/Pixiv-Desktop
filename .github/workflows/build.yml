@@ -1,0 +1,482 @@
+# Build and package the client for every supported OS/architecture pair.
+#
+# Triggers
+#   * release: published   the packaged files are attached to that release
+#   * workflow_dispatch    the same files land on the Actions run summary, so a
+#                          build can be downloaded without cutting a release
+#
+# Every produced file is uploaded as its own artifact (one MSI, one zip, one
+# DMG or one AppImage per job), so a download never arrives inside one big
+# bundle that has to be unpacked again. Practical notes:
+#   * the artifact service drops the executable bit, so chmod +x the AppImage
+#     after downloading it,
+#   * the binaries are unsigned (ad-hoc signed on macOS): the first launch
+#     needs the "open anyway" / right-click-open confirmation.
+#
+# The release profile below is applied here and only here. Cargo.toml keeps the
+# profile developers build with locally; these overrides make the artefacts as
+# small and as fast as the toolchain can manage, at the cost of build time.
+
+name: Build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label used in the file names (default: workspace version)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: 1
+  # CI-only profile overrides: opt-level z, fat LTO, one codegen unit, abort on
+  # panic, debuginfo stripped, no incremental artefacts, no overflow checks.
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: z
+  CARGO_PROFILE_RELEASE_LTO: fat
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+  CARGO_PROFILE_RELEASE_PANIC: abort
+  CARGO_PROFILE_RELEASE_STRIP: debuginfo
+  CARGO_PROFILE_RELEASE_DEBUG: "false"
+  CARGO_PROFILE_RELEASE_INCREMENTAL: "false"
+  CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "false"
+  # Must never change, or an upgrade would install side by side with the old MSI.
+  UPGRADE_CODE: 6F2B9C4E-1D3A-4C58-9E7B-2A5D8F1C0B34
+
+jobs:
+  prepare:
+    name: Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The release tag wins, then the dispatch input, then Cargo.toml.
+      - name: Resolve the version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          raw="${RELEASE_TAG:-}"
+          if [ -z "$raw" ]; then raw="${INPUT_VERSION:-}"; fi
+          if [ -z "$raw" ]; then
+            raw="$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "pixiv-desktop") | .version')"
+          fi
+          version="${raw#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$raw" >> "$GITHUB_OUTPUT"
+          echo "packaging $version (tag: $raw)"
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            msvc_arch: amd64
+            wix_arch: x64
+          - arch: aarch64
+            target: aarch64-pc-windows-msvc
+            msvc_arch: amd64_arm64
+            wix_arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      # The MSVC ARM64 tools belong to the image's C++ workload; install the
+      # component instead of failing when an image rolls without them.
+      - name: Ensure the ARM64 MSVC toolset
+        if: matrix.arch == 'aarch64'
+        shell: pwsh
+        run: |
+          $cl = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\arm64\cl.exe" -ErrorAction SilentlyContinue
+          if ($cl) { Write-Host "ARM64 toolset present: $($cl[0].FullName)"; exit 0 }
+          $installer = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Microsoft Visual Studio\Installer\vs_installer.exe'
+          $vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $installer) -or -not (Test-Path $vswhere)) { throw "no ARM64 MSVC toolset and no VS installer on this runner" }
+          $instance = & $vswhere -latest -products '*' -property installationPath
+          & $installer modify --installPath "$instance" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --norestart --nocache
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { throw "VS installer exited with $LASTEXITCODE" }
+
+      - name: Enter the MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin pixiv-desktop
+
+      - name: Package the portable zip
+        shell: pwsh
+        run: |
+          $version = "${{ needs.prepare.outputs.version }}"
+          $stage = "dist\zip-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\pixiv-desktop.exe" $stage
+          Copy-Item "README.md" $stage
+          $zip = "dist\pixiv-desktop-$version-windows-${{ matrix.arch }}.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+          Remove-Item -Recurse -Force $stage
+          Write-Host "zip: $((Get-Item $zip).Length) bytes"
+
+      # WiX 3: a minimal per-machine MSI with a Start Menu shortcut. The source
+      # is generated here so the repository stays free of installer projects.
+      - name: Package the MSI
+        shell: pwsh
+        run: |
+          $version = "${{ needs.prepare.outputs.version }}"
+          $match = [regex]::Match($version, '^\d+(\.\d+){0,3}')
+          if (-not $match.Success) { throw "cannot derive an MSI version from '$version'" }
+          $parts = New-Object System.Collections.Generic.List[string]
+          $parts.AddRange([string[]]$match.Value.Split('.'))
+          while ($parts.Count -lt 3) { $parts.Add('0') }
+          $msiVersion = $parts -join '.'
+
+          $candle = Get-ChildItem "C:\Program Files (x86)\WiX Toolset*" -Recurse -Filter candle.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $candle) { throw "WiX toolset (candle.exe) not found on this runner" }
+          $wixBin = $candle.Directory.FullName
+
+          $wxs = Join-Path $env:RUNNER_TEMP "pixiv-desktop.wxs"
+          $wxsBody = @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+            <Product Id="*" Name="Pixiv Desktop" Language="1033" Version="$(var.ProductVersion)"
+                     Manufacturer="Pixiv Desktop" UpgradeCode="$(var.UpgradeCode)">
+              <Package Id="*" Description="Pixiv Desktop" InstallerVersion="500"
+                       Compressed="yes" InstallScope="perMachine" />
+              <MajorUpgrade DowngradeErrorMessage="A newer version of Pixiv Desktop is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+              <Directory Id="TARGETDIR" Name="SourceDir">
+                <Directory Id="ProgramFiles64Folder">
+                  <Directory Id="INSTALLDIR" Name="Pixiv Desktop" />
+                </Directory>
+                <Directory Id="ProgramMenuFolder">
+                  <Directory Id="ApplicationProgramsFolder" Name="Pixiv Desktop" />
+                </Directory>
+              </Directory>
+              <DirectoryRef Id="INSTALLDIR">
+                <Component Id="MainExecutable" Guid="*">
+                  <File Id="PixivDesktopExe" Source="$(var.SourceDir)\pixiv-desktop.exe" KeyPath="yes" />
+                </Component>
+              </DirectoryRef>
+              <DirectoryRef Id="ApplicationProgramsFolder">
+                <Component Id="StartMenuEntry" Guid="*">
+                  <Shortcut Id="StartMenuShortcut" Name="Pixiv Desktop" Description="Native Pixiv desktop client"
+                            Target="[INSTALLDIR]pixiv-desktop.exe" WorkingDirectory="INSTALLDIR" />
+                  <RemoveFolder Id="RemoveApplicationProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+                  <RegistryValue Root="HKCU" Key="Software\PixivDesktop" Name="StartMenuEntry" Type="integer" Value="1" KeyPath="yes" />
+                </Component>
+              </DirectoryRef>
+              <Feature Id="MainFeature" Title="Pixiv Desktop" Level="1">
+                <ComponentRef Id="MainExecutable" />
+                <ComponentRef Id="StartMenuEntry" />
+              </Feature>
+            </Product>
+          </Wix>
+          '@
+          Set-Content -Path $wxs -Value $wxsBody -Encoding utf8
+
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Push-Location dist
+          try {
+            & (Join-Path $wixBin 'candle.exe') -nologo -arch ${{ matrix.wix_arch }} "-dProductVersion=$msiVersion" "-dUpgradeCode=$env:UPGRADE_CODE" "-dSourceDir=${{ github.workspace }}\target\${{ matrix.target }}\release" -out pixiv-desktop.wixobj $wxs
+            if ($LASTEXITCODE -ne 0) { throw "candle failed with $LASTEXITCODE" }
+            & (Join-Path $wixBin 'light.exe') -nologo -sval -out "pixiv-desktop-$version-windows-${{ matrix.arch }}.msi" pixiv-desktop.wixobj
+            if ($LASTEXITCODE -ne 0) { throw "light failed with $LASTEXITCODE" }
+            # Only the MSI is an artefact; leave the linker files out of dist.
+            Remove-Item -Force -ErrorAction SilentlyContinue pixiv-desktop.wixobj, *.wixpdb
+          } finally {
+            Pop-Location
+          }
+
+      - name: Upload the MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixiv-desktop-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}-msi
+          path: dist/*.msi
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload the zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixiv-desktop-${{ needs.prepare.outputs.version }}-windows-${{ matrix.arch }}-zip
+          path: dist/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Attach the files to the release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$TAG" dist/*.msi dist/*.zip --clobber
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: prepare
+    # macos-latest is Apple silicon: both slices are compiled from one runner,
+    # and each bundle carries a single architecture on purpose.
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-apple-darwin
+          - arch: aarch64
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin pixiv-desktop
+
+      # Assembled by hand instead of pulling a bundler: a Slint binary needs a
+      # bundle only so Finder treats it as an application.
+      - name: Package the DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.version }}"
+          APP="dist/Pixiv Desktop.app"
+          rm -rf dist "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          install -m 0755 "target/${{ matrix.target }}/release/pixiv-desktop" "$APP/Contents/MacOS/pixiv-desktop"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Pixiv Desktop</string>
+            <key>CFBundleDisplayName</key>
+            <string>Pixiv Desktop</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.pixivdesktop.client</string>
+            <key>CFBundleExecutable</key>
+            <string>pixiv-desktop</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleSignature</key>
+            <string>????</string>
+            <key>CFBundleShortVersionString</key>
+            <string>$VERSION</string>
+            <key>CFBundleVersion</key>
+            <string>$VERSION</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSSupportsAutomaticGraphicsSwitching</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          # An ad-hoc signature, not a Developer ID one: without any signature at
+          # all the loader refuses the binary on Apple silicon.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          hdiutil create -volname "Pixiv Desktop" -srcfolder "$APP" -ov -format UDZO -quiet \
+            "dist/pixiv-desktop-$VERSION-macos-${{ matrix.arch }}.dmg"
+          rm -rf "$APP"
+          ls -l dist
+
+      - name: Upload the DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixiv-desktop-${{ needs.prepare.outputs.version }}-macos-${{ matrix.arch }}-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Attach the file to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$TAG" dist/*.dmg --clobber
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: prepare
+    # 22.04 keeps the glibc floor low enough for the distributions that will
+    # actually run the AppImage.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            appimage_arch: x86_64
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            appimage_arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config squashfs-tools curl ca-certificates
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          fi
+
+      - name: Select the cross compiler
+        if: matrix.arch == 'aarch64'
+        run: |
+          {
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
+            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
+            echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar"
+          } >> "$GITHUB_ENV"
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin pixiv-desktop
+
+      # mksquashfs plus the type-2 runtime is what appimagetool does internally:
+      # no FUSE, no container, and no emulation for the foreign slice.
+      - name: Package the AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.version }}"
+          ARCH="${{ matrix.appimage_arch }}"
+          APPDIR="AppDir"
+          rm -rf "$APPDIR" payload.squashfs
+          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
+            "$APPDIR/usr/share/icons/hicolor/256x256/apps" dist
+
+          install -m 0755 "target/${{ matrix.target }}/release/pixiv-desktop" "$APPDIR/usr/bin/pixiv-desktop"
+
+          # The repository ships UI icons only, so the bundle icon is generated
+          # here; an assets/icons/app.png would take precedence once added.
+          if [ -f assets/icons/app.png ]; then
+            cp assets/icons/app.png "$APPDIR/pixiv-desktop.png"
+          else
+            python3 - "$APPDIR/pixiv-desktop.png" <<'PY'
+          import struct
+          import sys
+          import zlib
+
+          size = 256
+          rows = bytearray()
+          for y in range(size):
+              rows.append(0)
+              for x in range(size):
+                  t = (x + y) / (2.0 * (size - 1))
+                  rows += bytes((int(46 + 40 * t), int(96 + 90 * t), int(190 + 40 * t), 255))
+
+
+          def chunk(tag, data):
+              return (struct.pack(">I", len(data)) + tag + data
+                      + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+
+          png = (b"\x89PNG\r\n\x1a\n"
+                 + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+                 + chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+                 + chunk(b"IEND", b""))
+          with open(sys.argv[1], "wb") as handle:
+              handle.write(png)
+          PY
+          fi
+
+          cat > "$APPDIR/pixiv-desktop.desktop" <<DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=Pixiv Desktop
+          Comment=Native Pixiv desktop client
+          Exec=pixiv-desktop
+          Icon=pixiv-desktop
+          Terminal=false
+          Categories=Graphics;Viewer;Network;
+          DESKTOP
+          cp "$APPDIR/pixiv-desktop.desktop" "$APPDIR/usr/share/applications/pixiv-desktop.desktop"
+          cp "$APPDIR/pixiv-desktop.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/pixiv-desktop.png"
+
+          printf '%s\n' '#!/bin/sh' 'HERE="$(dirname "$(readlink -f "$0")")"' \
+            'exec "$HERE/usr/bin/pixiv-desktop" "$@"' > "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
+
+          curl -fsSL -o "runtime-$ARCH" \
+            "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-$ARCH"
+          chmod +x "runtime-$ARCH"
+          mksquashfs "$APPDIR" payload.squashfs -root-owned -noappend -comp zstd -b 131072 -quiet
+          cat "runtime-$ARCH" payload.squashfs > "dist/pixiv-desktop-$VERSION-linux-${{ matrix.arch }}.AppImage"
+          chmod +x dist/*.AppImage
+          ls -l dist
+
+      - name: Upload the AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixiv-desktop-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}-appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Attach the file to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$TAG" dist/*.AppImage --clobber
