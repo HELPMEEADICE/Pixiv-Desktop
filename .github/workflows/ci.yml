@@ -72,6 +72,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Three build scripts in the dependency graph probe pkg-config and fail
+      # outright when the headers are missing: wayland-sys asks for
+      # wayland-client, yeslogic-fontconfig-sys (through fontique) for
+      # fontconfig, tiny-xlib for x11 and x11-xcb. They are not probed at all on
+      # Windows or macOS, which is why Linux is the leg that goes red first.
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev
+
       - name: Install the toolchain
         uses: dtolnay/rust-toolchain@stable
 

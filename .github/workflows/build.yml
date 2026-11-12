@@ -346,9 +346,13 @@ jobs:
   linux:
     name: Linux ${{ matrix.arch }}
     needs: prepare
-    # 22.04 keeps the glibc floor low enough for the distributions that will
-    # actually run the AppImage.
-    runs-on: ubuntu-22.04
+    # Both slices build natively. A cross build to arm64 is not worth it here:
+    # wayland-sys, yeslogic-fontconfig-sys and tiny-xlib locate their system
+    # libraries through pkg-config while compiling, so an arm64 job would need an
+    # arm64 sysroot to satisfy them. ubuntu-24.04-arm is the arm64 hosted image,
+    # which leaves the arm64 AppImage on 24.04's glibc 2.39 and the x86_64 one on
+    # 22.04's 2.35.
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -357,28 +361,24 @@ jobs:
           - arch: x86_64
             target: x86_64-unknown-linux-gnu
             appimage_arch: x86_64
+            runs-on: ubuntu-22.04
           - arch: aarch64
             target: aarch64-unknown-linux-gnu
             appimage_arch: aarch64
+            runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
+      # The toolkit's own deps plus the three build scripts that probe
+      # pkg-config; squashfs-tools supplies mksquashfs. Same list as ci.yml.
       - name: Install the build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config squashfs-tools curl ca-certificates
-          if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-          fi
-
-      - name: Select the cross compiler
-        if: matrix.arch == 'aarch64'
-        run: |
-          {
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"
-            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"
-            echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar"
-          } >> "$GITHUB_ENV"
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config squashfs-tools curl ca-certificates \
+            libfontconfig1-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev
 
       - name: Install the toolchain
         uses: dtolnay/rust-toolchain@stable
