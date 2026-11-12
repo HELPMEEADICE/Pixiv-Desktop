@@ -341,7 +341,8 @@ third time, and the History page was permanently empty because it asked the
 - An empty search keyword no longer returns an unrelated default listing (it used
   to reach the API with `""` and render the reply as "your results").
 - `clear-cache` walks the disk tier on the runtime; it used to freeze the window
-  for the duration of the sweep.
+  for the duration of the sweep. (This line was written before the code caught up:
+  the handler still called `clear_disk()` inline until round four - see § 11.)
 - The search history was write-only: every keyword went into SQLite and nothing
   read it back. The empty-search state now offers the eight most recent terms as
   chips, refreshed on submit and on "clear history".
@@ -420,6 +421,82 @@ literal whose alpha byte is 0 — the shape this mistake always takes.
 - **Download rows with real tasks.** The page renders from the live queue and the
   state mapping is unit tested for all six states, but no screenshot shows a
   populated queue because demo mode refuses to write files by design.
+
+
+## 11. Round four: what was still broken after three passes
+
+Round three ended with a claim that the layout was measured rather than reviewed.
+It was, and it still missed twelve things - because a rule can only be measured if
+somebody measured it, and every defect below was invisible to the checks that
+existed at the time. Each one now has a guard.
+
+### 11a. Three of the four tooltips could not be displayed
+
+| Site | Why it never appeared |
+| --- | --- |
+| Compact navigation rail | the label tip was a child at `x: item.width + 8px`, inside a column with `clip: true` and 52px wide |
+| Command bar (back / forward / theme / account) | `TipPlacement.Below` put it at y = 54px, under the page, which is declared *after* the bar and paints an opaque `Theme.canvas` background |
+
+Round three had already found the *same* class of bug once ("drawn above a 48px
+bar at y = 0, i.e. outside the window") and fixed the direction without fixing the
+layering. A tooltip is the only element that must be drawn outside the control that
+owns it, and a child can do neither of the two things that requires.
+
+**Fix.** `ui/tip.slint` defines a `Tip` global (text, anchor, side, visible) and
+`AppWindow` owns the only `HoverTip`, declared after every page and before the
+suggestion panel. Controls publish; the window draws. Placement is derived from the
+anchor and clamped to the window, so no call site positions itself.
+`tooltips_are_rendered_by_one_overlay` fails the build if a page re-parents one.
+
+Because hover cannot be synthesised here, the bubble is captured through
+`PIXIV_DESKTOP_TIP=1`, which anchors the same overlay to the back button: the debug
+path and the real one share every line except where the anchor comes from.
+
+### 11b. The rest, in the order they were found
+
+| Defect | Root cause | Guard |
+| --- | --- | --- |
+| Four "loading more" footers drew their bar at the left edge with the label centred | `VerticalLayout { alignment: center }` orders children along the main axis only; a fixed-width child is placed at the start of the cross axis | `LoadingRow` + `indeterminate_loading_uses_the_shared_row` |
+| The viewer's 「重新载入」 button changed the zoom instead of reloading | it called `request-toggle-zoom`, the only callback the failed state had | a real `reload-image` callback; `retry_url` is a pure function with a test |
+| The detail page showed a fake author avatar (a blue disc with 画) | the panel predated `Avatar` and was never migrated | the real image through the same map; a resolved lookup also repoints the panel |
+| `Avatar` rendered a whole CJK display name as two clipped glyphs | it centred the *word* and asked `elide` to fit it into 32px | a one-character-wide clipped box (Slint 1.18 has `character-count` but no `substr`) |
+| A pending settings confirmation survived leaving the page | page instances stay alive; only `visible` changes | `changed visible` clears it |
+| The profile header had no narrow mode | a 208px card, absolute children, a hard-coded 250px action reserve | two sets of offsets, switched from the *measured* width pushed in by Rust |
+| `Ctrl+R` re-fetched a grid on pages that have none | one handler for seven pages | per-page refresh; the shortcut table now says what the key means |
+| `clear-cache` froze the window | the disk walk ran inline, on the paint thread | `spawn_blocking`, notice first (this section also corrects § 8a) |
+| Every download tick replaced the whole row model | a fresh `VecModel` every 500ms | one model, patched in place, with a test on the number of rows written |
+| `covers` and `avatars` grew for the life of the process | nothing ever removed an entry | collected at feed replacement / capped |
+| "Load more" re-balanced the entire feed | `rebuild_columns` ran on append | append into the shortest column; two tests pin the rule |
+| A download claim could strand a task in `Running` | the guard lived inside the spawned future, so a future dropped before its first poll never created it | the guard travels with the claim |
+
+That last one is why the suite could not be trusted for a whole round:
+`a_failed_request_becomes_failed_and_can_be_retried` failed about one run in three,
+and a gate that fails at random is worse than no gate at all. The cause was in the
+product, not in the test.
+
+### 11c. Rules added
+
+| Rule | What it prevents |
+| --- | --- |
+| `sources_contain_no_stray_control_bytes` | the raw ESC that sat inside a comment in `gallery.slint` for three rounds |
+| `tooltips_are_rendered_by_one_overlay` | a tooltip re-parented into a clip |
+| `indeterminate_loading_uses_the_shared_row` | a fifth hand-rolled centred row |
+
+`src/uiaudit.rs` now enforces ten rules. Three of them were written *after* the bug
+they catch, which is the pattern this file has settled into: find it on screen,
+prove it with pixels, then make it impossible.
+
+### 11d. Still not verified here
+
+- **Hover and keyboard.** The tooltip layer is proven by capture and by a debug
+  anchor, not by moving a pointer over the control. Nothing in the app is reachable
+  by Tab except `AppButton`; that is the next round, and the README now says so
+  instead of implying otherwise.
+- **A populated download queue.** Its state mapping is unit tested and the model is
+  now patched rather than replaced, but no capture shows real rows: demo mode
+  refuses to write files.
+- **「Load more」 on a long feed.** The placement rule is tested against the
+  balancer; the scrolling that triggers it still cannot be synthesised.
 
 ---
 
