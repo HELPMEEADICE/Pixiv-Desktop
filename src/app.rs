@@ -1788,6 +1788,14 @@ impl App {
         };
 
         let Some(url) = retry_url(&self.detail_pages, illust.urls.largest(), index) else {
+            // A work with no image at all - a novel, a deleted page, a page list
+            // that came back empty - has nothing to retry. Saying so is the whole
+            // difference between a button that is broken and one that has no work
+            // to do.
+            self.notify(
+                2,
+                "这件作品没有可重新载入的图片，可以点工具栏的「在浏览器中打开」",
+            );
             return;
         };
 
