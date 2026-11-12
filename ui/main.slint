@@ -29,12 +29,58 @@ import { Theme, Type, ThemeMode } from "theme.slint";
 export { Theme, Type, ThemeMode } from "theme.slint";
 import {
     IconButton, TextField, NavItem, Divider, HoverTip, IllustItem, IconSlot, TipPlacement,
+    Avatar, RecommendTagItem, RecommendUserItem, SuggestionItem, ProfileStatItem,
 } from "components.slint";
 import { HomePage } from "pages/home.slint";
 import { GalleryPage } from "pages/gallery.slint";
 import { DetailPage, ViewerPage } from "pages/detail.slint";
 import { DownloadsPage, DownloadRow } from "pages/downloads.slint";
 import { SettingsPage } from "pages/settings.slint";
+import { ProfilePage } from "pages/profile.slint";
+
+/// One row of the search-suggestion dropdown.
+///
+/// Local search history is drawn with a different glyph and colour, because a
+/// local recollection must never look like a Pixiv suggestion.
+component SuggestRow inherits Rectangle {
+    in property <SuggestionItem> item;
+    callback choose();
+
+    height: 34px;
+    background: root.item.active ? Theme.accent-subtle
+        : (row.has-hover ? Theme.layer-alt : transparent);
+
+    row := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.choose(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-2;
+
+        IconSlot {
+            name: root.item.local ? "history" : "tag";
+            slot: 14px;
+            tint: root.item.local ? Theme.text-tertiary : Theme.text-secondary;
+        }
+        Text {
+            text: root.item.label;
+            color: Theme.text;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.item.count != "" : Text {
+            text: root.item.count;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-caption;
+            vertical-alignment: center;
+        }
+    }
+}
 
 export enum Destination {
     Home,
@@ -46,6 +92,8 @@ export enum Destination {
     Detail,
     Downloads,
     Settings,
+    /// The native artist / user page, reached from any author reference.
+    UserProfile,
 }
 
 export component AppWindow inherits Window {
@@ -78,6 +126,54 @@ export component AppWindow inherits Window {
     in property <string> status-text: "";
     in property <string> session-user: "";
     in property <bool> authenticated: false;
+    /// The signed-in account's real avatar, decoded from i.pximg.net.
+    in property <image> account-avatar;
+    /// 0 ok, 1 loading, 2 failed or absent
+    in property <int> account-avatar-state: 2;
+
+    // ---- home sections (each loads and fails on its own) ----
+    in property <[RecommendTagItem]> home-tags: [];
+    in property <[RecommendUserItem]> home-artists: [];
+    in property <[IllustItem]> home-latest: [];
+    in property <string> home-latest-title: "最新作品";
+    /// 0 content, 1 loading, 2 empty, 3 error
+    in property <int> home-feed-state: 1;
+    in property <int> home-latest-state: 1;
+    in property <int> home-tags-state: 1;
+    in property <int> home-artists-state: 1;
+    in property <string> home-feed-message: "";
+    in property <string> home-latest-message: "";
+    in property <string> home-tags-message: "";
+    in property <string> home-artists-message: "";
+    in property <string> home-source-note: "";
+
+    // ---- discovery ----
+    in property <[RecommendUserItem]> discovery-users: [];
+    in property <int> discovery-users-state: 1;
+    in property <string> discovery-users-message: "";
+
+    // ---- search suggestions ----
+    in property <[SuggestionItem]> suggestions: [];
+    in property <bool> suggest-visible: false;
+    in property <string> suggest-note: "";
+
+    // ---- native user profile ----
+    in property <string> profile-name: "";
+    in property <string> profile-account: "";
+    in property <string> profile-uid: "";
+    in property <string> profile-comment: "";
+    in property <string> profile-webpage: "";
+    in property <image> profile-avatar;
+    in property <int> profile-avatar-state: 1;
+    in property <image> profile-background;
+    in property <bool> profile-premium: false;
+    in property <bool> profile-self: false;
+    in property <bool> profile-followed: false;
+    in property <bool> profile-busy: false;
+    in property <[ProfileStatItem]> profile-stats: [];
+    in property <int> profile-state: 1;
+    in property <string> profile-message: "";
+    in property <string> profile-count-label: "";
 
     // ---- theme ----
     /// `Theme.mode` and `Theme.system-dark` live in the `Theme` global, which
@@ -161,6 +257,13 @@ export component AppWindow inherits Window {
     callback go-back();
     callback go-forward();
     callback search-submitted(string);
+    /// The text changed; Rust debounces and asks Pixiv for candidates.
+    callback search-edited(string);
+    /// A suggestion row was chosen; the argument is the tag to search.
+    callback suggest-chosen(string);
+    callback suggest-dismissed();
+    /// Up / Down pressed inside the search box.
+    callback suggest-key(string);
     callback select-theme-mode(ThemeMode);
     callback toggle-theme();
     callback shell-shortcut(string);
@@ -168,6 +271,10 @@ export component AppWindow inherits Window {
     // ---- artwork feed ----
     callback open-illust(string);
     callback open-author(string);
+    /// Author link on a *card*, which carries the work id rather than the user id
+    /// so the profile can be opened without a lookup.
+    callback open-card-author(string);
+    callback open-profile(string);
     callback toggle-bookmark(string);
     callback open-tag(string);
     callback grid-measured(length);
@@ -218,6 +325,13 @@ export component AppWindow inherits Window {
     callback open-data-folder();
     callback open-project();
     callback dismiss-notice();
+
+    // ---- profile page ----
+    callback profile-back();
+    callback profile-refresh();
+    callback profile-retry();
+    callback profile-follow();
+    callback profile-load-more();
 
 
 
@@ -274,7 +388,16 @@ export component AppWindow inherits Window {
             if (e.modifiers.alt && e.text == "\u{F703}") { root.go-forward(); return EventResult.accept; }
             if (e.modifiers.control && e.text == "r") { root.grid-retry(); return EventResult.accept; }
             if (e.text == "\u{F70E}") { root.toggle-fullscreen(); return EventResult.accept; }
-            if (e.text == "\u{001b}") { root.shell-shortcut("escape"); return EventResult.accept; }
+            if (e.text == "\u{001b}") {
+                // Escape closes the suggestion panel before it means anything
+                // else: that is what the key does in every search field.
+                if (root.suggest-visible) {
+                    root.suggest-dismissed();
+                } else {
+                    root.shell-shortcut("escape");
+                }
+                return EventResult.accept;
+            }
             if (e.modifiers.control && e.text == "1") { root.navigate(Destination.Home); return EventResult.accept; }
             if (e.modifiers.control && e.text == "2") { root.navigate(Destination.Discovery); return EventResult.accept; }
             if (e.modifiers.control && e.text == "3") { root.navigate(Destination.Ranking); return EventResult.accept; }
@@ -347,7 +470,7 @@ export component AppWindow inherits Window {
                         clicked => { root.go-forward(); }
                     }
 
-                    Rectangle {
+                    search-host := Rectangle {
                         horizontal-stretch: 1;
                         height: Theme.topbar-height;
                         min-width: 120px;
@@ -358,6 +481,8 @@ export component AppWindow inherits Window {
                             placeholder: "搜索插画、漫画、动图或标签…  (Ctrl+F)";
                             leading-icon: "search";
                             text <=> root.search-text;
+                            edited(t) => { root.search-edited(t); }
+                            navigate-keys(k) => { root.suggest-key(k); }
                             accepted(t) => { root.search-submitted(t); }
                         }
                     }
@@ -375,40 +500,40 @@ export component AppWindow inherits Window {
                         clicked => { root.toggle-theme(); }
                     }
 
-                    // Account affordance: opens Settings, where the sign-in flow lives.
+                    // Account affordance. The avatar is the account's real
+                    // image; a letter in a coloured circle is not an avatar and
+                    // read as one for a whole release.
                     Rectangle {
                         width: 28px;
                         height: 100%;
 
-                        avatar := Rectangle {
+                        Avatar {
                             width: 28px;
                             height: 28px;
                             y: (parent.height - self.height) / 2;
-                            border-radius: Theme.radius-pill;
-                            background: root.authenticated ? Theme.accent-fill : Theme.layer-alt;
-                            border-width: root.authenticated ? 0px : 1px;
-                            border-color: Theme.border-strong;
-                            clip: true;
-
-                            Text {
-                                text: root.authenticated
-                                    ? (root.session-user == "" ? "已" : root.session-user)
-                                    : "登";
-                                color: root.authenticated ? Theme.on-accent : Theme.text-tertiary;
-                                font-size: Theme.font-caption;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
+                            size: 28px;
+                            source: root.account-avatar;
+                            state: root.authenticated ? root.account-avatar-state : 2;
+                            fallback: root.authenticated
+                                ? (root.session-user == "" ? "已" : root.session-user)
+                                : "登";
                         }
 
                         avatar-area := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.navigate(Destination.Settings); }
+                            clicked => {
+                                // Signed in: your own page. Otherwise the only
+                                // useful destination is the sign-in flow.
+                                if (root.authenticated) {
+                                    root.open-profile("");
+                                } else {
+                                    root.navigate(Destination.Settings);
+                                }
+                            }
                         }
                         HoverTip {
                             show: avatar-area.has-hover;
-                            tip: root.authenticated ? "账户与设置" : "未登录，点击前往设置";
+                            tip: root.authenticated ? "我的主页（登录管理在设置里）" : "未登录，点击前往设置";
                             placement: TipPlacement.Below;
                             x: (parent.width - self.width) / 2;
                             y: Theme.topbar-height + 6px;
@@ -515,17 +640,29 @@ export component AppWindow inherits Window {
                         visible: root.page == Destination.Home;
                         columns: root.grid-columns;
                         card-width: root.grid-card-width;
-                        state: root.grid-state;
-                        message: root.grid-message;
-                        tags: root.grid-tags;
-                        active-tag: root.grid-active-tag;
                         count-label: root.grid-count-label;
                         demo-mode: root.demo-mode;
                         loading-more: root.grid-loading-more;
                         scroll-y <=> root.home-scroll-y;
+
+                        feed-state: root.home-feed-state;
+                        feed-message: root.home-feed-message;
+                        source-note: root.home-source-note;
+                        recommend-tags: root.home-tags;
+                        tags-state: root.home-tags-state;
+                        tags-message: root.home-tags-message;
+                        latest: root.home-latest;
+                        latest-title: root.home-latest-title;
+                        latest-state: root.home-latest-state;
+                        latest-message: root.home-latest-message;
+                        artists: root.home-artists;
+                        artists-state: root.home-artists-state;
+                        artists-message: root.home-artists-message;
+
                         measured(w) => { root.grid-measured(w); }
                         open-illust(id) => { root.open-illust(id); }
                         open-author(id) => { root.open-author(id); }
+                        open-recommend-user(id) => { root.open-profile(id); }
                         toggle-bookmark(id) => { root.toggle-bookmark(id); }
                         open-tag(t) => { root.open-tag(t); }
                         refresh => { root.grid-retry(); }
@@ -560,6 +697,10 @@ export component AppWindow inherits Window {
                         active-tag: root.grid-active-tag;
                         count-label: root.grid-count-label;
                         recent-searches: root.page == Destination.Search ? root.recent-searches : [];
+                        recommend-users: root.page == Destination.Discovery ? root.discovery-users : [];
+                        recommend-users-state: root.discovery-users-state;
+                        recommend-users-message: root.discovery-users-message;
+                        open-user(id) => { root.open-profile(id); }
                         filters: root.page == Destination.Ranking ? root.ranking-filters : [];
                         active-filter: root.page == Destination.Ranking ? root.ranking-filter : -1;
                         loading-more: root.grid-loading-more;
@@ -574,6 +715,42 @@ export component AppWindow inherits Window {
                         action => { root.grid-action(); }
                         load-more => { root.load-more(); }
                         pick-search(w) => { root.search-submitted(w); }
+                    }
+
+                    ProfilePage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.page == Destination.UserProfile;
+                        user-name: root.profile-name;
+                        user-account: root.profile-account;
+                        user-id: root.profile-uid;
+                        user-comment: root.profile-comment;
+                        webpage: root.profile-webpage;
+                        avatar: root.profile-avatar;
+                        avatar-state: root.profile-avatar-state;
+                        cover: root.profile-background;
+                        premium: root.profile-premium;
+                        self: root.profile-self;
+                        stats: root.profile-stats;
+                        followed: root.profile-followed;
+                        busy: root.profile-busy;
+                        columns: root.grid-columns;
+                        card-width: root.grid-card-width;
+                        state: root.profile-state;
+                        message: root.profile-message;
+                        loading-more: root.grid-loading-more;
+                        count-label: root.profile-count-label;
+                        scroll-y <=> root.grid-scroll-y;
+                        measured(w) => { root.grid-measured(w); }
+                        back => { root.profile-back(); }
+                        refresh => { root.profile-refresh(); }
+                        retry => { root.profile-retry(); }
+                        toggle-follow => { root.profile-follow(); }
+                        open-illust(id) => { root.open-illust(id); }
+                        open-author(id) => { root.open-author(id); }
+                        toggle-bookmark(id) => { root.toggle-bookmark(id); }
+                        open-external => { root.shell-shortcut("open-external"); }
+                        load-more => { root.profile-load-more(); }
                     }
 
                     DetailPage {
@@ -786,5 +963,71 @@ export component AppWindow inherits Window {
                 }
             }
         }
+
+    // ================= search suggestions =================
+    // Declared as a sibling of the whole shell, not inside the command bar:
+    // a child of the top bar is painted before the page content, so the page's
+    // own background would cover the dropdown. Anchored to the search field's
+    // absolute position so it stays under the box at every window size.
+    if root.suggest-visible : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: transparent;
+
+        // Click-outside-to-close, declared before the panel so the panel wins
+        // the hit test on its own area.
+        scrim := TouchArea {
+            clicked => { root.suggest-dismissed(); }
+        }
+    }
+
+    if root.suggest-visible : Rectangle {
+        x: search-host.absolute-position.x;
+        y: search-host.absolute-position.y + search-host.height - 2px;
+        width: max(240px, search-host.width);
+        height: min(392px, panel-body.preferred-height + 10px);
+        border-radius: Theme.radius-md;
+        background: Theme.layer;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: Theme.shadow-2;
+        drop-shadow-offset-y: 6px;
+        clip: true;
+
+        panel-body := VerticalLayout {
+            padding-top: 5px;
+            padding-bottom: 5px;
+            spacing: 0px;
+
+            if root.suggestions.length == 0 : Text {
+                height: 40px;
+                text: root.suggest-note;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-small;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            for s in root.suggestions : SuggestRow {
+                item: s;
+                choose => { root.suggest-chosen(s.tag); }
+            }
+
+            if root.suggestions.length > 0 && root.suggest-note != "" : Text {
+                height: 20px;
+                x: Theme.space-3;
+                width: max(0px, parent.width - Theme.space-3 * 2);
+                text: root.suggest-note;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-caption;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
     }
 }

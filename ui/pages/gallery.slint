@@ -16,7 +16,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme, Type } from "../theme.slint";
 import {
     IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton,
-    ButtonKind, PageScroll, ProgressBar, Divider,
+    ButtonKind, PageScroll, ProgressBar, Divider, RecommendUserItem, UserCard,
 } from "../components.slint";
 
 /// The masonry columns themselves. No scroll view, no header: callers embed this
@@ -99,6 +99,13 @@ export component GalleryPage inherits Rectangle {
     callback action();
     callback load-more();
     callback pick-search(string);
+    /// Recommended artists, shown only on the discovery page. Empty elsewhere,
+    /// which is what keeps one page component serving five destinations without
+    /// pretending they all have the same sources.
+    in property <[RecommendUserItem]> recommend-users: [];
+    in property <int> recommend-users-state: 2;
+    in property <string> recommend-users-message: "";
+    callback open-user(string);
 
     background: Theme.canvas;
 
@@ -190,6 +197,54 @@ export component GalleryPage inherits Rectangle {
                         label: t;
                         active: t == root.active-tag;
                         clicked => { root.open-tag(t); }
+                    }
+                }
+            }
+        }
+
+        // ---------------- recommended artists (discovery only) ----------------
+        if root.recommend-users-state == 0 && root.recommend-users.length > 0 : VerticalLayout {
+            spacing: Theme.space-2;
+
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Text {
+                    text: "推荐画师";
+                    color: Theme.text;
+                    font-size: Theme.font-small;
+                    font-weight: Type.semibold;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "来自 /ajax/discovery/users，点击进入作者主页";
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+
+            Rectangle {
+                height: 132px;
+                clip: true;
+
+                ScrollView {
+                    width: 100%;
+                    height: 100%;
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+                    HorizontalLayout {
+                        spacing: Theme.card-gap;
+                        alignment: start;
+                        for u in root.recommend-users : UserCard {
+                            item: u;
+                            card-width: 210px;
+                            open => { root.open-user(u.id); }
+                            toggle-follow => { }
+                        }
                     }
                 }
             }

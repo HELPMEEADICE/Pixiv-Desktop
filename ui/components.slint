@@ -320,6 +320,10 @@ export component TextField inherits Rectangle {
     callback edited(string);
     callback accepted(string);
     callback cleared();
+    /// Up/Down pressed while the field has focus, so the suggestion panel can
+    /// move its own cursor. TextInput would otherwise consume the arrows to move
+    /// the caret, and the panel would never see them.
+    callback navigate-keys(string);
 
     /// Focus the inner input. Slint has no declarative focus hook, so callers
     /// invoke this from a callback (e.g. the Ctrl+F shortcut).
@@ -375,6 +379,13 @@ export component TextField inherits Rectangle {
         single-line: true;
         edited => { root.edited(root.text); }
         accepted => { root.accepted(root.text); }
+        key-pressed(e) => {
+            if (e.text == "\u{F700}" || e.text == "\u{F701}") {
+                root.navigate-keys(e.text);
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
     }
 
     // TextInput has no placeholder of its own, so it is drawn underneath with an
@@ -962,6 +973,67 @@ export component PageScroll inherits Rectangle {
 }
 
 // ======================================================================
+// Identity: a real avatar, always
+// ======================================================================
+
+/// A circular avatar backed by a real image.
+///
+/// The previous account affordance drew the first character of the user's name
+/// in a coloured circle, which reads as an avatar but is not one. Every place
+/// that shows a Pixiv user now uses this component: it draws the decoded image
+/// when it has one, a neutral placeholder while it loads, and the initial only
+/// when the image genuinely could not be fetched.
+export component Avatar inherits Rectangle {
+    in property <image> source;
+    /// Used for the fallback initial only. Never rendered as the avatar itself.
+    in property <string> fallback: "";
+    /// 0 ok, 1 loading, 2 failed or absent.
+    in property <int> state: 0;
+    in property <length> size: 28px;
+    in property <bool> ring: false;
+
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: Theme.layer-alt;
+    border-width: root.ring ? 2px : 1px;
+    border-color: root.ring ? Theme.accent-fill : Theme.border;
+    clip: true;
+
+    out property <bool> has-image: root.source.width > 0 && root.state == 0;
+
+    Image {
+        source: root.source;
+        image-fit: cover;
+        width: 100%;
+        height: 100%;
+        visible: root.has-image;
+    }
+
+    // Loading: a quiet sweep, not a flash of "已".
+    if root.state == 1 && !root.has-image : Rectangle {
+        background: Theme.layer-alt;
+        IconPresenter {
+            name: "artist";
+            glyph-size: root.size * 0.5;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            tint: Theme.text-disabled;
+        }
+    }
+
+    if root.state != 1 && !root.has-image : Text {
+        text: root.fallback == "" ? "?" : root.fallback;
+        color: Theme.text-tertiary;
+        font-size: max(9px, root.size * 0.42);
+        font-weight: Type.semibold;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// ======================================================================
 // Artwork card
 // ======================================================================
 
@@ -986,6 +1058,13 @@ export struct IllustItem {
     height: int,
     /// 0 ok, 1 loading, 2 failed
     state: int,
+    /// The author's real avatar, loaded from i.pximg.net. `author-avatar-url` is
+    /// kept as well so an avatar that arrives later can be matched back to the
+    /// rows that want it without re-fetching a profile.
+    author-avatar: image,
+    author-avatar-url: string,
+    /// 0 ok, 1 loading, 2 failed or absent
+    author-avatar-state: int,
 }
 
 /// The bookmark toggle that floats on the cover's corner.
@@ -1192,16 +1271,43 @@ export component IllustCard inherits Rectangle {
                 overflow: elide;
                 vertical-alignment: center;
             }
-            if root.show-author : Text {
+            if root.show-author : Rectangle {
                 x: 0px;
                 y: 22px;
                 width: parent.width;
-                height: 16px;
-                text: root.item.author;
-                color: Theme.text-tertiary;
-                font-size: Theme.font-caption;
-                overflow: elide;
-                vertical-alignment: center;
+                height: 18px;
+
+                Avatar {
+                    x: 0px;
+                    y: 0px;
+                    size: 16px;
+                    source: root.item.author-avatar;
+                    state: root.item.author-avatar-state;
+                    fallback: root.item.author;
+                    border-width: 0px;
+                }
+                Text {
+                    x: 21px;
+                    y: 0px;
+                    width: max(0px, parent.width - 21px);
+                    text: root.item.author;
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                // The author's own hit target, declared last so it wins the
+                // hit-test against the card's open-on-click area.
+                author-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.open-author(); }
+                }
+                HoverTip {
+                    show: author-ta.has-hover;
+                    tip: root.item.author;
+                    x: 0px;
+                    y: -self.height - 4px;
+                }
             }
         }
     }
@@ -1325,6 +1431,130 @@ export component SettingsRow inherits Rectangle {
                     @children
                 }
             }
+        }
+    }
+}
+
+/// Presentation model for a tag Pixiv recommends.
+export struct RecommendTagItem {
+    /// The tag as Pixiv spells it, which is what a search must submit.
+    name: string,
+    /// What to render: the translation when Pixiv sent one.
+    label: string,
+    emphasized: bool,
+}
+
+/// Presentation model for a user Pixiv recommends.
+export struct RecommendUserItem {
+    id: string,
+    name: string,
+    account: string,
+    comment: string,
+    avatar: image,
+    avatar-url: string,
+    preview: image,
+    followed: bool,
+    premium: bool,
+    /// 0 ok, 1 loading, 2 failed or absent
+    avatar-state: int,
+}
+
+/// One row of the search-suggestion panel.
+export struct SuggestionItem {
+    /// What gets searched when this row is chosen.
+    tag: string,
+    /// What is rendered: the translation, when there is one.
+    label: string,
+    /// Formatted work count, empty when Pixiv reported none.
+    count: string,
+    /// True for a local search-history row. Rendered differently on purpose:
+    /// local history must never look like a Pixiv suggestion.
+    local: bool,
+    /// True for the row the keyboard cursor is on.
+    active: bool,
+}
+
+/// A labelled figure on the profile header.
+export struct ProfileStatItem {
+    label: string,
+    value: string,
+}
+
+/// A rounded tile that shows a recommended artist: real avatar, name, handle,
+/// comment and a preview of their work.
+export component UserCard inherits Rectangle {
+    in property <RecommendUserItem> item;
+    in property <length> card-width: 220px;
+    callback open();
+    callback toggle-follow();
+
+    width: root.card-width;
+    height: 132px;
+    border-radius: Theme.radius-lg;
+    background: hover.has-hover ? Theme.layer : Theme.layer-alt;
+    border-width: 1px;
+    border-color: Theme.border;
+    clip: true;
+
+    // Open-on-click first, so the follow button declared later wins.
+    hover := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open(); }
+    }
+
+    if root.item.preview.width > 0 : Rectangle {
+        x: parent.width - 96px;
+        y: 0px;
+        width: 96px;
+        height: 100%;
+        opacity: 0.5;
+        clip: true;
+        Image {
+            source: root.item.preview;
+            image-fit: cover;
+            width: 100%;
+            height: 100%;
+        }
+    }
+
+    VerticalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-2;
+
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Avatar {
+                size: 36px;
+                source: root.item.avatar;
+                state: root.item.avatar-state;
+                fallback: root.item.name;
+            }
+            VerticalLayout {
+                spacing: 0px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.item.name;
+                    color: Theme.text;
+                    font-size: Theme.font-small;
+                    font-weight: Type.semibold;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.item.account == "" ? "" : "@" + root.item.account;
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    overflow: elide;
+                }
+            }
+        }
+
+        Text {
+            text: root.item.comment;
+            color: Theme.text-secondary;
+            font-size: Theme.font-caption;
+            wrap: word-wrap;
+            max-height: 32px;
+            overflow: elide;
         }
     }
 }

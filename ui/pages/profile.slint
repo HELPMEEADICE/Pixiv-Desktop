@@ -1,0 +1,292 @@
+// A native artist / user profile.
+//
+// This is the page every author link used to bypass by opening a browser. It is
+// built from the same data the official user page reads: /ajax/user/{id}?full=1
+// for the identity, /ajax/user/{id}/profile/all for the work ids, and a batched
+// detail call for the thumbnails. Nothing here is invented: a field the endpoint
+// did not send is simply not shown.
+
+import { Theme, Type } from "../theme.slint";
+import {
+    AppButton, ButtonKind, IconButton, IconSlot, PageScroll, StateView, StateKind, Skeleton,
+    ProgressBar, Avatar, IllustItem, ProfileStatItem,
+} from "../components.slint";
+import { ArtworkGrid } from "gallery.slint";
+
+export component ProfilePage inherits Rectangle {
+    // ---- identity ----
+    in property <string> user-name: "";
+    in property <string> user-account: "";
+    in property <string> user-id: "";
+    in property <string> user-comment: "";
+    in property <string> webpage: "";
+    in property <image> avatar;
+    /// 0 ok, 1 loading, 2 failed or absent
+    in property <int> avatar-state: 1;
+    /// Profile cover image. Named cover, not background: Rectangle already owns
+    /// a brush called background and the two cannot share a name.
+    in property <image> cover;
+    in property <bool> premium: false;
+    /// True when this profile is the signed-in account's own page.
+    in property <bool> self: false;
+    in property <[ProfileStatItem]> stats: [];
+
+    // ---- follow ----
+    in property <bool> followed: false;
+    /// Disabled while a follow request is in flight, so a double click cannot
+    /// send two mutations for one intention.
+    in property <bool> busy: false;
+
+    // ---- works ----
+    in property <[[IllustItem]]> columns: [];
+    in property <length> card-width: 220px;
+    /// 0 content, 1 loading, 3 error, 4 empty
+    in property <int> state: 0;
+    in property <string> message: "";
+    in property <bool> loading-more: false;
+    in property <string> count-label: "";
+
+    in-out property <length> scroll-y: 0px;
+
+    callback measured(length);
+    callback back();
+    callback refresh();
+    callback retry();
+    callback toggle-follow();
+    callback open-illust(string);
+    callback open-author(string);
+    callback toggle-bookmark(string);
+    callback open-external();
+    callback load-more();
+
+    background: Theme.canvas;
+
+    page := PageScroll {
+        width: 100%;
+        height: 100%;
+        scroll-y <=> root.scroll-y;
+        spacing: Theme.space-4;
+        width-changed(w) => { root.measured(w); }
+        scrolled(y) => {
+            if (root.state == 0 && !root.loading-more) {
+                if (y + page.viewport-height + 600px >= page.body-height) {
+                    root.load-more();
+                }
+            }
+        }
+
+        // ---------------- identity card ----------------
+        Rectangle {
+            height: 196px;
+            border-radius: Theme.radius-lg;
+            background: Theme.layer;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            // Cover image, darkened so the text above it stays legible in both
+            // themes. A profile without a cover keeps the plain card.
+            if root.cover.width > 0 : Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 96px;
+                clip: true;
+                Image {
+                    source: root.cover;
+                    image-fit: ImageFit.cover;
+                    width: 100%;
+                    height: 100%;
+                }
+                Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: @linear-gradient(180deg, Theme.cover-scrim-top 0%, Theme.cover-scrim-bottom 100%);
+                }
+            }
+
+            // Back to where you came from: the navigation pane has a global
+            // back, but a profile opened from a work is a long way from home.
+            IconButton {
+                icon: "back";
+                x: Theme.space-2;
+                y: Theme.space-2;
+                tip: "返回";
+                clicked => { root.back(); }
+            }
+
+            Avatar {
+                x: Theme.space-4;
+                y: 56px;
+                size: 84px;
+                ring: true;
+                source: root.avatar;
+                state: root.avatar-state;
+                fallback: root.user-name;
+            }
+
+            VerticalLayout {
+                x: Theme.space-4 + 84px + Theme.space-4;
+                y: 74px;
+                width: max(0px, parent.width - self.x - 260px);
+                spacing: 2px;
+
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    alignment: start;
+                    Text {
+                        text: root.user-name;
+                        color: Theme.text;
+                        font-size: Theme.font-page;
+                        font-weight: Type.semibold;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    if root.premium : Rectangle {
+                        width: premium-label.width + 10px;
+                        height: 18px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.accent-fill;
+                        premium-label := Text {
+                            x: 5px;
+                            y: 0px;
+                            height: parent.height;
+                            text: "Pixiv Premium";
+                            color: Theme.on-accent;
+                            font-size: Theme.font-caption;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                Text {
+                    text: (root.user-account == "" ? "" : "@" + root.user-account)
+                        + (root.user-id == "" ? "" : "   UID " + root.user-id);
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-small;
+                    overflow: elide;
+                }
+            }
+
+            HorizontalLayout {
+                x: parent.width - self.width - Theme.space-4;
+                y: 74px;
+                alignment: end;
+                spacing: Theme.space-2;
+
+                if !root.self : AppButton {
+                    label: root.followed ? "已关注" : "关注";
+                    icon: root.followed ? "check" : "follow";
+                    kind: root.followed ? ButtonKind.Secondary : ButtonKind.Primary;
+                    enabled: !root.busy;
+                    clicked => { root.toggle-follow(); }
+                }
+                AppButton {
+                    label: "刷新";
+                    icon: "refresh";
+                    kind: ButtonKind.Secondary;
+                    enabled: !root.busy;
+                    clicked => { root.refresh(); }
+                }
+            }
+
+            // Bio, then the figures. The card is a fixed height on purpose: a
+            // long bio must not push the grid around while the page loads.
+            Text {
+                x: Theme.space-4 + 84px + Theme.space-4;
+                y: 124px;
+                width: max(0px, parent.width - self.x - Theme.space-4);
+                height: 36px;
+                text: root.user-comment == "" ? "这个用户还没有写简介。" : root.user-comment;
+                color: Theme.text-secondary;
+                font-size: Theme.font-small;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: 36px;
+            }
+
+            HorizontalLayout {
+                x: Theme.space-4 + 84px + Theme.space-4;
+                y: 164px;
+                width: max(0px, parent.width - self.x - Theme.space-4);
+                spacing: Theme.space-4;
+                alignment: start;
+
+                for stat in root.stats : HorizontalLayout {
+                    spacing: 4px;
+                    alignment: start;
+                    Text {
+                        text: stat.value;
+                        color: Theme.text;
+                        font-size: Theme.font-small;
+                        font-weight: Type.semibold;
+                    }
+                    Text {
+                        text: stat.label;
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                    }
+                }
+            }
+        }
+
+        // ---------------- works ----------------
+        if root.state == 0 && root.count-label != "" : Text {
+            height: 22px;
+            text: root.count-label;
+            color: Theme.text-secondary;
+            font-size: Theme.font-small;
+            font-weight: Type.semibold;
+            vertical-alignment: center;
+        }
+
+        if root.state == 0 : ArtworkGrid {
+            columns: root.columns;
+            card-width: root.card-width;
+            open-illust(id) => { root.open-illust(id); }
+            open-author(id) => { root.open-author(id); }
+            toggle-bookmark(id) => { root.toggle-bookmark(id); }
+        }
+
+        if root.state == 1 : HorizontalLayout {
+            spacing: Theme.card-gap;
+            alignment: start;
+            height: 320px;
+            for n in [0, 1, 2, 3] : VerticalLayout {
+                spacing: Theme.card-gap;
+                width: root.card-width;
+                alignment: start;
+                Skeleton { height: root.card-width * 1.25; }
+                Skeleton { height: 44px; }
+            }
+        }
+
+        if root.state > 1 : Rectangle {
+            height: max(200px, page.viewport-height - 260px);
+            StateView {
+                width: parent.width;
+                height: parent.height;
+                kind: (root.state == 3) ? StateKind.Error : StateKind.Empty;
+                title: (root.state == 3) ? "无法载入用户主页" : "这个用户还没有公开作品";
+                description: root.message;
+                action-label: (root.state == 3) ? "重试" : "";
+                retry => { root.retry(); }
+                action => { root.refresh(); }
+            }
+        }
+
+        if root.state == 0 && root.loading-more : Rectangle {
+            height: 48px;
+            VerticalLayout {
+                alignment: center;
+                spacing: Theme.space-2;
+                ProgressBar { indeterminate: true; width: 120px; }
+                Text {
+                    text: "正在加载更多作品…";
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

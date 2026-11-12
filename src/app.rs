@@ -24,7 +24,7 @@ use slint::{
     invoke_from_event_loop,
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -39,15 +39,18 @@ use pixiv_download::{DownloadConfig, DownloadManager, DownloadRequest};
 use pixiv_image::{CacheConfig, ImageCache, Priority};
 use pixiv_store::{HistoryEntry, Store};
 use pixiv_types::domain::{
-    Author, Bookmark, BookmarkRestrict, Illust, IllustKind, IllustStats, IllustUrls, PageMeta,
-    RankingKind, SearchQuery,
+    Author, Bookmark, BookmarkRestrict, FeedSource, Illust, IllustKind, IllustStats, IllustUrls,
+    PageMeta, RankingKind, RecommendTag, RecommendUser, SearchQuery, Suggestion, UserProfile,
 };
 use pixiv_types::{Id, PixivError};
 
 use crate::images::{COVER_CONCURRENCY, CoverLoader};
 use crate::layout::{self, GridGeometry};
-use crate::route::History;
-use crate::{AppWindow, Destination, DownloadRow, IllustItem, Theme, ThemeMode, ViewerPage};
+use crate::route::{History, Route, RouteHistory};
+use crate::{
+    AppWindow, Destination, DownloadRow, IllustItem, ProfileStatItem, RecommendTagItem,
+    RecommendUserItem, SuggestionItem, Theme, ThemeMode, ViewerPage,
+};
 
 /// Real in-memory cache budget, in MiB. Settings displays this value, so the page
 /// cannot describe a limit the cache is not actually enforcing.
@@ -81,12 +84,15 @@ struct App {
 
     // navigation
     page: Destination,
-    history: History<Destination>,
+    /// The page plus the id it shows. A bare Destination could not tell two
+    /// profiles apart, which is why Back used to land on the wrong author.
+    route: Route,
+    history: RouteHistory,
     /// Destination the currently loaded feed belongs to, so going Back to a page
     /// whose content is still loaded does not re-fetch (and therefore does not
     /// lose the scroll position).
-    feed_owner: Option<Destination>,
-    scroll: Vec<(Destination, f32)>,
+    feed_owner: Option<Route>,
+    scroll: Vec<(Route, f32)>,
 
     // responsive geometry, fed by what Slint measured
     measured_width: f32,
@@ -106,6 +112,24 @@ struct App {
     loading_more: bool,
     search_word: String,
     ranking_kind: RankingKind,
+
+    // ---- home, discovery, suggestions and the native profile ----
+    home: HomeBands,
+    discovery: DiscoveryBands,
+    suggest: SuggestState,
+    profile: Option<ProfileState>,
+    /// Decoded avatars, keyed by URL. Shared by every surface that shows an
+    /// identity so one download serves the card, the header and the top bar.
+    avatars: HashMap<String, slint::Image>,
+    /// URLs already requested, so a repaint cannot start a second fetch.
+    avatar_loading: HashSet<String>,
+    /// Author id -> avatar URL, for payloads that name the author but not their
+    /// face. Filled by a bounded profile lookup, never one request per card.
+    author_avatars: HashMap<u64, String>,
+    /// Author ids whose avatar lookup is already in flight.
+    author_avatar_lookup: HashSet<u64>,
+    /// Avatar URL of the signed-in account, once known.
+    account_avatar: Option<String>,
 
     // detail
     detail: Option<Illust>,
@@ -241,6 +265,7 @@ fn verify_stored_session(app: &Shared) {
                     let _ = crate::session::save(&data_dir, &refreshed);
                     app.session = refreshed;
                     app.mode = Mode::Real;
+                    app.account_avatar = account.avatar.clone();
                     {
                         let ui = app.ui();
                         ui.set_authenticated(true);
@@ -248,6 +273,9 @@ fn verify_stored_session(app: &Shared) {
                         ui.set_session_user(account.name.clone().into());
                     }
                     app.refresh_chrome();
+                    if let Some(url) = app.account_avatar.clone() {
+                        app.spawn_avatars(vec![url]);
+                    }
                 }
                 Err(PixivError::Unauthorized) => {
                     // The session is dead: forget it rather than pretending.
@@ -509,6 +537,7 @@ impl App {
             data_dir,
             download_dir,
             page: Destination::Home,
+            route: Route::plain(Destination::Home),
             history: History::new(32),
             feed_owner: None,
             scroll: Vec::new(),
@@ -525,6 +554,15 @@ impl App {
             loading_more: false,
             search_word: String::new(),
             ranking_kind: RankingKind::Daily,
+            home: HomeBands::loading(),
+            discovery: DiscoveryBands::default(),
+            suggest: SuggestState::default(),
+            profile: None,
+            avatars: HashMap::new(),
+            avatar_loading: HashSet::new(),
+            author_avatars: HashMap::new(),
+            author_avatar_lookup: HashSet::new(),
+            account_avatar: None,
             detail: None,
             detail_pages: Vec::new(),
             detail_models: None,
@@ -571,6 +609,20 @@ impl App {
     fn refresh_chrome(&self) {
         let ui = self.ui();
         ui.set_page(self.page);
+        // The top-bar avatar comes from the account payload, not from the name:
+        // a letter in a circle is not an avatar.
+        if let Some(url) = self.account_avatar.as_ref() {
+            match self.avatars.get(url) {
+                Some(image) => {
+                    ui.set_account_avatar(image.clone());
+                    ui.set_account_avatar_state(BAND_OK);
+                }
+                None => ui.set_account_avatar_state(BAND_LOADING),
+            }
+        } else {
+            ui.set_account_avatar_state(BAND_EMPTY);
+        }
+        self.publish_suggestions();
         ui.set_can_go_back(self.history.can_go_back());
         ui.set_can_go_forward(self.history.can_go_forward());
         ui.set_demo_mode(self.mode == Mode::Demo);
@@ -663,34 +715,75 @@ impl App {
 
     // ------------------------------------------------------------- pages
 
-    fn navigate(shared: &Shared, page: Destination) {
+    /// Where the page currently on screen is scrolled to.
+    fn current_scroll(&self) -> f32 {
+        // The home and profile pages keep their own offset because they are not
+        // the shared grid; every other page shares grid-scroll-y.
+        if self.page == Destination::Home {
+            self.ui().get_home_scroll_y()
+        } else {
+            self.ui().get_grid_scroll_y()
+        }
+    }
+
+    /// Navigate to a parameterised route.
+    ///
+    /// Every entry point goes through here so the history stack always holds a
+    /// complete destination: the page *and* the id. Pushing a bare Destination
+    /// is what made Back restore the wrong author.
+    fn go(shared: &Shared, route: Route) {
         {
             let mut app = shared.borrow_mut();
-            let current = app.page;
-            app.history.visit(current, page);
-            // Remember where the page we are leaving was scrolled to.
-            let scroll = if current == Destination::Home {
-                app.ui().get_home_scroll_y()
-            } else {
-                app.ui().get_grid_scroll_y()
-            };
+            let current = app.route;
+            // Same page and same id means the user re-activated the entry they
+            // are already on; still reload the data, but do not grow the stack.
+            if !current.same_view(route) {
+                app.history.visit(current, route);
+            }
+            let scroll = app.current_scroll();
             app.remember_scroll(current, scroll);
-            app.page = page;
+            app.route = route;
+            app.page = route.page;
             app.page_cursor = 1;
             app.loading_more = false;
-            app.ui().set_page(page);
-            app.ui().set_grid_loading_more(false);
-            app.ui().set_ranking_filter(ranking_index(app.ranking_kind));
-            app.ui().set_search_word(app.search_word.clone().into());
+            app.suggest_close();
+            let ui = app.ui();
+            ui.set_page(route.page);
+            ui.set_grid_loading_more(false);
+            ui.set_ranking_filter(ranking_index(app.ranking_kind));
+            ui.set_search_word(app.search_word.clone().into());
         }
         App::load_page(shared, false);
     }
 
+    fn navigate(shared: &Shared, page: Destination) {
+        App::go(shared, Route::plain(page));
+    }
+
+    /// Open a user's native profile. An empty id means "the signed-in account".
+    fn open_profile(shared: &Shared, id: &str) {
+        let parsed = id.trim().parse::<u64>().ok().filter(|value| *value > 0);
+        let fallback = shared.borrow().session.user_id.map(|user| user.get());
+        match parsed.or(fallback) {
+            Some(uid) => App::go(shared, Route::user(uid)),
+            None => {
+                let app = shared.borrow();
+                app.notify(2, "未登录：无法打开用户主页，请先在设置中登录");
+            }
+        }
+    }
+
+    /// Show a work in the detail page without touching the history stack. Used
+    /// when history navigation already restored the route.
+    fn show_detail(shared: &Shared, id: u64) {
+        App::open_detail_route(shared, id, false);
+    }
+
     /// Navigate back/forward through history rather than to an arbitrary page.
     fn travel(shared: &Shared, backwards: bool) {
-        let target = {
+        {
             let mut app = shared.borrow_mut();
-            let current = app.page;
+            let current = app.route;
             let target = if backwards {
                 app.history.back(current)
             } else {
@@ -700,74 +793,111 @@ impl App {
                 app.refresh_chrome();
                 return;
             };
-            let scroll = if current == Destination::Home {
-                app.ui().get_home_scroll_y()
-            } else {
-                app.ui().get_grid_scroll_y()
-            };
+            let scroll = app.current_scroll();
+            // Two profiles are different entries, so the offset is stored per
+            // route: restoring one author's scroll on another's page was the
+            // visible half of the same bug.
             app.remember_scroll(current, scroll);
-            app.page = target;
+            app.route = target;
+            app.page = target.page;
             app.page_cursor = 1;
             app.loading_more = false;
-            app.ui().set_page(target);
-            app.ui().set_grid_loading_more(false);
-            app.ui().set_search_word(app.search_word.clone().into());
-            target
-        };
+            app.suggest_close();
+            let ui = app.ui();
+            ui.set_page(target.page);
+            ui.set_grid_loading_more(false);
+            ui.set_search_word(app.search_word.clone().into());
+        }
         // Restoring rather than resetting: Back must land where you left off.
-        let _ = target;
         App::load_page(shared, true);
     }
 
-    fn remember_scroll(&mut self, page: Destination, offset: f32) {
-        if let Some(slot) = self.scroll.iter_mut().find(|(p, _)| *p == page) {
+    fn remember_scroll(&mut self, route: Route, offset: f32) {
+        if let Some(slot) = self.scroll.iter_mut().find(|(r, _)| *r == route) {
             slot.1 = offset;
         } else {
-            self.scroll.push((page, offset));
+            self.scroll.push((route, offset));
         }
     }
 
-    fn stored_scroll(&self, page: Destination) -> f32 {
+    fn stored_scroll(&self, route: Route) -> f32 {
         self.scroll
             .iter()
-            .find(|(p, _)| *p == page)
+            .find(|(r, _)| *r == route)
             .map(|(_, offset)| *offset)
             .unwrap_or(0.0)
     }
 
     fn load_page(shared: &Shared, restore_scroll: bool) {
-        let (page, reuse_feed) = {
+        let (route, reuse_feed) = {
             let app = shared.borrow();
-            (app.page, app.feed_owner == Some(app.page))
+            (app.route, app.feed_owner == Some(app.route))
         };
+        let page = route.page;
 
-        let is_feed_page = matches!(
-            page,
-            Destination::Home
-                | Destination::Discovery
-                | Destination::Ranking
-                | Destination::Search
-                | Destination::Bookmarks
-                | Destination::History
-        );
-
-        if !is_feed_page {
-            let app = shared.borrow();
-            app.refresh_chrome();
-            return;
-        }
-
-        if reuse_feed && restore_scroll {
-            let app = shared.borrow();
-            let offset = app.stored_scroll(page);
+        let restore = |app: &App| {
+            let offset = app.stored_scroll(route);
             let ui = app.ui();
             if page == Destination::Home {
                 ui.set_home_scroll_y(offset);
             } else {
                 ui.set_grid_scroll_y(offset);
             }
-            drop(app);
+        };
+
+        match page {
+            // The detail page is not a feed: it is re-shown from its own route,
+            // which is what makes Back return to the *same* work.
+            Destination::Detail => {
+                if let Some(id) = route.illust_id() {
+                    App::show_detail(shared, id);
+                }
+                shared.borrow().refresh_chrome();
+                return;
+            }
+            Destination::UserProfile => {
+                if reuse_feed && restore_scroll && shared.borrow().profile.is_some() {
+                    let app = shared.borrow();
+                    restore(&app);
+                    app.refresh_chrome();
+                } else {
+                    App::load_profile(shared);
+                }
+                return;
+            }
+            Destination::Home => {
+                if reuse_feed && restore_scroll {
+                    let app = shared.borrow();
+                    restore(&app);
+                    app.refresh_chrome();
+                } else {
+                    App::load_home(shared);
+                }
+                return;
+            }
+            Destination::Discovery => {
+                if reuse_feed && restore_scroll {
+                    let app = shared.borrow();
+                    restore(&app);
+                    app.refresh_chrome();
+                } else {
+                    App::load_discovery(shared, false);
+                }
+                return;
+            }
+            Destination::Ranking
+            | Destination::Search
+            | Destination::Bookmarks
+            | Destination::History => {}
+            _ => {
+                shared.borrow().refresh_chrome();
+                return;
+            }
+        }
+
+        if reuse_feed && restore_scroll {
             let app = shared.borrow();
+            restore(&app);
             app.refresh_chrome();
             return;
         }
@@ -802,7 +932,8 @@ impl App {
             } else {
                 ui.set_grid_scroll_y(0.0);
             }
-            app.remember_scroll(page, 0.0);
+            let route = app.route;
+            app.remember_scroll(route, 0.0);
         }
 
         // "Search" with no keyword is not a search. It used to reach the API with an
@@ -813,7 +944,7 @@ impl App {
         {
             let mut app = shared.borrow_mut();
             if page == Destination::Search && app.search_word.trim().is_empty() {
-                app.feed_owner = Some(page);
+                app.feed_owner = Some(app.route);
                 app.set_tags(Vec::new());
                 let ui = app.ui();
                 ui.set_grid_state(2);
@@ -846,7 +977,7 @@ impl App {
                 .filter(|entry| entry.thumb_url.starts_with("http"))
                 .map(history_illust)
                 .collect();
-            app.feed_owner = Some(page);
+            app.feed_owner = Some(app.route);
             app.reached_end = true;
             app.set_tags(Vec::new());
             if items.is_empty() {
@@ -878,7 +1009,7 @@ impl App {
                 };
                 drop(app);
                 let mut app = shared.borrow_mut();
-                app.feed_owner = Some(page);
+                app.feed_owner = Some(app.route);
                 app.set_tags(tags);
                 app.render_feed(items, false);
                 app.refresh_chrome();
@@ -938,7 +1069,7 @@ impl App {
                         }
                         match result {
                             Ok(items) => {
-                                app.feed_owner = Some(page);
+                                app.feed_owner = Some(app.route);
                                 app.render_feed(items, false);
                             }
                             Err(error) => app.show_feed_error(&error.to_string()),
@@ -1098,6 +1229,7 @@ impl App {
         self.columns = models;
         self.index = index;
         self.spawn_covers();
+        self.backfill_author_avatars();
     }
 
     fn rank_of(&self, illust: &Illust) -> i32 {
@@ -1257,6 +1389,21 @@ impl App {
     }
 
     fn load_more(shared: &Shared) {
+        match shared.borrow().page {
+            Destination::Home => {
+                App::load_home_more(shared);
+                return;
+            }
+            Destination::Discovery => {
+                App::load_discovery(shared, true);
+                return;
+            }
+            Destination::UserProfile => {
+                App::load_profile_more(shared);
+                return;
+            }
+            _ => {}
+        }
         let should_load = {
             let mut app = shared.borrow_mut();
             if app.loading_more || app.reached_end || app.page == Destination::Detail {
@@ -1351,23 +1498,31 @@ impl App {
 
     // ------------------------------------------------------------- detail
 
+    /// Open a work from anywhere in the UI.
     fn open_detail(shared: &Shared, id: &str) {
-        let Ok(raw) = id.parse::<u64>() else {
+        let Ok(raw) = id.trim().parse::<u64>() else {
             return;
         };
+        App::open_detail_route(shared, raw, true);
+    }
+
+    /// Load one work into the detail page.
+    ///
+    /// push_history is false when the route is already on the stack (Back and
+    /// Forward restore a destination; they do not create a new one).
+    fn open_detail_route(shared: &Shared, raw: u64, push_history: bool) {
         let illust_id = Id(raw);
 
         let (mode, epoch) = {
             let mut app = shared.borrow_mut();
-            let current = app.page;
-            app.history.visit(current, Destination::Detail);
-            if current == Destination::Home {
-                let scroll = app.ui().get_home_scroll_y();
-                app.remember_scroll(current, scroll);
-            } else if current != Destination::Detail {
-                let scroll = app.ui().get_grid_scroll_y();
+            let current = app.route;
+            let target = Route::illust(Destination::Detail, raw);
+            if push_history {
+                app.history.visit(current, target);
+                let scroll = app.current_scroll();
                 app.remember_scroll(current, scroll);
             }
+            app.route = target;
             app.page = Destination::Detail;
             app.detail_epoch += 1;
             let epoch = app.detail_epoch;
@@ -1994,6 +2149,7 @@ impl App {
                         app.client = Some(client);
                         app.mode = Mode::Real;
                         app.feed_owner = None;
+                        app.account_avatar = account.avatar.clone();
                         {
                             let ui = app.ui();
                             ui.set_authenticated(true);
@@ -2002,6 +2158,9 @@ impl App {
                             ui.set_cookie_input("".into());
                         }
                         app.refresh_chrome();
+                        if let Some(url) = app.account_avatar.clone() {
+                            app.spawn_avatars(vec![url]);
+                        }
                         let label = if account.account.trim().is_empty() {
                             format!("{}（UID {}）", account.name, account.id.get())
                         } else {
@@ -2035,6 +2194,1507 @@ impl App {
     }
 }
 
+// ===========================================================================
+// Home, discovery, profile and search-suggestion state
+// ===========================================================================
+
+/// Band states, matching what the pages switch on.
+const BAND_OK: i32 = 0;
+const BAND_LOADING: i32 = 1;
+const BAND_EMPTY: i32 = 2;
+const BAND_ERROR: i32 = 3;
+
+/// How many works one profile page shows before "load more".
+const PROFILE_PAGE: usize = 24;
+/// How many recommended ids one discovery batch hydrates through the detail
+/// route. Twelve keeps the batch under a few seconds even with the shared
+/// 250ms request spacing, and is enough to fill a screen.
+const DISCOVERY_HYDRATE: usize = 12;
+/// Stop after this many batches, and after two consecutive batches that added
+/// nothing. The recommendation engine re-serves what it has already shown, so a
+/// loader without an end condition spins forever.
+const DISCOVERY_MAX_BATCHES: u32 = 12;
+
+/// The four independent bands of the home page.
+struct HomeBands {
+    works: Vec<Illust>,
+    latest: Vec<Illust>,
+    latest_title: String,
+    tags: Vec<RecommendTag>,
+    artists: Vec<RecommendUser>,
+    works_state: i32,
+    latest_state: i32,
+    tags_state: i32,
+    artists_state: i32,
+    works_message: String,
+    latest_message: String,
+    tags_message: String,
+    artists_message: String,
+    /// Extra "load more" batches appended to the for-you grid.
+    batches: u32,
+    empty_batches: u32,
+    exhausted: bool,
+}
+
+impl HomeBands {
+    fn loading() -> Self {
+        Self {
+            works: Vec::new(),
+            latest: Vec::new(),
+            latest_title: String::new(),
+            tags: Vec::new(),
+            artists: Vec::new(),
+            works_state: BAND_LOADING,
+            latest_state: BAND_LOADING,
+            tags_state: BAND_LOADING,
+            artists_state: BAND_LOADING,
+            works_message: String::new(),
+            latest_message: String::new(),
+            tags_message: String::new(),
+            artists_message: String::new(),
+            batches: 0,
+            empty_batches: 0,
+            exhausted: false,
+        }
+    }
+}
+
+struct DiscoveryBands {
+    users: Vec<RecommendUser>,
+    users_state: i32,
+    users_message: String,
+    /// Every id this page has already rendered or tried, so "load more" cannot
+    /// append the same work twice.
+    seen: HashSet<u64>,
+    batches: u32,
+    empty_batches: u32,
+    exhausted: bool,
+}
+
+impl Default for DiscoveryBands {
+    fn default() -> Self {
+        Self {
+            users: Vec::new(),
+            users_state: BAND_LOADING,
+            users_message: String::new(),
+            seen: HashSet::new(),
+            batches: 0,
+            empty_batches: 0,
+            exhausted: false,
+        }
+    }
+}
+
+/// Search-suggestion panel state.
+struct SuggestState {
+    /// Bumped on every edit and every close. A result whose generation no longer
+    /// matches is dropped, which is what stops a slow reply for "lan" from
+    /// overwriting the list for "landscape".
+    generation: u64,
+    query: String,
+    visible: bool,
+    rows: Vec<Suggestion>,
+    active: i32,
+    note: String,
+    timer: slint::Timer,
+    /// Focus-state rows: the server's own recommended tags, plus local history.
+    base: Vec<Suggestion>,
+}
+
+impl Default for SuggestState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            query: String::new(),
+            visible: false,
+            rows: Vec::new(),
+            active: -1,
+            note: String::new(),
+            timer: slint::Timer::default(),
+            base: Vec::new(),
+        }
+    }
+}
+
+/// A user page that is currently open.
+struct ProfileState {
+    user: Id,
+    profile: UserProfile,
+    /// Every work id, newest first.
+    ids: Vec<Id>,
+    /// How many ids have been requested so far.
+    loaded: usize,
+    works: Vec<Illust>,
+}
+
+impl App {
+    // ------------------------------------------------------------- home
+
+    /// Load all four home bands.
+    ///
+    /// The daily ranking is not consulted here at all: it is a different page
+    /// with a different meaning. Using it as a fallback is what made the home
+    /// page indistinguishable from 排行榜.
+    fn load_home(shared: &Shared) {
+        let (mode, epoch, client, rt, route) = {
+            let mut app = shared.borrow_mut();
+            app.epoch += 1;
+            app.reached_end = false;
+            app.page_cursor = 1;
+            app.loading_more = false;
+            app.loader.reset();
+            app.home = HomeBands::loading();
+            app.feed_owner = None;
+            app.items.clear();
+            app.columns.clear();
+            app.index.clear();
+            let epoch = app.epoch;
+            {
+                let ui = app.ui();
+                ui.set_home_scroll_y(0.0);
+                ui.set_grid_scroll_y(0.0);
+                ui.set_grid_state(BAND_LOADING);
+                ui.set_grid_columns(ModelRc::default());
+                ui.set_grid_loading_more(false);
+                ui.set_grid_count_label("".into());
+            }
+            let route = app.route;
+            app.remember_scroll(route, 0.0);
+            app.publish_home();
+            (
+                app.mode,
+                epoch,
+                app.client.clone(),
+                app.rt.clone(),
+                app.route,
+            )
+        };
+
+        if mode == Mode::Demo {
+            let app = shared.borrow();
+            let items = app.demo_items(1);
+            let tags: Vec<RecommendTag> = app
+                .demo
+                .trending_tags()
+                .into_iter()
+                .map(|name| RecommendTag {
+                    translated: None,
+                    name,
+                    emphasized: false,
+                })
+                .collect();
+            drop(app);
+            let mut app = shared.borrow_mut();
+            app.home.works_state = BAND_OK;
+            app.home.tags_state = if tags.is_empty() { BAND_EMPTY } else { BAND_OK };
+            app.home.tags = tags;
+            app.home.latest_state = BAND_EMPTY;
+            app.home.latest_message = "演示模式不提供真实最新作品".to_string();
+            app.home.artists_state = BAND_EMPTY;
+            app.home.artists_message = "演示模式不提供推荐画师".to_string();
+            app.feed_owner = Some(route);
+            app.render_feed(items, false);
+            app.publish_home();
+            app.refresh_chrome();
+            return;
+        }
+
+        let Some(client) = client else {
+            let mut app = shared.borrow_mut();
+            app.fail_home("没有可用的网络客户端");
+            app.refresh_chrome();
+            return;
+        };
+
+        rt.spawn(async move {
+            let (a, b, c, d) = (
+                client.clone(),
+                client.clone(),
+                client.clone(),
+                client.clone(),
+            );
+            let (works, tags, artists, latest) = tokio::join!(
+                a.home_feed(),
+                b.recommend_tags(),
+                c.recommend_users(),
+                d.latest_works()
+            );
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                if app.epoch != epoch || app.page != Destination::Home {
+                    return;
+                }
+                let mut avatar_urls: Vec<String> = Vec::new();
+
+                match works {
+                    Ok(feed) => {
+                        app.home.works = feed.works.clone();
+                        app.home.works_state = if feed.works.is_empty() {
+                            BAND_EMPTY
+                        } else {
+                            BAND_OK
+                        };
+                        avatar_urls.extend(feed.works.iter().filter_map(|w| w.author.avatar.clone()));
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        app.home.works_state = BAND_ERROR;
+                        app.home.works_message = message.clone();
+                        app.show_feed_error(&message);
+                    }
+                }
+
+                match tags {
+                    Ok(tags) => {
+                        app.home.tags = tags;
+                        app.home.tags_state = if app.home.tags.is_empty() {
+                            BAND_EMPTY
+                        } else {
+                            BAND_OK
+                        };
+                    }
+                    Err(error) => {
+                        app.home.tags_state = BAND_ERROR;
+                        app.home.tags_message = error.to_string();
+                    }
+                }
+
+                match artists {
+                    Ok(artists) => {
+                        app.home.artists = artists;
+                        app.home.artists_state = if app.home.artists.is_empty() {
+                            BAND_EMPTY
+                        } else {
+                            BAND_OK
+                        };
+                        for user in &app.home.artists {
+                            avatar_urls.extend(user.avatar.clone());
+                        }
+                    }
+                    Err(error) => {
+                        app.home.artists_state = BAND_ERROR;
+                        app.home.artists_message = error.to_string();
+                    }
+                }
+
+                match latest {
+                    Ok(latest) => {
+                        app.home.latest_title = latest.title.clone();
+                        app.home.latest = latest.works.clone();
+                        app.home.latest_state = if latest.works.is_empty() {
+                            BAND_EMPTY
+                        } else {
+                            BAND_OK
+                        };
+                        avatar_urls.extend(
+                            latest.works.iter().filter_map(|w| w.author.avatar.clone()),
+                        );
+                    }
+                    Err(error) => {
+                        app.home.latest_state = BAND_ERROR;
+                        app.home.latest_message = error.to_string();
+                    }
+                }
+
+                // Refresh the suggestion panel's focus-state rows from the tags
+                // that just arrived: these are the server's own picks.
+                app.suggest.base = app
+                    .home
+                    .tags
+                    .iter()
+                    .map(|tag| Suggestion {
+                        tag: tag.name.clone(),
+                        translated: tag.translated.clone(),
+                        illust_count: None,
+                        popularity: None,
+                        source: pixiv_types::domain::SuggestionSource::Pixiv,
+                    })
+                    .collect();
+
+                app.feed_owner = Some(app.route);
+                let works = app.home.works.clone();
+                app.render_feed(works, false);
+                app.publish_home();
+                app.spawn_avatars(avatar_urls);
+                app.refresh_chrome();
+            });
+        });
+    }
+
+    /// Append another for-you batch. The street feed is not paginated, so a
+    /// second call is simply a second sample of the same recommendation engine.
+    fn load_home_more(shared: &Shared) {
+        let (client, rt, epoch, reached_end) = {
+            let mut app = shared.borrow_mut();
+            if app.loading_more || app.reached_end || app.home.exhausted {
+                return;
+            }
+            app.loading_more = true;
+            app.ui().set_grid_loading_more(true);
+            (
+                app.client.clone(),
+                app.rt.clone(),
+                app.epoch,
+                app.reached_end,
+            )
+        };
+        let _ = reached_end;
+        let Some(client) = client else {
+            let mut app = shared.borrow_mut();
+            app.loading_more = false;
+            app.ui().set_grid_loading_more(false);
+            app.reached_end = true;
+            return;
+        };
+        rt.spawn(async move {
+            let feed = client.home_feed().await;
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                app.loading_more = false;
+                app.ui().set_grid_loading_more(false);
+                if app.epoch != epoch || app.page != Destination::Home {
+                    return;
+                }
+                match feed {
+                    Ok(feed) => {
+                        let urls: Vec<String> = feed
+                            .works
+                            .iter()
+                            .filter_map(|w| w.author.avatar.clone())
+                            .collect();
+                        let added =
+                            pixiv_types::domain::append_unique(&mut app.home.works, feed.works);
+                        app.home.batches += 1;
+                        if added == 0 {
+                            app.home.empty_batches += 1;
+                        } else {
+                            app.home.empty_batches = 0;
+                        }
+                        if app.home.empty_batches >= 2 || app.home.batches >= 8 {
+                            app.home.exhausted = true;
+                            app.reached_end = true;
+                        }
+                        if added > 0 {
+                            let works = app.home.works.clone();
+                            app.render_feed(works, false);
+                        }
+                        app.spawn_avatars(urls);
+                        app.publish_home();
+                    }
+                    Err(error) => {
+                        app.ui()
+                            .set_status_text(format!("加载更多失败：{error}").into());
+                        app.reached_end = true;
+                    }
+                }
+            });
+        });
+    }
+
+    fn fail_home(&mut self, message: &str) {
+        self.show_feed_error(message);
+        self.home.works_state = BAND_ERROR;
+        self.home.works_message = message.to_string();
+        self.home.tags_state = BAND_ERROR;
+        self.home.tags_message = message.to_string();
+        self.home.artists_state = BAND_ERROR;
+        self.home.artists_message = message.to_string();
+        self.home.latest_state = BAND_ERROR;
+        self.home.latest_message = message.to_string();
+        self.publish_home();
+    }
+
+    /// Push the home bands into the window.
+    fn publish_home(&self) {
+        let ui = self.ui();
+        let tags: Vec<RecommendTagItem> = self
+            .home
+            .tags
+            .iter()
+            .map(|tag| RecommendTagItem {
+                name: tag.name.clone().into(),
+                label: tag.display().to_string().into(),
+                emphasized: tag.emphasized,
+            })
+            .collect();
+        ui.set_home_tags(ModelRc::from(Rc::new(VecModel::from(tags))));
+
+        let artists: Vec<RecommendUserItem> = self
+            .home
+            .artists
+            .iter()
+            .map(|user| self.user_item(user))
+            .collect();
+        ui.set_home_artists(ModelRc::from(Rc::new(VecModel::from(artists))));
+
+        let latest: Vec<IllustItem> = self
+            .home
+            .latest
+            .iter()
+            .map(|illust| self.illust_item_avatar(illust, 0))
+            .collect();
+        ui.set_home_latest(ModelRc::from(Rc::new(VecModel::from(latest))));
+
+        ui.set_home_latest_title(
+            if self.home.latest_title.trim().is_empty() {
+                "最新作品".into()
+            } else {
+                self.home.latest_title.clone().into()
+            },
+        );
+        ui.set_home_feed_state(self.home.works_state);
+        ui.set_home_latest_state(self.home.latest_state);
+        ui.set_home_tags_state(self.home.tags_state);
+        ui.set_home_artists_state(self.home.artists_state);
+        ui.set_home_feed_message(self.home.works_message.clone().into());
+        ui.set_home_latest_message(self.home.latest_message.clone().into());
+        ui.set_home_tags_message(self.home.tags_message.clone().into());
+        ui.set_home_artists_message(self.home.artists_message.clone().into());
+
+        let note = match self.mode {
+            Mode::Demo => {
+                "演示模式：以下内容来自本地演示目录，标记为 [DEMO]，不会访问 Pixiv".to_string()
+            }
+            Mode::Real if !self.session.is_authenticated() => {
+                "未登录：Pixiv 返回的是公共推荐，不是按你生成的".to_string()
+            }
+            Mode::Real => format!(
+                "{} · 推荐来自 /ajax/street/for_you",
+                FeedSource::ForYou.note()
+            ),
+        };
+        ui.set_home_source_note(note.into());
+    }
+
+    // ------------------------------------------------------------- avatars
+
+    /// Take one URL to a decoded image, so a card, a header and the top bar can
+    /// share one download.
+    fn start_avatar(&mut self, url: &str) -> bool {
+        if url.trim().is_empty() || self.avatars.contains_key(url) || self.avatar_loading.contains(url)
+        {
+            return false;
+        }
+        self.avatar_loading.insert(url.to_string());
+        true
+    }
+
+    fn spawn_avatars(&mut self, urls: Vec<String>) {
+        let mut plan: Vec<String> = Vec::new();
+        for url in urls {
+            if self.start_avatar(&url) {
+                plan.push(url);
+            }
+        }
+        if plan.is_empty() {
+            return;
+        }
+        let cache = self.cache.clone();
+        let rt = self.rt.clone();
+        let demo = self.mode == Mode::Demo;
+        let scale = self.ui().window().scale_factor().max(1.0);
+        // A 170px source is the largest Pixiv sends for an avatar; decoding at
+        // the size actually drawn keeps 40 avatars off the memory budget.
+        let target = crate::images::target_width(96.0, scale);
+        rt.spawn(async move {
+            let mut stream = futures::stream::iter(plan)
+                .map(move |url| {
+                    let cache = cache.clone();
+                    async move {
+                        let raw = if demo {
+                            None
+                        } else {
+                            fetch_sized(&cache, &url, target).await
+                        };
+                        (url, raw)
+                    }
+                })
+                .buffer_unordered(4);
+            while let Some((url, raw)) = stream.next().await {
+                on_ui(move |shared| {
+                    let Ok(mut app) = shared.try_borrow_mut() else {
+                        return;
+                    };
+                    app.avatar_loading.remove(&url);
+                    let Some(raw) = raw else {
+                        return;
+                    };
+                    let image = raw.to_slint();
+                    app.avatars.insert(url.clone(), image);
+                    app.repaint_avatars(&url);
+                });
+            }
+        });
+    }
+
+    /// Patch every surface that shows the avatar that just arrived.
+    fn repaint_avatars(&mut self, url: &str) {
+        if self.account_avatar.as_deref() == Some(url)
+            && let Some(image) = self.avatars.get(url).cloned()
+        {
+            let ui = self.ui();
+            ui.set_account_avatar(image);
+            ui.set_account_avatar_state(BAND_OK);
+        }
+
+        if self.home.artists.iter().any(|user| user.avatar.as_deref() == Some(url)) {
+            self.publish_home();
+        }
+        if self
+            .discovery
+            .users
+            .iter()
+            .any(|user| user.avatar.as_deref() == Some(url))
+        {
+            self.publish_discovery_users();
+        }
+        if self
+            .profile
+            .as_ref()
+            .and_then(|state| state.profile.avatar.clone())
+            .as_deref()
+            == Some(url)
+        {
+            self.publish_profile();
+        }
+
+        // Cards: match on the URL the row was built with, so only the rows that
+        // wanted this face are patched.
+        let Some(image) = self.avatars.get(url).cloned() else {
+            return;
+        };
+        for column in &self.columns {
+            for row in 0..column.row_count() {
+                let Some(mut item) = column.row_data(row) else {
+                    continue;
+                };
+                if item.author_avatar_url.as_str() != url {
+                    continue;
+                }
+                item.author_avatar = image.clone();
+                item.author_avatar_state = BAND_OK;
+                column.set_row_data(row, item);
+            }
+        }
+    }
+
+    /// Resolve the faces of authors whose payload carried no avatar URL.
+    ///
+    /// Ranking and search rows do name a profile image, but a page assembled
+    /// from several sources can contain authors that did not. Rather than one
+    /// profile request per card (an N+1 storm), at most four distinct unknown
+    /// authors are resolved per render, the result is cached by user id, and an
+    /// id that is already in flight is never requested twice.
+    fn backfill_author_avatars(&mut self) {
+        if self.mode != Mode::Real {
+            return;
+        }
+        let mut wanted: Vec<u64> = Vec::new();
+        for illust in &self.items {
+            let author = illust.author.id.get();
+            if author == 0 || illust.author.avatar.is_some() {
+                continue;
+            }
+            if self.author_avatars.contains_key(&author)
+                || self.author_avatar_lookup.contains(&author)
+                || wanted.contains(&author)
+            {
+                continue;
+            }
+            wanted.push(author);
+            if wanted.len() == 4 {
+                break;
+            }
+        }
+        if wanted.is_empty() {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        for author in &wanted {
+            self.author_avatar_lookup.insert(*author);
+        }
+        let rt = self.rt.clone();
+        rt.spawn(async move {
+            for author in wanted {
+                let found = client
+                    .user_profile(Id(author))
+                    .await
+                    .ok()
+                    .and_then(|profile| profile.avatar);
+                on_ui(move |shared| {
+                    let Ok(mut app) = shared.try_borrow_mut() else {
+                        return;
+                    };
+                    app.author_avatar_lookup.remove(&author);
+                    let Some(url) = found else {
+                        return;
+                    };
+                    app.author_avatars.insert(author, url.clone());
+                    app.apply_author_avatar(author, &url);
+                    app.spawn_avatars(vec![url]);
+                });
+            }
+        });
+    }
+
+    /// Point every card of one author at the avatar that was just resolved.
+    fn apply_author_avatar(&mut self, author: u64, url: &str) {
+        let key = author.to_string();
+        for column in &self.columns {
+            for row in 0..column.row_count() {
+                let Some(mut item) = column.row_data(row) else {
+                    continue;
+                };
+                if item.author_id.as_str() != key || !item.author_avatar_url.is_empty() {
+                    continue;
+                }
+                item.author_avatar_url = url.into();
+                item.author_avatar_state = BAND_LOADING;
+                column.set_row_data(row, item);
+            }
+        }
+    }
+
+    /// One card, with whatever avatar is already decoded.
+    fn illust_item_avatar(&self, illust: &Illust, rank: i32) -> IllustItem {
+        let mut item = illust_to_item(illust, rank);
+        if let Some(url) = illust.author.avatar.as_ref()
+            && let Some(image) = self.avatars.get(url)
+        {
+            item.author_avatar = image.clone();
+            item.author_avatar_state = BAND_OK;
+        }
+        item
+    }
+
+    fn user_item(&self, user: &RecommendUser) -> RecommendUserItem {
+        let avatar_url = user.avatar.clone().unwrap_or_default();
+        let preview = user
+            .previews
+            .first()
+            .and_then(|illust| self.avatars.get(illust.urls.grid()))
+            .cloned()
+            .unwrap_or_default();
+        RecommendUserItem {
+            id: user.id.to_string().into(),
+            name: user.name.clone().into(),
+            account: user.account.clone().into(),
+            comment: user.comment.clone().into(),
+            avatar: self.avatars.get(&avatar_url).cloned().unwrap_or_default(),
+            avatar_url: avatar_url.clone().into(),
+            preview,
+            followed: user.is_followed,
+            premium: user.is_premium,
+            avatar_state: if avatar_url.is_empty() {
+                BAND_EMPTY
+            } else if self.avatars.contains_key(&avatar_url) {
+                BAND_OK
+            } else {
+                BAND_LOADING
+            },
+        }
+    }
+
+}
+
+impl App {
+    // ------------------------------------------------------------- discovery
+
+    /// Load one discovery batch.
+    ///
+    /// The discovery engine is not paginated: every call returns a fresh ranked
+    /// batch, so "load more" is a new request plus de-duplication against
+    /// everything already shown, and the loader stops on its own.
+    fn load_discovery(shared: &Shared, append: bool) {
+        let (mode, epoch, client, rt, seen) = {
+            let mut app = shared.borrow_mut();
+            if append {
+                if app.loading_more || app.reached_end || app.discovery.exhausted {
+                    return;
+                }
+                app.loading_more = true;
+                app.ui().set_grid_loading_more(true);
+            } else {
+                app.epoch += 1;
+                app.reached_end = false;
+                app.page_cursor = 1;
+                app.loader.reset();
+                app.discovery = DiscoveryBands::default();
+                app.feed_owner = None;
+                app.items.clear();
+                app.columns.clear();
+                app.index.clear();
+                {
+                    let ui = app.ui();
+                    ui.set_grid_scroll_y(0.0);
+                    ui.set_grid_state(BAND_LOADING);
+                    ui.set_grid_columns(ModelRc::default());
+                    ui.set_grid_loading_more(false);
+                    ui.set_grid_count_label("".into());
+                }
+                app.publish_discovery_users();
+            }
+            (
+                app.mode,
+                app.epoch,
+                app.client.clone(),
+                app.rt.clone(),
+                app.discovery.seen.clone(),
+            )
+        };
+
+        if mode == Mode::Demo {
+            let mut app = shared.borrow_mut();
+            app.loading_more = false;
+            app.ui().set_grid_loading_more(false);
+            app.discovery.users_state = BAND_EMPTY;
+            app.discovery.users_message = "演示模式不提供推荐画师".to_string();
+            app.discovery.exhausted = true;
+            let cursor = if append { app.page_cursor + 1 } else { 1 };
+            app.page_cursor = cursor;
+            let items = app.demo_items(cursor);
+            if items.is_empty() {
+                app.reached_end = true;
+            } else {
+                app.feed_owner = Some(app.route);
+                app.render_feed(items, append);
+            }
+            app.publish_discovery_users();
+            app.refresh_chrome();
+            return;
+        }
+
+        let Some(client) = client else {
+            let mut app = shared.borrow_mut();
+            app.loading_more = false;
+            app.ui().set_grid_loading_more(false);
+            app.show_feed_error("没有可用的网络客户端");
+            app.refresh_chrome();
+            return;
+        };
+
+        rt.spawn(async move {
+            // The batch route names sixty recommendations but describes only a
+            // handful, and the discovery route describes ten in full. Both are
+            // the same engine, so asking for both fills a screen immediately and
+            // still leaves ids to hydrate.
+            let (quick_client, pool_client, user_client) = (
+                client.clone(),
+                client.clone(),
+                client.clone(),
+            );
+            let (quick, pool, users) = tokio::join!(
+                quick_client.illust_discovery("all"),
+                pool_client.discovery_artworks("all", 60),
+                user_client.discovery_users("all")
+            );
+
+            let mut works: Vec<Illust> = Vec::new();
+            let mut pending: Vec<Id> = Vec::new();
+            let mut quick_error: Option<String> = None;
+            match quick {
+                Ok(rows) => works.extend(rows),
+                Err(error) => quick_error = Some(error.to_string()),
+            }
+            if let Ok(batch) = &pool {
+                works.extend(batch.works.iter().cloned());
+                pending.extend(batch.pending.iter().copied());
+            }
+
+            // Hydrate the next few recommended ids, skipping anything this page
+            // has already shown.
+            let mut targets: Vec<Id> = Vec::new();
+            for id in &pending {
+                if targets.len() >= DISCOVERY_HYDRATE || seen.contains(&id.get()) {
+                    continue;
+                }
+                targets.push(*id);
+            }
+            let mut hydrated: Vec<Illust> = Vec::new();
+            if !targets.is_empty() {
+                let detail_client = client.clone();
+                let mut stream = futures::stream::iter(targets)
+                    .map(move |id| {
+                        let client = detail_client.clone();
+                        async move { client.illust_detail(id).await.ok() }
+                    })
+                    .buffer_unordered(4);
+                while let Some(found) = stream.next().await {
+                    if let Some(illust) = found {
+                        hydrated.push(illust);
+                    }
+                }
+            }
+            works.extend(hydrated);
+
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                app.loading_more = false;
+                app.ui().set_grid_loading_more(false);
+                if app.epoch != epoch || app.page != Destination::Discovery {
+                    return;
+                }
+
+                if let Some(message) = quick_error
+                    && app.items.is_empty()
+                    && works.is_empty()
+                {
+                    app.show_feed_error(&message);
+                    app.discovery.exhausted = true;
+                    app.refresh_chrome();
+                    return;
+                }
+
+                if let Ok(users) = users {
+                    app.discovery.users = users;
+                    app.discovery.users_state = if app.discovery.users.is_empty() {
+                        BAND_EMPTY
+                    } else {
+                        BAND_OK
+                    };
+                } else if app.discovery.users.is_empty() {
+                    app.discovery.users_state = BAND_ERROR;
+                    app.discovery.users_message = "推荐画师载入失败".to_string();
+                }
+
+                // Record every id this batch touched so the next one cannot
+                // re-add it, including the ones that failed to hydrate.
+                for illust in &works {
+                    app.discovery.seen.insert(illust.id.get());
+                }
+                for id in &pending {
+                    app.discovery.seen.insert(id.get());
+                }
+
+                let urls: Vec<String> = works
+                    .iter()
+                    .filter_map(|illust| illust.author.avatar.clone())
+                    .collect();
+                let added = pixiv_types::domain::append_unique(
+                    &mut app.items,
+                    works.into_iter().filter(|illust| !illust.id.is_zero()),
+                );
+
+                app.discovery.batches += 1;
+                if added == 0 {
+                    app.discovery.empty_batches += 1;
+                } else {
+                    app.discovery.empty_batches = 0;
+                }
+                if app.discovery.empty_batches >= 2
+                    || app.discovery.batches >= DISCOVERY_MAX_BATCHES
+                {
+                    app.discovery.exhausted = true;
+                    app.reached_end = true;
+                }
+
+                app.feed_owner = Some(app.route);
+                if added == 0 && app.items.is_empty() {
+                    app.ui().set_grid_state(BAND_EMPTY);
+                    app.ui().set_grid_state_title("没有更多推荐".into());
+                    app.ui().set_grid_state_glyph("discover".into());
+                    app.ui()
+                        .set_grid_message("Pixiv 的推荐引擎这次没有返回新作品，稍后再试。".into());
+                    app.ui().set_grid_action_label("".into());
+                    app.ui().set_grid_columns(ModelRc::default());
+                    app.columns.clear();
+                    app.index.clear();
+                } else {
+                    app.render_feed(Vec::new(), true);
+                }
+                app.publish_discovery_users();
+                app.spawn_avatars(urls);
+                app.refresh_chrome();
+            });
+        });
+    }
+
+    fn publish_discovery_users(&self) {
+        let ui = self.ui();
+        let users: Vec<RecommendUserItem> = self
+            .discovery
+            .users
+            .iter()
+            .map(|user| self.user_item(user))
+            .collect();
+        ui.set_discovery_users(ModelRc::from(Rc::new(VecModel::from(users))));
+        ui.set_discovery_users_state(self.discovery.users_state);
+        ui.set_discovery_users_message(self.discovery.users_message.clone().into());
+    }
+
+    // ------------------------------------------------------------- profile
+
+    /// Load the user page named by the current route.
+    fn load_profile(shared: &Shared) {
+        let (route, target, epoch, client, rt) = {
+            let mut app = shared.borrow_mut();
+            let route = app.route;
+            let target = route
+                .user_id()
+                .map(Id)
+                .or(app.session.user_id);
+            app.epoch += 1;
+            app.epoch += 1;
+            let epoch = app.epoch;
+            app.profile = None;
+            app.feed_owner = None;
+            app.items.clear();
+            app.columns.clear();
+            app.index.clear();
+            app.loading_more = false;
+            app.reached_end = false;
+            {
+                let ui = app.ui();
+                ui.set_grid_scroll_y(0.0);
+                ui.set_grid_state(BAND_LOADING);
+                ui.set_grid_columns(ModelRc::default());
+                ui.set_grid_loading_more(false);
+                ui.set_grid_count_label("".into());
+                ui.set_profile_state(BAND_LOADING);
+                ui.set_profile_message("".into());
+                ui.set_profile_count_label("".into());
+                ui.set_profile_followed(false);
+                ui.set_profile_avatar(slint::Image::default());
+                ui.set_profile_avatar_state(BAND_LOADING);
+                ui.set_profile_background(slint::Image::default());
+                ui.set_profile_stats(ModelRc::default());
+                ui.set_profile_name("".into());
+                ui.set_profile_account("".into());
+                ui.set_profile_uid(target.map(|id| id.to_string()).unwrap_or_default().into());
+                ui.set_profile_comment("".into());
+                ui.set_profile_webpage("".into());
+                ui.set_profile_premium(false);
+                ui.set_profile_self(false);
+            }
+            app.remember_scroll(route, 0.0);
+            app.refresh_chrome();
+            (
+                route,
+                target,
+                epoch,
+                app.client.clone(),
+                app.rt.clone(),
+            )
+        };
+
+        let Some(target) = target else {
+            let app = shared.borrow_mut();
+            app.ui().set_profile_state(BAND_ERROR);
+            app.ui()
+                .set_profile_message("没有可显示的用户：链接里没有用户 ID，也没有登录账号".into());
+            return;
+        };
+
+        let Some(client) = client else {
+            let app = shared.borrow_mut();
+            app.ui().set_profile_state(BAND_ERROR);
+            app.ui().set_profile_message("没有可用的网络客户端".into());
+            return;
+        };
+
+        rt.spawn(async move {
+            let (profile, ids) = tokio::join!(
+                client.user_profile(target),
+                client.user_illust_ids(target)
+            );
+            let profile = match profile {
+                Ok(profile) => profile,
+                Err(error) => {
+                    let message = error.to_string();
+                    on_ui(move |shared| {
+                        let Ok(app) = shared.try_borrow_mut() else {
+                            return;
+                        };
+                        if app.epoch != epoch || app.route != route {
+                            return;
+                        }
+                        app.ui().set_profile_state(BAND_ERROR);
+                        app.ui().set_profile_message(message.clone().into());
+                        app.ui().set_grid_state(BAND_ERROR);
+                        app.ui().set_grid_state_title("无法载入用户主页".into());
+                        app.ui().set_grid_message(message.into());
+                    });
+                    return;
+                }
+            };
+            let ids = ids.unwrap_or_default();
+            let first: Vec<Id> = ids.iter().take(PROFILE_PAGE).copied().collect();
+            let works = client.user_works(target, &first).await.unwrap_or_default();
+
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                if app.epoch != epoch || app.route != route {
+                    return;
+                }
+                let mut avatar_urls: Vec<String> = Vec::new();
+                if let Some(url) = profile.avatar.clone() {
+                    avatar_urls.push(url);
+                }
+                avatar_urls.extend(
+                    works
+                        .iter()
+                        .filter_map(|illust| illust.author.avatar.clone()),
+                );
+                let state = ProfileState {
+                    user: target,
+                    profile,
+                    ids,
+                    loaded: first.len(),
+                    works: works.clone(),
+                };
+                app.profile = Some(state);
+                app.feed_owner = Some(route);
+                app.publish_profile();
+                app.render_feed(works, false);
+                app.publish_profile();
+                app.spawn_avatars(avatar_urls);
+                app.spawn_profile_background();
+                app.refresh_chrome();
+            });
+        });
+    }
+
+    fn spawn_profile_background(&mut self) {
+        let Some(url) = self
+            .profile
+            .as_ref()
+            .and_then(|state| state.profile.background.clone())
+        else {
+            return;
+        };
+        if self.avatars.contains_key(&url) {
+            if let Some(image) = self.avatars.get(&url).cloned() {
+                self.ui().set_profile_background(image);
+            }
+            return;
+        }
+        if !self.start_avatar(&url) {
+            return;
+        }
+        let cache = self.cache.clone();
+        let rt = self.rt.clone();
+        let scale = self.ui().window().scale_factor().max(1.0);
+        let target = crate::images::target_width(1200.0, scale);
+        rt.spawn(async move {
+            let raw = fetch_sized(&cache, &url, target).await;
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                app.avatar_loading.remove(&url);
+                let Some(raw) = raw else {
+                    return;
+                };
+                let image = raw.to_slint();
+                app.avatars.insert(url.clone(), image.clone());
+                app.ui().set_profile_background(image);
+            });
+        });
+    }
+
+    fn publish_profile(&self) {
+        let ui = self.ui();
+        let Some(state) = self.profile.as_ref() else {
+            return;
+        };
+        let profile = &state.profile;
+        ui.set_profile_name(profile.name.clone().into());
+        ui.set_profile_account(profile.account.clone().into());
+        ui.set_profile_uid(profile.id.to_string().into());
+        ui.set_profile_comment(profile.comment.clone().into());
+        ui.set_profile_webpage(profile.webpage.clone().unwrap_or_default().into());
+        ui.set_profile_premium(profile.is_premium);
+        ui.set_profile_followed(profile.is_followed);
+        ui.set_profile_self(self.session.user_id == Some(profile.id));
+
+        let avatar_url = profile.avatar.clone().unwrap_or_default();
+        let (image, avatar_state) = match self.avatars.get(&avatar_url) {
+            Some(image) => (image.clone(), BAND_OK),
+            None if avatar_url.is_empty() => (slint::Image::default(), BAND_EMPTY),
+            None => (slint::Image::default(), BAND_LOADING),
+        };
+        ui.set_profile_avatar(image);
+        ui.set_profile_avatar_state(avatar_state);
+
+        // Figures the server actually sent. A count it did not send is shown as
+        // a dash rather than as a zero, because zero is a claim.
+        let mut stats: Vec<ProfileStatItem> = vec![
+            ProfileStatItem {
+                label: "插画".into(),
+                value: profile.illust_count.to_string().into(),
+            },
+            ProfileStatItem {
+                label: "漫画".into(),
+                value: profile.manga_count.to_string().into(),
+            },
+            ProfileStatItem {
+                label: "关注".into(),
+                value: profile.followees.to_string().into(),
+            },
+            ProfileStatItem {
+                label: "粉丝".into(),
+                value: profile
+                    .followers
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "—".to_string())
+                    .into(),
+            },
+        ];
+        if !profile.webpage.clone().unwrap_or_default().trim().is_empty() {
+            stats.push(ProfileStatItem {
+                label: "主页".into(),
+                value: profile.webpage.clone().unwrap_or_default().into(),
+            });
+        }
+        ui.set_profile_stats(ModelRc::from(Rc::new(VecModel::from(stats))));
+
+        let total = state.ids.len();
+        ui.set_profile_count_label(
+            if total == 0 {
+                "".into()
+            } else {
+                format!(
+                    "已显示 {} / {} 件作品",
+                    state.works.len().min(total),
+                    total
+                )
+                .into()
+            },
+        );
+        ui.set_profile_state(if state.works.is_empty() {
+            self.profile_empty_state()
+        } else {
+            BAND_OK
+        });
+        if state.works.is_empty() {
+            ui.set_profile_message(
+                if total == 0 {
+                    "这个用户还没有公开作品。"
+                } else {
+                    "作品载入失败，点击重试。"
+                }
+                .into(),
+            );
+        }
+    }
+
+    fn profile_empty_state(&self) -> i32 {
+        match self.profile.as_ref() {
+            Some(state) if state.ids.is_empty() => BAND_EMPTY,
+            Some(_) => BAND_ERROR,
+            None => BAND_LOADING,
+        }
+    }
+
+    /// Append the next slice of the artist's works.
+    fn load_profile_more(shared: &Shared) {
+        let (target, next, epoch, client, rt) = {
+            let mut app = shared.borrow_mut();
+            if app.loading_more || app.reached_end {
+                return;
+            }
+            let (target, next) = {
+                let Some(state) = app.profile.as_ref() else {
+                    return;
+                };
+                if state.loaded >= state.ids.len() {
+                    app.reached_end = true;
+                    return;
+                }
+                let next: Vec<Id> = state
+                    .ids
+                    .iter()
+                    .skip(state.loaded)
+                    .take(PROFILE_PAGE)
+                    .copied()
+                    .collect();
+                (state.user, next)
+            };
+            app.loading_more = true;
+            app.ui().set_grid_loading_more(true);
+            (target, next, app.epoch, app.client.clone(), app.rt.clone())
+        };
+        let Some(client) = client else {
+            let mut app = shared.borrow_mut();
+            app.loading_more = false;
+            app.ui().set_grid_loading_more(false);
+            app.reached_end = true;
+            return;
+        };
+        rt.spawn(async move {
+            let works = client.user_works(target, &next).await.unwrap_or_default();
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                app.loading_more = false;
+                app.ui().set_grid_loading_more(false);
+                if app.epoch != epoch || app.page != Destination::UserProfile {
+                    return;
+                }
+                let urls: Vec<String> = works
+                    .iter()
+                    .filter_map(|illust| illust.author.avatar.clone())
+                    .collect();
+                let requested = next.len();
+                let (exhausted, all_works) = {
+                    let Some(state) = app.profile.as_mut() else {
+                        return;
+                    };
+                    state.loaded += requested;
+                    pixiv_types::domain::append_unique(&mut state.works, works);
+                    (state.loaded >= state.ids.len(), state.works.clone())
+                };
+                if exhausted {
+                    app.reached_end = true;
+                }
+                app.publish_profile();
+                app.render_feed(all_works, false);
+                app.spawn_avatars(urls);
+            });
+        });
+    }
+
+    /// Follow or unfollow the user on the open profile page.
+    fn toggle_profile_follow(&mut self) {
+        let Some(state) = self.profile.as_ref() else {
+            return;
+        };
+        let target = state.user;
+        if !self.session.is_authenticated() {
+            self.notify(2, "需要登录后才能关注");
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.ui().set_profile_busy(true);
+        let rt = self.rt.clone();
+        rt.spawn(async move {
+            let outcome = async {
+                let current = client.follow_state(target).await?;
+                let wanted = !current;
+                client.follow(target, wanted).await?;
+                let confirmed = client.follow_state(target).await?;
+                Ok::<_, pixiv_types::PixivError>((wanted, confirmed))
+            }
+            .await;
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                app.ui().set_profile_busy(false);
+                match outcome {
+                    Ok((wanted, confirmed)) => {
+                        if let Some(state) = app.profile.as_mut() {
+                            state.profile.is_followed = confirmed;
+                        }
+                        app.publish_profile();
+                        if confirmed == wanted {
+                            app.notify(1, if confirmed { "已关注" } else { "已取消关注" });
+                        } else {
+                            app.notify(3, "关注状态未改变：服务器报告的状态与请求不一致");
+                        }
+                    }
+                    Err(error) => app.notify(3, format!("关注失败：{error}")),
+                }
+            });
+        });
+    }
+
+    // ------------------------------------------------------------- suggestions
+
+    fn publish_suggestions(&self) {
+        let ui = self.ui();
+        let rows: Vec<SuggestionItem> = self
+            .suggest
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| SuggestionItem {
+                tag: row.tag.clone().into(),
+                label: row.display().to_string().into(),
+                count: row
+                    .illust_count
+                    .map(|count| format!("{count} 件"))
+                    .unwrap_or_default()
+                    .into(),
+                local: matches!(
+                    row.source,
+                    pixiv_types::domain::SuggestionSource::LocalHistory
+                ),
+                active: index as i32 == self.suggest.active,
+            })
+            .collect();
+        ui.set_suggestions(ModelRc::from(Rc::new(VecModel::from(rows))));
+        ui.set_suggest_visible(self.suggest.visible);
+        ui.set_suggest_note(self.suggest.note.clone().into());
+    }
+
+    fn suggest_close(&mut self) {
+        self.suggest.generation += 1;
+        self.suggest.timer.stop();
+        self.suggest.visible = false;
+        self.suggest.active = -1;
+        self.suggest.rows.clear();
+        self.suggest.note.clear();
+        self.publish_suggestions();
+    }
+
+    /// Rows for an empty box: the server's own recommended tags, then this
+    /// machine's search history, which is labelled as local.
+    fn suggest_show_base(&mut self) {
+        let mut rows = self.suggest.base.clone();
+        let history = self.store.search_history(5).unwrap_or_default();
+        let local = pixiv_types::domain::history_suggestions(&history, 5);
+        let had_history = !local.is_empty();
+        rows.extend(local);
+        self.suggest.rows = rows;
+        self.suggest.active = -1;
+        self.suggest.visible = !self.suggest.rows.is_empty();
+        self.suggest.note = if self.suggest.base.is_empty() && had_history {
+            "只有本机搜索记录，Pixiv 没有返回推荐标签".to_string()
+        } else if had_history {
+            "上方为 Pixiv 推荐标签，下方为本机搜索记录".to_string()
+        } else {
+            String::new()
+        };
+        self.publish_suggestions();
+    }
+
+    /// The user typed. Debounce, then ask Pixiv.
+    fn suggest_query(&mut self, shared: &Shared, text: &str) {
+        self.suggest.generation += 1;
+        self.suggest.query = text.trim().to_string();
+        self.suggest.timer.stop();
+        if self.suggest.query.is_empty() {
+            self.suggest_show_base();
+            return;
+        }
+
+        // Show the panel immediately with an explicit loading note: an empty
+        // dropdown while typing reads as "no results".
+        self.suggest.visible = true;
+        self.suggest.active = -1;
+        self.suggest.note = "正在向 Pixiv 请求联想…".to_string();
+        self.suggest.rows.clear();
+        self.publish_suggestions();
+
+        let generation = self.suggest.generation;
+        let shared = shared.clone();
+        // 280ms: long enough that a normal typing run issues one request, short
+        // enough that the list feels live.
+        self.suggest.timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(280),
+            move || {
+                let (word, client, rt) = {
+                    let app = shared.borrow();
+                    (
+                        app.suggest.query.clone(),
+                        app.client.clone(),
+                        app.rt.clone(),
+                    )
+                };
+                if word.is_empty() {
+                    return;
+                }
+                let Some(client) = client else {
+                    let mut app = shared.borrow_mut();
+                    app.suggest.note = "未登录：联想需要网络客户端".to_string();
+                    app.publish_suggestions();
+                    return;
+                };
+                rt.spawn(async move {
+                    let rows = client.suggestions(&word, 10).await;
+                    on_ui(move |shared| {
+                        let Ok(mut app) = shared.try_borrow_mut() else {
+                            return;
+                        };
+                        // A reply for a query the user has already moved past
+                        // must not overwrite the newer list.
+                        if app.suggest.generation != generation {
+                            return;
+                        }
+                        match rows {
+                            Ok(rows) if !rows.is_empty() => {
+                                app.suggest.rows = rows;
+                                app.suggest.active = -1;
+                                app.suggest.visible = true;
+                                app.suggest.note = String::new();
+                            }
+                            Ok(_) => {
+                                app.suggest.rows.clear();
+                                app.suggest.active = -1;
+                                app.suggest.visible = true;
+                                app.suggest.note =
+                                    "Pixiv 没有返回匹配标签，按回车可直接搜索这个词".to_string();
+                            }
+                            Err(error) => {
+                                // Local history is offered as a clearly separate
+                                // aid, never dressed up as a Pixiv suggestion.
+                                let history = app.store.search_history(5).unwrap_or_default();
+                                app.suggest.rows = pixiv_types::domain::history_suggestions(
+                                    &history, 5,
+                                );
+                                app.suggest.active = -1;
+                                app.suggest.visible = true;
+                                app.suggest.note = format!(
+                                    "联想服务不可用（{error}），以上为本机搜索记录"
+                                );
+                            }
+                        }
+                        app.publish_suggestions();
+                    });
+                });
+            },
+        );
+    }
+
+    /// Up / Down inside the search field.
+    fn suggest_move(&mut self, key: &str) {
+        if !self.suggest.visible || self.suggest.rows.is_empty() {
+            return;
+        }
+        let count = self.suggest.rows.len() as i32;
+        let down = key == "\u{F701}";
+        let next = if down {
+            if self.suggest.active + 1 >= count {
+                0
+            } else {
+                self.suggest.active + 1
+            }
+        } else if self.suggest.active <= 0 {
+            count - 1
+        } else {
+            self.suggest.active - 1
+        };
+        self.suggest.active = next;
+        self.publish_suggestions();
+    }
+
+    /// The chosen row, or the typed text when no row is highlighted.
+    fn suggest_resolve(&self, typed: &str) -> String {
+        if self.suggest.visible
+            && self.suggest.active >= 0
+            && let Some(row) = self.suggest.rows.get(self.suggest.active as usize)
+        {
+            return row.tag.clone();
+        }
+        typed.to_string()
+    }
+}
+
 // ---------------------------------------------------------------- callbacks
 
 fn install_callbacks(app: &Shared) {
@@ -2063,19 +3723,43 @@ fn install_callbacks(app: &Shared) {
     }
     {
         let shared = app.clone();
-        ui.on_shell_shortcut(move |action| {
-            if action.as_str() == "escape" {
-                let page = shared.borrow().page;
-                if page == Destination::Detail {
+        ui.on_shell_shortcut(move |action| match action.as_str() {
+            "escape" => {
+                let (page, suggesting) = {
+                    let app = shared.borrow();
+                    (app.page, app.suggest.visible)
+                };
+                if suggesting {
+                    shared.borrow_mut().suggest_close();
+                } else if page == Destination::Detail {
                     App::travel(&shared, true);
                 }
             }
+            // An explicit browser hand-off is still available, but it is never
+            // the default for an author link.
+            "open-external" => {
+                let target = {
+                    let app = shared.borrow();
+                    app.profile
+                        .as_ref()
+                        .map(|state| state.user.get())
+                };
+                if let Some(uid) = target {
+                    let _ = open::that(format!("https://www.pixiv.net/users/{uid}"));
+                }
+            }
+            _ => {}
         });
     }
     {
         let shared = app.clone();
         ui.on_search_submitted(move |word| {
-            let word = word.trim().to_string();
+            // The highlighted suggestion wins over the raw text: that is what
+            // pressing Enter on a dropdown row means everywhere else.
+            let word = {
+                let app = shared.borrow();
+                app.suggest_resolve(word.as_str()).trim().to_string()
+            };
             if word.is_empty() {
                 let app = shared.borrow();
                 app.notify(2, "请输入关键词");
@@ -2083,6 +3767,7 @@ fn install_callbacks(app: &Shared) {
             }
             {
                 let mut app = shared.borrow_mut();
+                app.suggest_close();
                 app.search_word = word.clone();
                 app.feed_owner = None;
                 let _ = app.store.push_search(&word);
@@ -2091,6 +3776,7 @@ fn install_callbacks(app: &Shared) {
                 // store write and the read are ordered here so the chip appears
                 // without a second navigation.
                 app.refresh_recent_searches();
+                app.ui().set_search_text(word.clone().into());
             }
             App::navigate(&shared, Destination::Search);
         });
@@ -2102,12 +3788,86 @@ fn install_callbacks(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_open_author(move |id| {
-            // Honest behaviour: the account page lives on pixiv.net, there is no
-            // user feed screen in this build.
-            let app = shared.borrow();
-            let _ = open::that(format!("https://www.pixiv.net/users/{}", id));
-            app.notify(0, "已在浏览器中打开画师主页");
+            // The author page is native now: no browser hand-off.
+            App::open_profile(&shared, id.as_str());
         });
+    }
+    {
+        let shared = app.clone();
+        // A card's author link knows the user id, so it can go straight there.
+        ui.on_open_card_author(move |id| App::open_profile(&shared, id.as_str()));
+    }
+    {
+        let shared = app.clone();
+        ui.on_open_profile(move |id| App::open_profile(&shared, id.as_str()));
+    }
+    {
+        let shared = app.clone();
+        ui.on_search_edited(move |text| {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            app.suggest_query(&shared, text.as_str());
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_suggest_key(move |key| {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            app.suggest_move(key.as_str());
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_suggest_chosen(move |tag| {
+            let tag = tag.to_string();
+            {
+                let mut app = shared.borrow_mut();
+                app.suggest_close();
+                app.search_word = tag.clone();
+                app.feed_owner = None;
+                let _ = app.store.push_search(&tag);
+                app.refresh_recent_searches();
+                app.ui().set_search_text(tag.clone().into());
+            }
+            App::navigate(&shared, Destination::Search);
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_suggest_dismissed(move || {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            app.suggest_close();
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_profile_back(move || App::travel(&shared, true));
+    }
+    {
+        let shared = app.clone();
+        ui.on_profile_refresh(move || App::load_profile(&shared));
+    }
+    {
+        let shared = app.clone();
+        ui.on_profile_retry(move || App::load_profile(&shared));
+    }
+    {
+        let shared = app.clone();
+        ui.on_profile_follow(move || {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            app.toggle_profile_follow();
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_profile_load_more(move || App::load_profile_more(&shared));
     }
     {
         let shared = app.clone();
@@ -2145,16 +3905,26 @@ fn install_callbacks(app: &Shared) {
             let Ok(mut app) = shared.try_borrow_mut() else {
                 return;
             };
-            let page = app.page;
-            app.remember_scroll(page, offset);
+            let route = app.route;
+            app.remember_scroll(route, offset);
         });
     }
     {
         let shared = app.clone();
         ui.on_grid_retry(move || {
             let page = shared.borrow().page;
-            App::load_page(&shared, false);
-            let _ = page;
+            match page {
+                Destination::Home => App::load_home(&shared),
+                Destination::Discovery => App::load_discovery(&shared, false),
+                Destination::UserProfile => App::load_profile(&shared),
+                Destination::Detail => {
+                    let id = shared.borrow().detail.as_ref().map(|d| d.id.get());
+                    if let Some(id) = id {
+                        App::open_detail_route(&shared, id, false);
+                    }
+                }
+                _ => App::load_page(&shared, false),
+            }
         });
     }
     {
@@ -2218,9 +3988,7 @@ fn install_callbacks(app: &Shared) {
                 app.detail.as_ref().map(|d| d.author.id.to_string())
             };
             if let Some(id) = id {
-                let app = shared.borrow();
-                let _ = open::that(format!("https://www.pixiv.net/users/{id}"));
-                app.notify(0, "已在浏览器中打开画师主页");
+                App::open_profile(&shared, &id);
             }
         });
     }
@@ -2802,6 +4570,12 @@ fn illust_to_item(illust: &Illust, rank: i32) -> IllustItem {
         width: illust.width as i32,
         height: illust.height as i32,
         state: 1,
+        author_avatar: slint::Image::default(),
+        author_avatar_url: illust.author.avatar.clone().unwrap_or_default().into(),
+        // 1 while the payload named an avatar URL and it has not arrived yet; 2
+        // when there is no URL at all, which is the only case where drawing the
+        // initial is honest.
+        author_avatar_state: if illust.author.avatar.is_some() { 1 } else { 2 },
     }
 }
 

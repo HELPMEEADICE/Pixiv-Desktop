@@ -1,13 +1,101 @@
-//! Navigation history with a real forward stack.
+//! Navigation history with a real forward stack, over parameterised routes.
 //!
 //! The previous shell had a back button that popped a stack and a forward button
-//! that always navigated to Home — pressing it after one Back was a lie. This is
+//! that always navigated to Home -- pressing it after one Back was a lie. This is
 //! the usual three-stack browser model, kept generic so it can be tested against
 //! a plain enum instead of the generated Slint one.
+//!
+//! The second half of the story is Route: a bare page name cannot say *which*
+//! artist a profile page is showing, so two visits to two different profiles were
+//! the same history entry and Back restored whichever id the app happened to hold
+//! last. A route carries the page and its argument together.
 
-/// Back/forward history. `T` is the destination type; it only needs to be
-/// comparable and copyable, which both the generated Slint enum and a test enum
-/// are.
+use crate::Destination;
+
+/// The argument that makes one visit to a page distinct from another.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RouteParam {
+    #[default]
+    None,
+    /// A work, for the detail page.
+    Illust(u64),
+    /// A user, for the profile page.
+    User(u64),
+}
+
+impl RouteParam {
+    #[must_use]
+    pub const fn illust(id: u64) -> Self {
+        Self::Illust(id)
+    }
+
+    #[must_use]
+    pub const fn user(id: u64) -> Self {
+        Self::User(id)
+    }
+}
+
+/// One entry in the navigation history: a page plus the thing it shows.
+// Slint's generated Destination enum is PartialEq but not Eq, so the route can
+// only promise PartialEq. That is all the history needs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Route {
+    pub page: Destination,
+    pub param: RouteParam,
+}
+
+impl Route {
+    #[must_use]
+    pub const fn new(page: Destination, param: RouteParam) -> Self {
+        Self { page, param }
+    }
+
+    /// A page with no argument.
+    #[must_use]
+    pub const fn plain(page: Destination) -> Self {
+        Self::new(page, RouteParam::None)
+    }
+
+    #[must_use]
+    pub const fn illust(page: Destination, id: u64) -> Self {
+        Self::new(page, RouteParam::illust(id))
+    }
+
+    #[must_use]
+    pub const fn user(id: u64) -> Self {
+        Self::new(Destination::UserProfile, RouteParam::user(id))
+    }
+
+    /// The illustration this entry shows, if any.
+    #[must_use]
+    pub const fn illust_id(self) -> Option<u64> {
+        match self.param {
+            RouteParam::Illust(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The user this entry shows, if any.
+    #[must_use]
+    pub const fn user_id(self) -> Option<u64> {
+        match self.param {
+            RouteParam::User(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// True when the two entries would render the same thing, which is what
+    /// makes a repeat navigation a no-op instead of a new history step.
+    #[must_use]
+    pub fn same_view(self, other: Self) -> bool {
+        self.page == other.page && self.param == other.param
+    }
+}
+
+/// Back/forward history.
+///
+/// The destination type only needs to be comparable and copyable, which both
+/// Route and the plain test enum are.
 pub struct History<T> {
     back: Vec<T>,
     forward: Vec<T>,
@@ -23,7 +111,7 @@ impl<T: PartialEq + Copy> History<T> {
         }
     }
 
-    /// Record a navigation from `current` to `next`.
+    /// Record a navigation from current to next.
     ///
     /// Navigating to where you already are is a no-op: re-clicking the active
     /// nav item must not push a duplicate entry the user has to press Back twice
@@ -74,9 +162,13 @@ impl<T: PartialEq + Copy> History<T> {
     }
 }
 
+/// The history the app actually uses.
+pub type RouteHistory = History<Route>;
+
 #[cfg(test)]
 mod tests {
-    use super::History;
+    use super::{History, Route, RouteHistory};
+    use crate::Destination;
 
     #[derive(Clone, Copy, PartialEq, Debug)]
     enum Page {
@@ -139,5 +231,56 @@ mod tests {
         let mut history: History<Page> = History::new(8);
         assert_eq!(history.back(Page::Home), None);
         assert_eq!(history.forward(Page::Home), None);
+    }
+
+    #[test]
+    fn two_user_profiles_are_different_history_entries() {
+        let mut history: RouteHistory = History::new(16);
+        let home = Route::plain(Destination::Home);
+        let first = Route::user(11);
+        let second = Route::user(22);
+
+        history.visit(home, first);
+        history.visit(first, second);
+        // Back must land on the FIRST author, not on whichever id the app last
+        // wrote into a single shared field.
+        assert_eq!(history.back(second), Some(first));
+        assert_eq!(history.back(first), Some(home));
+        assert_eq!(history.forward(home), Some(first));
+        assert_eq!(history.forward(first), Some(second));
+    }
+
+    #[test]
+    fn reopening_the_same_profile_is_not_a_new_step() {
+        let mut history: RouteHistory = History::new(16);
+        let profile = Route::user(7);
+        history.visit(profile, profile);
+        assert!(!history.can_go_back());
+    }
+
+    #[test]
+    fn illust_ids_survive_a_round_trip() {
+        let mut history: RouteHistory = History::new(16);
+        let work_a = Route::illust(Destination::Detail, 100);
+        let work_b = Route::illust(Destination::Detail, 200);
+        history.visit(work_a, work_b);
+        let back = history.back(work_b).expect("one step back");
+        assert_eq!(back.illust_id(), Some(100));
+        assert_eq!(back.page, Destination::Detail);
+        assert_eq!(back.user_id(), None);
+    }
+
+    #[test]
+    fn route_accessors_report_what_the_page_shows() {
+        assert_eq!(Route::user(5).user_id(), Some(5));
+        assert_eq!(Route::user(5).illust_id(), None);
+        assert_eq!(Route::illust(Destination::Detail, 9).illust_id(), Some(9));
+        assert_eq!(Route::plain(Destination::Home).param, Default::default());
+        assert!(Route::plain(Destination::Home).same_view(Route::plain(Destination::Home)));
+        assert!(!Route::user(1).same_view(Route::user(2)));
+        assert_eq!(
+            Route::new(Destination::Search, Default::default()).page,
+            Destination::Search
+        );
     }
 }

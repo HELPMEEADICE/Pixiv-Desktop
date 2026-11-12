@@ -1,40 +1,99 @@
-// Home: the artwork-first landing page.
+// Home: Pixiv's own front page, rendered natively.
 //
-// Deliberately *not* the generic GalleryPage: the front page earns a hero band
-// and a trending-tag entry point, while Search / Bookmarks / History want the
-// plainer header. Both share `ArtworkGrid` and `PageScroll`, so the masonry and
-// the scroll behaviour are still implemented once.
+// Every band below has its own source and its own state, because they come from
+// four different endpoints and any one of them can fail without making the page
+// useless:
 //
-// Everything here is driven by real state: the hero reports how many works the
-// current feed actually holds and whether it came from the demo catalogue or a
-// live session. No count, badge or label is invented in this file.
+//   为你推荐      /ajax/street/for_you          personalised works
+//   推荐标签      /ajax/street/recommend_tags   tags for this account
+//   最新作品      /ajax/street/latest           the newest works, not personalised
+//   推荐画师      /ajax/street/sub              artists, with real avatars
+//
+// The daily ranking is deliberately absent: it lives on its own page. Falling
+// back to it here is what made "为你推荐" show the same 50 works as 排行榜.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type } from "../theme.slint";
 import {
-    AppButton, ButtonKind, IconButton, IconSlot, TagChip, PageScroll, StateView, StateKind,
-    Skeleton, ProgressBar, IllustItem,
+    AppButton, ButtonKind, IconSlot, TagChip, PageScroll, StateView, StateKind, Skeleton,
+    ProgressBar, IllustItem, IllustCard, RecommendTagItem, RecommendUserItem, UserCard,
 } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
+
+/// A band header: title, one line of provenance, and an optional action.
+component BandHeader inherits Rectangle {
+    in property <string> title: "";
+    in property <string> note: "";
+    in property <string> glyph: "sparkle";
+    in property <bool> show-retry: false;
+    callback retry();
+
+    height: 26px;
+
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        alignment: start;
+
+        IconSlot {
+            name: root.glyph;
+            slot: Theme.icon-size;
+            tint: Theme.accent-fill;
+        }
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.font-small;
+            font-weight: Type.semibold;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.note;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-caption;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.show-retry : AppButton {
+            label: "重试";
+            icon: "refresh";
+            kind: ButtonKind.Secondary;
+            row-height: 26px;
+            clicked => { root.retry(); }
+        }
+    }
+}
 
 export component HomePage inherits Rectangle {
     in property <[[IllustItem]]> columns: [];
     in property <length> card-width: 220px;
-    /// 0 content, 1 loading, 2 empty, 3 error, 4 locked
-    in property <int> state: 0;
-    in property <string> message: "";
-    in property <[string]> tags: [];
-    in property <string> active-tag: "";
-    in property <string> greeting: "为你推荐";
-    in property <string> subtitle: "根据 Pixiv 榜单与关注动态整理";
     in property <string> count-label: "";
     in property <bool> demo-mode: false;
     in property <bool> loading-more: false;
     in-out property <length> scroll-y: 0px;
 
+    /// 0 content, 1 loading, 2 empty, 3 error
+    in property <int> feed-state: 1;
+    in property <string> feed-message: "";
+    in property <string> source-note: "";
+
+    in property <[RecommendTagItem]> recommend-tags: [];
+    in property <int> tags-state: 1;
+    in property <string> tags-message: "";
+
+    in property <[IllustItem]> latest: [];
+    in property <string> latest-title: "";
+    in property <int> latest-state: 1;
+    in property <string> latest-message: "";
+
+    in property <[RecommendUserItem]> artists: [];
+    in property <int> artists-state: 1;
+    in property <string> artists-message: "";
+
     callback measured(length);
     callback open-illust(string);
     callback open-author(string);
+    callback open-recommend-user(string);
     callback toggle-bookmark(string);
     callback open-tag(string);
     callback refresh();
@@ -51,7 +110,7 @@ export component HomePage inherits Rectangle {
         spacing: Theme.space-4;
         width-changed(w) => { root.measured(w); }
         scrolled(y) => {
-            if (root.state == 0 && !root.loading-more) {
+            if (root.feed-state == 0 && !root.loading-more) {
                 if (y + page.viewport-height + 600px >= page.body-height) {
                     root.load-more();
                 }
@@ -59,11 +118,8 @@ export component HomePage inherits Rectangle {
         }
 
         // ---------------- hero ----------------
-        // A plain header, not a coloured panel. A full-width accent wash was the
-        // single largest block of colour in the app and competed with the artwork
-        // for attention, which is the opposite of what a Pixiv client should do.
-        hero := Rectangle {
-            height: 76px;
+        Rectangle {
+            height: 68px;
             background: transparent;
 
             HorizontalLayout {
@@ -71,7 +127,7 @@ export component HomePage inherits Rectangle {
 
                 VerticalLayout {
                     alignment: center;
-                    spacing: Theme.space-1;
+                    spacing: 2px;
                     horizontal-stretch: 1;
 
                     HorizontalLayout {
@@ -83,7 +139,7 @@ export component HomePage inherits Rectangle {
                             tint: Theme.accent-fill;
                         }
                         Text {
-                            text: root.greeting;
+                            text: "为你推荐";
                             color: Theme.text;
                             font-size: Theme.font-page;
                             font-weight: Type.semibold;
@@ -99,9 +155,7 @@ export component HomePage inherits Rectangle {
                     }
 
                     Text {
-                        text: root.demo-mode
-                            ? "演示模式：以下作品来自本地演示目录，标记为 [DEMO]，不会访问 Pixiv"
-                            : root.subtitle;
+                        text: root.source-note;
                         color: Theme.text-secondary;
                         font-size: Theme.font-small;
                         wrap: word-wrap;
@@ -112,34 +166,36 @@ export component HomePage inherits Rectangle {
                     label: "换一批";
                     icon: "refresh";
                     kind: ButtonKind.Secondary;
-                    row-height: 76px;
+                    row-height: 68px;
                     clicked => { root.refresh(); }
                 }
             }
         }
 
-        // ---------------- trending tags ----------------
-        if root.tags.length > 0 : VerticalLayout {
+        // ---------------- recommended tags ----------------
+        if root.tags-state != 2 : VerticalLayout {
             spacing: Theme.space-2;
 
-            HorizontalLayout {
+            BandHeader {
+                title: "推荐标签";
+                note: root.tags-state == 3 ? root.tags-message : "点击标签直接搜索";
+                glyph: "tag";
+                show-retry: root.tags-state == 3;
+                retry => { root.refresh(); }
+            }
+
+            if root.tags-state == 1 : HorizontalLayout {
                 spacing: Theme.space-2;
                 alignment: start;
-                IconSlot {
-                    name: "tag";
-                    slot: Theme.icon-size;
-                    tint: Theme.text-tertiary;
-                }
-                Text {
-                    text: "热门标签";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-small;
-                    font-weight: Type.semibold;
-                    vertical-alignment: center;
+                height: 32px;
+                for n in [0, 1, 2, 3, 4, 5] : Skeleton {
+                    width: 72px;
+                    height: 30px;
+                    border-radius: Theme.radius-pill;
                 }
             }
 
-            Rectangle {
+            if root.tags-state == 0 : Rectangle {
                 height: 34px;
                 clip: true;
 
@@ -152,18 +208,24 @@ export component HomePage inherits Rectangle {
                     HorizontalLayout {
                         spacing: Theme.space-2;
                         alignment: start;
-                        for t in root.tags : TagChip {
-                            label: t;
-                            active: t == root.active-tag;
-                            clicked => { root.open-tag(t); }
+                        for t in root.recommend-tags : TagChip {
+                            label: t.label;
+                            active: t.emphasized;
+                            clicked => { root.open-tag(t.name); }
                         }
                     }
                 }
             }
         }
 
-        // ---------------- feed ----------------
-        if root.state == 0 : ArtworkGrid {
+        // ---------------- for you ----------------
+        BandHeader {
+            title: "为你推荐的作品";
+            note: "Pixiv 按你的收藏与浏览生成，与排行榜无关";
+            glyph: "home";
+        }
+
+        if root.feed-state == 0 : ArtworkGrid {
             columns: root.columns;
             card-width: root.card-width;
             open-illust(id) => { root.open-illust(id); }
@@ -171,50 +233,142 @@ export component HomePage inherits Rectangle {
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
         }
 
-        if root.state == 1 : HorizontalLayout {
+        if root.feed-state == 1 : HorizontalLayout {
             spacing: Theme.card-gap;
             alignment: start;
-            height: 420px;
-
+            height: 380px;
             for n in [0, 1, 2, 3] : VerticalLayout {
                 spacing: Theme.card-gap;
                 width: root.card-width;
                 alignment: start;
                 Skeleton { height: root.card-width * 1.25; }
-                Skeleton { height: root.card-width * 0.7; }
+                Skeleton { height: 44px; }
             }
         }
 
-        if root.state > 1 : Rectangle {
-            height: max(220px, page.viewport-height - 300px);
+        if root.feed-state > 1 : Rectangle {
+            height: 200px;
             StateView {
                 width: parent.width;
                 height: parent.height;
-                kind: (root.state == 3) ? StateKind.Error
-                    : (root.state == 4) ? StateKind.Locked
-                    : StateKind.Empty;
-                title: (root.state == 3) ? "无法载入首页"
-                    : (root.state == 4) ? "需要登录"
-                    : "首页还是空的";
-                description: root.message;
-                action-label: (root.state == 3) ? "重试" : "前往设置";
+                kind: (root.feed-state == 3) ? StateKind.Error : StateKind.Empty;
+                title: (root.feed-state == 3) ? "推荐内容载入失败" : "暂时没有推荐作品";
+                description: root.feed-message;
+                action-label: (root.feed-state == 3) ? "重试" : "";
                 retry => { root.retry(); }
                 action => { root.action(); }
             }
         }
 
-        if root.state == 0 && root.loading-more : Rectangle {
-            height: 48px;
+        if root.feed-state == 0 && root.loading-more : Rectangle {
+            height: 40px;
             VerticalLayout {
                 alignment: center;
-                spacing: Theme.space-2;
                 ProgressBar { indeterminate: true; width: 120px; }
-                Text {
-                    text: "正在加载更多…";
-                    color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    horizontal-alignment: center;
+            }
+        }
+
+        // ---------------- latest ----------------
+        VerticalLayout {
+            spacing: Theme.space-2;
+
+            BandHeader {
+                title: root.latest-title == "" ? "最新作品" : root.latest-title;
+                note: root.latest-state == 3 ? root.latest-message : "全站最新投稿，与推荐无关";
+                glyph: "clock";
+                show-retry: root.latest-state == 3;
+                retry => { root.refresh(); }
+            }
+
+            if root.latest-state == 1 : HorizontalLayout {
+                spacing: Theme.card-gap;
+                alignment: start;
+                height: 150px;
+                for n in [0, 1, 2, 3, 4] : Skeleton {
+                    width: 130px;
+                    height: 150px;
+                    border-radius: Theme.radius-md;
                 }
+            }
+
+            if root.latest-state == 0 : Rectangle {
+                height: 150px + Theme.card-caption-height;
+                clip: true;
+
+                ScrollView {
+                    width: 100%;
+                    height: 100%;
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+                    HorizontalLayout {
+                        spacing: Theme.card-gap;
+                        alignment: start;
+                        for it in root.latest : IllustCard {
+                            item: it;
+                            column-width: 140px;
+                            show-author: true;
+                            open => { root.open-illust(it.id); }
+                            open-author => { root.open-author(it.author-id); }
+                            toggle-bookmark => { root.toggle-bookmark(it.id); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------------- recommended artists ----------------
+        VerticalLayout {
+            spacing: Theme.space-2;
+
+            BandHeader {
+                title: "推荐画师";
+                note: root.artists-state == 3 ? root.artists-message : "头像与近作来自 Pixiv，点击进入作者主页";
+                glyph: "artist";
+                show-retry: root.artists-state == 3;
+                retry => { root.refresh(); }
+            }
+
+            if root.artists-state == 1 : HorizontalLayout {
+                spacing: Theme.card-gap;
+                alignment: start;
+                height: 132px;
+                for n in [0, 1, 2, 3] : Skeleton {
+                    width: 210px;
+                    height: 132px;
+                    border-radius: Theme.radius-lg;
+                }
+            }
+
+            if root.artists-state == 0 : Rectangle {
+                height: 132px;
+                clip: true;
+
+                ScrollView {
+                    width: 100%;
+                    height: 100%;
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+                    HorizontalLayout {
+                        spacing: Theme.card-gap;
+                        alignment: start;
+                        for u in root.artists : UserCard {
+                            item: u;
+                            card-width: 210px;
+                            open => { root.open-recommend-user(u.id); }
+                            toggle-follow => { }
+                        }
+                    }
+                }
+            }
+
+            if root.artists-state == 2 : Text {
+                height: 40px;
+                text: root.artists-message;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-small;
+                vertical-alignment: center;
             }
         }
     }

@@ -117,6 +117,11 @@ export global Theme {
     // Slint has no blur, so elevation is emulated with a low-alpha offset
     // rectangle behind flyouts (or `drop-shadow-*`, which blurs on the GPU
     // renderer only). Two steps only: cards stay flat.
+    /// Scrim over a profile cover image. Fixed rather than themed: it is drawn
+    /// on top of somebody's artwork, where the theme has no opinion.
+    out property <color> cover-scrim-top: #00000026;
+    out property <color> cover-scrim-bottom: #00000099;
+
     out property <color> shadow-1: dark ? #0000004d : #0000000f;
     out property <color> shadow-2: dark ? #00000073 : #00000024;
 
