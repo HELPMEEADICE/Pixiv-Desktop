@@ -65,6 +65,37 @@ struct Claim {
     request: DownloadRequest,
     destination: PathBuf,
     cancel: Arc<AtomicBool>,
+    /// Armed at claim time, not inside [`process`].
+    ///
+    /// This distinction is the whole bug: a spawned future that is dropped
+    /// before its first poll never runs a line of its body, so a guard created in
+    /// `process` would never have existed. The claim, however, is dropped either
+    /// way - which is why the guard belongs to it.
+    guard: Option<ClaimGuard>,
+}
+
+/// Puts a claim back in the queue if its worker disappears before finishing.
+///
+/// A dropped worker - an aborted task, a panicking thread, a shutting-down
+/// runtime - used to leave the record in `Running` for the rest of the process:
+/// the queue showed a download that would never move and never fail. That is not
+/// a hypothetical: it made `a_failed_request_becomes_failed_and_can_be_retried`
+/// fail about one run in three, because the test retries a task while the
+/// previous runner is still being aborted and the abort can land after the new
+/// claim.
+///
+/// The guard needs no per-branch bookkeeping: every exit from [`process`] already
+/// writes a terminal state, and `release_claim` only acts when the record is
+/// *still* running. So a normal finish makes the drop a no-op by construction.
+struct ClaimGuard {
+    inner: Arc<Inner>,
+    id: TaskId,
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        self.inner.release_claim(self.id);
+    }
 }
 
 impl Inner {
@@ -173,6 +204,8 @@ impl Inner {
             request: record.request.clone(),
             destination,
             cancel: Arc::clone(&record.cancel),
+            // Armed by `run_loop`, which is the only holder of an `Arc<Inner>`.
+            guard: None,
         })
     }
 
@@ -189,6 +222,26 @@ impl Inner {
             record.bytes_done = done;
             record.bytes_total = total;
         }
+    }
+
+    /// Undo a claim whose worker went away. See [`ClaimGuard`].
+    ///
+    /// No file is touched: the partial file is written to a `.part` sibling and
+    /// the next attempt truncates it with `File::create`, so an interrupted
+    /// write can never leave a truncated file that looks complete.
+    fn release_claim(&self, id: TaskId) {
+        let mut tasks = self.tasks.lock();
+        let Some(record) = tasks.iter_mut().find(|r| r.id == id) else {
+            return;
+        };
+        if !matches!(record.state, TaskState::Running) {
+            return;
+        }
+        record.state = TaskState::Queued;
+        record.bytes_done = 0;
+        record.bytes_total = None;
+        record.destination = None;
+        record.cancel = Arc::new(AtomicBool::new(false));
     }
 }
 
@@ -309,10 +362,14 @@ where
         let Ok(permit) = Arc::clone(&semaphore).acquire_owned().await else {
             return;
         };
-        let Some(claim) = inner.take_next_queued() else {
+        let Some(mut claim) = inner.take_next_queued() else {
             // Another cloner won the race; the permit is dropped with this arm.
             continue;
         };
+        claim.guard = Some(ClaimGuard {
+            inner: Arc::clone(&inner),
+            id: claim.id,
+        });
         let task_inner = Arc::clone(&inner);
         let task_fetch = Arc::clone(&fetch);
         drop(inner);
@@ -328,11 +385,14 @@ where
     F: Fn(String) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(Vec<u8>, Option<String>), PixivError>> + Send + 'static,
 {
+    // The guard arrived with the claim and lives until this function returns;
+    // holding it in a named binding is the point, not a lint dodge.
     let Claim {
         id,
         request,
         destination,
         cancel,
+        guard: _claim,
     } = claim;
     let cancelled = || cancel.load(Ordering::SeqCst);
     let log = LogCtx {
@@ -769,6 +829,50 @@ mod tests {
             "no request for a skipped task"
         );
         assert_eq!(std::fs::read(&existing).unwrap(), b"original");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A worker that goes away mid-download must not strand its claim.
+    ///
+    /// This is the invariant the retry scenario below depends on and used to
+    /// violate one run in three: aborting the runner drops its `JoinSet`, which
+    /// drops the in-flight `process` future, and without a guard the record stayed
+    /// in `Running` for the rest of the process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_worker_returns_its_claim_to_the_queue() {
+        let dir = temp_dir("strand");
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        manager.enqueue(vec![request(0)]);
+
+        // Never resolves: the task is certainly claimed and certainly not done.
+        let fetch = |_url: String| async {
+            std::future::pending::<Result<(Vec<u8>, Option<String>), PixivError>>().await
+        };
+        let runner = manager.clone();
+        let handle = tokio::spawn(async move { runner.run_with(fetch).await });
+
+        for _ in 0..200 {
+            if manager.tasks()[0].state == TaskState::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(manager.tasks()[0].state, TaskState::Running);
+
+        handle.abort();
+        let mut state = TaskState::Running;
+        for _ in 0..200 {
+            state = manager.tasks()[0].state.clone();
+            if state == TaskState::Queued {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            state,
+            TaskState::Queued,
+            "a dropped worker must return the task to the queue, not leave it Running"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
