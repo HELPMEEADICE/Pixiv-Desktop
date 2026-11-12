@@ -65,7 +65,10 @@ impl std::fmt::Debug for Session {
             .field("phpsessid", &self.phpsessid.as_ref().map(|_| "<redacted>"))
             .field("user_id", &self.user_id)
             .field("user_name", &self.user_name)
-            .field("csrf_token", &self.csrf_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "csrf_token",
+                &self.csrf_token.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -429,7 +432,9 @@ impl Client {
             };
             self.ensure_csrf().await?;
             let fields = endpoint::bookmark_delete_form(&row);
-            let reply = self.post_form(&endpoint::bookmark_delete(), &fields).await?;
+            let reply = self
+                .post_form(&endpoint::bookmark_delete(), &fields)
+                .await?;
             mapping::check_mutation(200, &reply)?;
         }
         // Confirm against the server instead of trusting the POST.
@@ -669,8 +674,10 @@ impl Client {
         if (200..300).contains(&status) {
             Ok(text)
         } else {
-            Err(Failure::with_hint(mapping::map_status_error(status, &text), hint)
-                .with_status(status))
+            Err(
+                Failure::with_hint(mapping::map_status_error(status, &text), hint)
+                    .with_status(status),
+            )
         }
     }
 

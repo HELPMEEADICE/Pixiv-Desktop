@@ -21,8 +21,8 @@ pub mod wire;
 
 pub use domain::{
     Account, Author, Bookmark, BookmarkRestrict, BookmarkState, Illust, IllustKind, IllustStats,
-    IllustUrls, PageMeta, PageUrls, RankingKind, RankingRow, SearchQuery, SearchResult, SearchTarget,
-    SortOrder, TypeFilter, UgoiraFrame, UgoiraMeta, UserProfile,
+    IllustUrls, PageMeta, PageUrls, RankingKind, RankingRow, SearchQuery, SearchResult,
+    SearchTarget, SortOrder, TypeFilter, UgoiraFrame, UgoiraMeta, UserProfile,
 };
 pub use error::PixivError;
 pub use id::Id;

@@ -155,13 +155,33 @@ about layout.
 
 ```powershell
 cargo fmt --all -- --check
-cargo test --workspace                       # 220 tests, 7 of them design rules
+cargo test --workspace                       # 232 tests, 7 of them design rules
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)
 $env:RUSTC_WORKSPACE_WRAPPER="C:\msys64\ucrt64\bin\clippy-driver.exe"
 cargo check --workspace --all-targets
 ```
+
+### Live tests against the real service
+
+The suite above never opens a socket. There is a second suite that talks to
+`www.pixiv.net` with a real session, and it is **inert unless you opt in**, so
+`cargo test` can never pick it up by accident:
+
+```powershell
+$env:PIXIV_LIVE_PHPSESSID = '<your PHPSESSID value>'
+cargo test -p pixiv-api --test live -- --test-threads=1
+```
+
+It reads the cookie from the environment only and never writes it anywhere. The
+write tests follow read → mutate → **re-read** → restore → re-read, and refuse to
+touch a target that is already in the wanted state, so running them does not
+leave changes on the account.
+
+`docs/NETWORK-TEST-REPORT.md` records what a full live run against the real
+service produced, and `tools/gui-lib.ps1` is the UI Automation driver used to
+click through the actual Slint window.
 
 ---
 

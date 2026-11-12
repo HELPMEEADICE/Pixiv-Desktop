@@ -348,10 +348,7 @@ mod tests {
 
     #[test]
     fn identity_and_bookmark_state_target_their_ajax_routes() {
-        assert_eq!(
-            user_self(),
-            "https://www.pixiv.net/ajax/user/self?lang=zh"
-        );
+        assert_eq!(user_self(), "https://www.pixiv.net/ajax/user/self?lang=zh");
         assert_eq!(
             illust_bookmark_state(Id(42)),
             "https://www.pixiv.net/ajax/illust/42/bookmarkData?lang=zh"

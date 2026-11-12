@@ -15,10 +15,28 @@ was verified with a request**, and the responses were saved under `fixtures/`.
   require those same client credentials, so they are out of reach for a client
   the user builds themselves.
 
+## Every authenticated request carries five things
+
+Taken from the web client's own axios wrapper (`_app-*.js`), then confirmed by
+experiment — dropping either CSRF header makes every mutation answer
+`422 不正なリクエストです。` no matter how correct the body is:
+
+```
+Cookie: PHPSESSID=<redacted>
+x-csrf-token: <32 hex chars, from GET /ajax/user/self -> "token">
+x-user-id:    <the signed-in uid>
+x-pixiv-next: 1
+Referer:      https://www.pixiv.net/
+```
+
+The token is session-scoped, so a stored copy can go stale; the client refreshes
+it once and replays the request when it sees a `422`.
+
 ## Endpoint matrix
 
 | Purpose | Request | Auth | Notes |
 | --- | --- | --- | --- |
+| **Session identity + CSRF** | `GET /ajax/user/self?lang=zh` | **yes** | **no envelope**; `userData`, `token`, `services` at top level |
 | Illustration detail | `GET /ajax/illust/{id}?lang=zh` | no | `{error,message,body}` envelope |
 | Page list / originals | `GET /ajax/illust/{id}/pages?lang=zh` | no | array body; `urls.original` |
 | Ugoira metadata | `GET /ajax/illust/{id}/ugoira_meta?lang=zh` | no | 404 when not ugoira |
@@ -28,11 +46,13 @@ was verified with a request**, and the responses were saved under `fixtures/`.
 | Artist work ids | `GET /ajax/user/{id}/profile/all` | no | `illusts` map of id→null |
 | Artist profile | `GET /ajax/user/{id}?full=1` | no | large payload |
 | Artist works (paged) | `GET /ajax/user/{id}/illusts` | **yes** | 400 without cookie |
-| Bookmarks | `GET /ajax/user/{id}/illusts/bookmarks` | **yes** | `rest=show\|hide` |
-| Bookmark state | `GET /ajax/illust/{id}/bookmarkData` | **yes** | |
-| Add bookmark | `POST /ajax/illusts/bookmarks/add` | **yes** | `illust_id`, `add=1`, `rest` |
-| Remove bookmark | `POST /ajax/illusts/bookmarks/delete` | **yes** | `illust_id`, `rest` |
-| Follow | `POST /ajax/user/{follow,unfollow}` | **yes** | `user_id` |
+| Bookmarks | `GET /ajax/user/{id}/illusts/bookmarks` | **yes** | `rest=show\|hide`; rows are in `body.works[]` |
+| Bookmark state | `GET /ajax/illust/{id}/bookmarkData` | **yes** | `body.bookmarkData` = `null` or `{id, private}` |
+| Add / re-tag bookmark | `POST /ajax/illusts/bookmarks/add` | **yes** | **JSON** `{illust_id, restrict, comment:"", tags:[]}`; answers `last_bookmark_id` |
+| Remove bookmark | `POST /ajax/illusts/bookmarks/delete` | **yes** | form `bookmark_id=<row>` — *not* the illust id |
+| Follow | `POST /bookmark_add.php` | **yes** | form `mode=add&type=user&user_id&tag&restrict&format=json`; success = `[]` |
+| Unfollow | `POST /rpc_group_setting.php` | **yes** | form `mode=del&type=bookuser&id`; echoes `user_id` |
+| Follow state | `GET /ajax/user/{id}?full=1` | no | `body.isFollowed` |
 
 Search query parameters that matter:
 
@@ -58,9 +78,12 @@ Ranking `mode` values: `daily`, `weekly`, `monthly`, `rookie`, `original`,
 5. **`createDate` on search rows can be an object**, not a string.
 6. **`tagTranslation` values are objects** (`{"zh":"…"}`), not strings.
 7. Page URLs use `thumb_mini`; illustration URLs use `mini`. Different keys.
-8. Unauthenticated calls to auth-gated endpoints answer **HTTP 400** with
-   `{"error":true,"message":"不正确的请求。"}` — not 401/403. A transport that
-   keys "please sign in" off 401 alone will misreport this as a server bug.
+8. Auth-gated endpoints distinguish **two** failures and they are not the same
+   thing: a request with **no cookie at all** answers `200` with
+   `"userData": null` (on `/ajax/user/self`), while a cookie Pixiv no longer
+   honours answers **`401`**. Some older routes still answer `400` with
+   `{"error":true,"message":"不正确的请求。"}`. A client that only tests "the cookie
+   string is non-empty" believes a dead session is alive.
 
 ## Images
 

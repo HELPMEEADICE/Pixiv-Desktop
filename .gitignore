@@ -10,7 +10,7 @@ target/
 /docs/screenshots/readme/*.json
 target-rel/
 # Harness scratch output.
-/docs/*.log
+/docs/*.log*
 
 # Local live-test credentials and captured network samples. Never committed.
 .local-secrets/

@@ -66,9 +66,7 @@ macro_rules! client_or_skip {
         match live_client() {
             Some(client) => client,
             None => {
-                eprintln!(
-                    "skip: PIXIV_LIVE_PHPSESSID is not set, live suite disabled"
-                );
+                eprintln!("skip: PIXIV_LIVE_PHPSESSID is not set, live suite disabled");
                 return;
             }
         }
@@ -137,7 +135,10 @@ async fn live_session_resolves_to_a_real_account() {
     );
     // The client must have adopted the identity it just learned.
     assert_eq!(client.session().user_id, Some(account.id));
-    assert_eq!(client.session().user_name.as_deref(), Some(account.name.as_str()));
+    assert_eq!(
+        client.session().user_name.as_deref(),
+        Some(account.name.as_str())
+    );
 }
 
 #[tokio::test]
@@ -268,7 +269,11 @@ async fn live_bookmark_round_trip_is_verified_and_restored() {
         "the server must report the bookmark after adding it"
     );
     assert_eq!(after_add.restrict, BookmarkRestrict::Public);
-    eprintln!("added bookmark on illust {} (row {:?})", illust.get(), after_add.id);
+    eprintln!(
+        "added bookmark on illust {} (row {:?})",
+        illust.get(),
+        after_add.id
+    );
 
     // move to private: the same route, with restrict=1
     let after_private = client

@@ -14,8 +14,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use pixiv_types::domain::{
-    Account, BookmarkRestrict, BookmarkState, Illust, PageMeta, RankingRow, SearchResult, UgoiraMeta,
-    UserProfile,
+    Account, BookmarkRestrict, BookmarkState, Illust, PageMeta, RankingRow, SearchResult,
+    UgoiraMeta, UserProfile,
 };
 use pixiv_types::wire::{
     BookmarkStateWire, IllustDetailWire, IllustPageWire, RankingResponseWire, SearchBodyWire,
@@ -728,8 +728,12 @@ mod tests {
 
         // rpc_group_setting.php echoes the user it acted on.
         assert!(
-            check_follow_remove(200, r#"{"user_id":"743604","type":"bookuser"}"#, Id(743_604))
-                .is_ok()
+            check_follow_remove(
+                200,
+                r#"{"user_id":"743604","type":"bookuser"}"#,
+                Id(743_604)
+            )
+            .is_ok()
         );
         assert!(matches!(
             check_follow_remove(200, r#"{"user_id":"999","type":"bookuser"}"#, Id(743_604)),
