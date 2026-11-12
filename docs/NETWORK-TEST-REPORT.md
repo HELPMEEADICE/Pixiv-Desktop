@@ -96,6 +96,7 @@ be exercised here · **NOT TESTED** not exercised in this round.
 | 5 | Profile information | PASS | handle, followers/followees via `/ajax/user/extra` |
 | 6 | UI updates on sign-in | PASS | status bar "已登录", card "已登录：HELPMEEADICE", demo badge removed |
 | 7 | Demo mode switches to real data | PASS | feed switched from demo catalogue to live ranking |
+| 7a | Real data switches back to demo and out again | PASS | settings toggle → "演示模式" badge on; toggle back → badge off, 50 live items |
 | 8 | Authorised requests carry the session | PASS | bookmark/follow mutations succeed and mutate the real account |
 | 9 | Login survives restart | PASS | killed the process, relaunched, "已登录" with the same name, feed live |
 | 10 | Sign-out clears local session | PASS | `session::clear` + client session reset; unit-tested |
@@ -371,7 +372,19 @@ These are marked NOT TESTED above rather than assumed working.
 
 ```text
 5bd3c29 fix(auth): authenticate with /ajax/user/self and sign mutations with CSRF
+17d304b fix(ui): stop the author touch area from swallowing the follow button
+6963b1f fix(app): adopt the verified session, trust server mutation state, repair history
+6623c29 test, docs: live integration suite and the network test report
 ```
 
-Further commits from this round (UI hit area, history page, mode isolation, tests,
-this report) follow on the same branch.
+Baseline was `47389ee` on `master`. Nothing was pushed.
+
+### Account state after the run
+
+The test account was left exactly as it was found, re-read from the server:
+
+```text
+illust  151942140  bookmarkData = null      (was null before the run)
+artist  128212646  isFollowed   = false     (was false before the run)
+account            following    = 57        (unchanged)
+```
