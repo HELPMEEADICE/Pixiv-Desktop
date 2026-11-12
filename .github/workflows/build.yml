@@ -454,8 +454,13 @@ jobs:
           cp "$APPDIR/pixiv-desktop.desktop" "$APPDIR/usr/share/applications/pixiv-desktop.desktop"
           cp "$APPDIR/pixiv-desktop.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/pixiv-desktop.png"
 
-          printf '%s\n' '#!/bin/sh' 'HERE="$(dirname "$(readlink -f "$0")")"' \
-            'exec "$HERE/usr/bin/pixiv-desktop" "$@"' > "$APPDIR/AppRun"
+          # Quoted heredoc: the launcher has to reach the image with its own
+          # $HERE and $@ intact, not expanded here.
+          cat > "$APPDIR/AppRun" <<'APPRUN'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/pixiv-desktop" "$@"
+          APPRUN
           chmod +x "$APPDIR/AppRun"
 
           curl -fsSL -o "runtime-$ARCH" \
