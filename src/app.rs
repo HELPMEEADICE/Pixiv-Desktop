@@ -450,10 +450,12 @@ impl App {
         let requests = lookups + stats.network_loads;
         // The denominator used to be `max(1)`, so an untouched cache read "命中 0/1"
         // - a ratio that describes nothing. With no requests yet, say so.
-        let hit_rate = if requests == 0 {
-            "尚未请求".to_string()
-        } else {
-            format!("命中 {lookups}/{requests}（{}%）", lookups * 100 / requests)
+        let hit_rate = match lookups
+            .checked_mul(100)
+            .and_then(|scaled| (requests != 0).then(|| scaled / requests))
+        {
+            Some(percent) => format!("命中 {lookups}/{requests}（{percent}%）"),
+            None => "尚未请求".to_string(),
         };
         format!(
             "内存 {} · 磁盘 {} · {}",
