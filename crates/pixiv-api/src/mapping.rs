@@ -13,10 +13,14 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use pixiv_types::domain::{Illust, PageMeta, RankingRow, SearchResult, UgoiraMeta, UserProfile};
+use pixiv_types::domain::{
+    Account, BookmarkRestrict, BookmarkState, Illust, PageMeta, RankingRow, SearchResult, UgoiraMeta,
+    UserProfile,
+};
 use pixiv_types::wire::{
-    IllustDetailWire, IllustPageWire, RankingResponseWire, SearchBodyWire, SearchTagsWire,
-    UgoiraMetaWire, UserBookmarksWire, UserDetailWire, UserProfileAllWire,
+    BookmarkStateWire, IllustDetailWire, IllustPageWire, RankingResponseWire, SearchBodyWire,
+    SearchTagsWire, UgoiraMetaWire, UserBookmarksWire, UserDetailWire, UserProfileAllWire,
+    UserSelfWire,
 };
 use pixiv_types::{Id, PixivError};
 
@@ -189,6 +193,118 @@ fn decode_plain<T: DeserializeOwned>(raw: &str) -> Result<T, PixivError> {
 // ---------------------------------------------------------------------------
 // Endpoint payloads
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Identity, bookmark state and mutations
+// ---------------------------------------------------------------------------
+
+/// `GET /ajax/user/self`.
+///
+/// Three answers mean three different things and the UI must not conflate them:
+///
+/// * `200` with a populated `userData` -> a live session, plus the account and the
+///   CSRF token every mutation has to carry.
+/// * `200` with `userData: null` -> no session at all (anonymous request).
+/// * `401` -> a cookie was sent but Pixiv no longer honours it.
+///
+/// Only the first is a signed-in state; the other two are
+/// [`PixivError::Unauthorized`], and the caller shows different wording for them.
+pub(crate) fn parse_account(raw: &str) -> Result<Account, PixivError> {
+    let wire = serde_json::from_str::<UserSelfWire>(raw)
+        .map_err(|e| PixivError::Decode(format!("响应不是合法的用户信息：{e}")))?;
+    let Some(data) = wire.user_data else {
+        return Err(PixivError::Unauthorized);
+    };
+    if data.id.is_zero() {
+        return Err(PixivError::Unauthorized);
+    }
+    // Prefer the large avatar, falling back to the small one, and never invent a
+    // URL when Pixiv sent none.
+    let avatar = [data.profile_img_big, data.profile_img]
+        .into_iter()
+        .find(|candidate| !candidate.trim().is_empty());
+    Ok(Account {
+        id: data.id,
+        name: data.name,
+        account: data.pixiv_id,
+        avatar,
+        csrf_token: Some(wire.token).filter(|token| !token.trim().is_empty()),
+    })
+}
+
+/// `GET /ajax/illust/{id}/bookmarkData`.
+pub(crate) fn parse_bookmark_state(raw: &str) -> Result<BookmarkState, PixivError> {
+    let body = decode_body::<BookmarkStateWire>(raw)?;
+    Ok(match body.bookmark_data {
+        None => BookmarkState::none(),
+        Some(data) => BookmarkState::bookmarked(
+            BookmarkRestrict::from_flag(u8::from(data.is_private)),
+            data.id.filter(|id| !id.trim().is_empty()),
+        ),
+    })
+}
+
+/// `GET /ajax/user/{id}?full=1`, reduced to the follow flag.
+pub(crate) fn parse_follow_state(raw: &str) -> Result<bool, PixivError> {
+    decode_body::<UserDetailWire>(raw).map(|wire| wire.is_followed)
+}
+
+/// Validate `POST /bookmark_add.php` (follow).
+///
+/// The script answers a JSON **array** and reports success by returning it empty;
+/// a non-empty array carries the failure. This is not the `{error, message}`
+/// envelope every `ajax` route uses, so it needs its own check — treating a
+/// `200` as success would report a follow that never happened.
+pub(crate) fn check_follow_add(status: u16, body: &str) -> Result<(), PixivError> {
+    if !(200..300).contains(&status) {
+        return Err(map_status_error(status, body));
+    }
+    let value: Value = serde_json::from_str(body.trim())
+        .map_err(|e| PixivError::Decode(format!("关注响应不是合法 JSON：{e}")))?;
+    match value {
+        Value::Array(items) if items.is_empty() => Ok(()),
+        Value::Array(items) => Err(PixivError::Api(format!(
+            "关注被拒绝：{}",
+            serde_json::to_string(&items).unwrap_or_default()
+        ))),
+        other => match api_message(&other) {
+            Some(message) => Err(PixivError::Api(message)),
+            None => Err(PixivError::Decode(
+                "关注响应既不是空数组也不是错误对象".to_string(),
+            )),
+        },
+    }
+}
+
+/// Validate `POST /rpc_group_setting.php` (unfollow).
+///
+/// Success is the script echoing back the user it acted on:
+/// `{"user_id":"123","type":"bookuser"}`. Comparing the echo is what makes this
+/// a verification rather than an assumption.
+pub(crate) fn check_follow_remove(status: u16, body: &str, user: Id) -> Result<(), PixivError> {
+    if !(200..300).contains(&status) {
+        return Err(map_status_error(status, body));
+    }
+    let value: Value = serde_json::from_str(body.trim())
+        .map_err(|e| PixivError::Decode(format!("取消关注响应不是合法 JSON：{e}")))?;
+    if let Some(message) = api_message(&value) {
+        return Err(PixivError::Api(message));
+    }
+    let echoed = value.get("user_id").and_then(|v| match v {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    });
+    match echoed.as_deref() {
+        Some(text) if text == user.get().to_string() => Ok(()),
+        Some(text) => Err(PixivError::Decode(format!(
+            "取消关注回执的用户不匹配：{text}"
+        ))),
+        None => Err(PixivError::Decode(
+            "取消关注响应缺少 user_id 回执".to_string(),
+        )),
+    }
+}
 
 /// `/ajax/illust/{id}`.
 pub(crate) fn parse_illust_detail(raw: &str) -> Result<Illust, PixivError> {
@@ -536,6 +652,107 @@ mod tests {
         assert!(!out.contains_key("empty"));
         assert!(!out.contains_key("num"));
         assert!(!out.contains_key("null"));
+    }
+
+    // -- identity, bookmark state, follow receipts -------------------------
+
+    #[test]
+    fn a_live_user_self_payload_yields_the_account_and_csrf_token() {
+        // Shape captured from GET /ajax/user/self: it is *not* wrapped in the
+        // usual {error, message, body} envelope.
+        let raw = r#"{"userData":{"id":"55234129","pixivId":"helpmeeadice",
+            "name":"HELPMEEADICE","profileImg":"https://i.pximg.net/s_50.jpg",
+            "profileImgBig":"https://i.pximg.net/b_170.jpg","premium":false},
+            "lang":"zh","token":"0123456789abcdef0123456789abcdef",
+            "services":{"booth":"https://api.booth.pm"}}"#;
+        let account = parse_account(raw).expect("account parses");
+        assert_eq!(account.id, Id(55_234_129));
+        assert_eq!(account.name, "HELPMEEADICE");
+        assert_eq!(account.account, "helpmeeadice");
+        assert_eq!(
+            account.avatar.as_deref(),
+            Some("https://i.pximg.net/b_170.jpg"),
+            "the large avatar wins when both are present"
+        );
+        assert_eq!(
+            account.csrf_token.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn user_data_null_is_not_a_session() {
+        // An anonymous request answers 200 with userData: null. Reporting that as
+        // "signed in" is exactly the bug this guards against.
+        let raw = r#"{"userData":null,"lang":"zh",
+            "token":"915b3c3b62fef576ed322a0ed557ba54","services":{}}"#;
+        assert!(matches!(parse_account(raw), Err(PixivError::Unauthorized)));
+        // An id of zero is equally unusable even if the object is present.
+        let zero = r#"{"userData":{"id":"0","name":"nobody"},"token":"t"}"#;
+        assert!(matches!(parse_account(zero), Err(PixivError::Unauthorized)));
+    }
+
+    #[test]
+    fn bookmark_state_reports_presence_and_restrict() {
+        let absent = r#"{"error":false,"message":"","body":
+            {"id":151887140,"isBookmarkable":true,"bookmarkData":null}}"#;
+        let state = parse_bookmark_state(absent).expect("state parses");
+        assert!(!state.bookmarked);
+        assert_eq!(state.id, None);
+
+        let present = r#"{"error":false,"message":"","body":
+            {"id":151887140,"isBookmarkable":true,
+             "bookmarkData":{"id":"39714494245","private":true}}}"#;
+        let state = parse_bookmark_state(present).expect("state parses");
+        assert!(state.bookmarked);
+        assert_eq!(state.restrict, BookmarkRestrict::Private);
+        assert_eq!(state.id.as_deref(), Some("39714494245"));
+    }
+
+    #[test]
+    fn follow_receipts_are_checked_not_assumed() {
+        // bookmark_add.php answers an empty array on success.
+        assert!(check_follow_add(200, "[]").is_ok());
+        assert!(matches!(
+            check_follow_add(200, r#"[{"error":"nope"}]"#),
+            Err(PixivError::Api(_))
+        ));
+        assert!(matches!(
+            check_follow_add(200, "not json"),
+            Err(PixivError::Decode(_))
+        ));
+        assert!(matches!(
+            check_follow_add(404, r#"{"error":true,"message":"gone"}"#),
+            Err(PixivError::NotFound(_))
+        ));
+
+        // rpc_group_setting.php echoes the user it acted on.
+        assert!(
+            check_follow_remove(200, r#"{"user_id":"743604","type":"bookuser"}"#, Id(743_604))
+                .is_ok()
+        );
+        assert!(matches!(
+            check_follow_remove(200, r#"{"user_id":"999","type":"bookuser"}"#, Id(743_604)),
+            Err(PixivError::Decode(_))
+        ));
+        assert!(matches!(
+            check_follow_remove(200, "{}", Id(743_604)),
+            Err(PixivError::Decode(_))
+        ));
+        assert!(matches!(
+            check_follow_remove(200, r#"{"error":true,"message":"no"}"#, Id(743_604)),
+            Err(PixivError::Api(_))
+        ));
+    }
+
+    #[test]
+    fn follow_state_reads_the_flag_from_the_user_payload() {
+        let following = r#"{"error":false,"message":"","body":
+            {"userId":"743604","name":"a","isFollowed":true}}"#;
+        assert!(parse_follow_state(following).expect("parses"));
+        let not = r#"{"error":false,"message":"","body":
+            {"userId":"743604","name":"a","isFollowed":false}}"#;
+        assert!(!parse_follow_state(not).expect("parses"));
     }
 
     // -- envelope / error handling ----------------------------------------

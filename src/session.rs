@@ -42,6 +42,11 @@ pub fn serialise(session: &Session) -> String {
         out.push_str(name.trim());
         out.push('\n');
     }
+    if let Some(token) = session.csrf_token.as_deref() {
+        out.push_str("csrf_token=");
+        out.push_str(token.trim());
+        out.push('\n');
+    }
     out
 }
 
@@ -61,6 +66,7 @@ pub fn parse(raw: &str) -> Session {
             "phpsessid" => session.phpsessid = Some(value.to_string()),
             "user_id" => session.user_id = value.parse::<u64>().ok().map(Id),
             "user_name" => session.user_name = Some(value.to_string()),
+            "csrf_token" => session.csrf_token = Some(value.to_string()),
             _ => {}
         }
     }
@@ -270,6 +276,7 @@ mod tests {
             phpsessid: Some("12345_abcdef".to_string()),
             user_id: Some(Id(700_000_001)),
             user_name: Some("tester".to_string()),
+            csrf_token: Some("0123456789abcdef0123456789abcdef".to_string()),
         }
     }
 
@@ -279,6 +286,10 @@ mod tests {
         assert_eq!(parsed.phpsessid.as_deref(), Some("12345_abcdef"));
         assert_eq!(parsed.user_id.map(|id| id.get()), Some(700_000_001));
         assert_eq!(parsed.user_name.as_deref(), Some("tester"));
+        assert_eq!(
+            parsed.csrf_token.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
     }
 
     #[test]

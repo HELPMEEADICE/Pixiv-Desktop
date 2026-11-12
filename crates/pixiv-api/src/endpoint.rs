@@ -32,6 +32,16 @@ const SEARCH_MODE: &str = "all";
 /// Bookmark listings are requested without a tag filter.
 const BOOKMARK_TAG: &str = "";
 
+/// `GET /ajax/user/self` — the signed-in account, or `userData: null`.
+///
+/// This is the only endpoint that both validates a cookie and names the account,
+/// so it is what sign-in verification is built on. It answers `200` with
+/// `"userData": null` when there is no session at all and `401` when the cookie
+/// is present but dead — a distinction the UI needs to report honestly.
+pub(crate) fn user_self() -> String {
+    format!("{WEB_HOST}/ajax/user/self?lang={LANG}")
+}
+
 /// `GET /ajax/illust/{id}`.
 pub(crate) fn illust_detail(id: Id) -> String {
     format!("{WEB_HOST}/ajax/illust/{}?lang={LANG}", id.get())
@@ -46,6 +56,14 @@ pub(crate) fn illust_pages(id: Id) -> String {
 pub(crate) fn ugoira_meta(id: Id) -> String {
     format!(
         "{WEB_HOST}/ajax/illust/{}/ugoira_meta?lang={LANG}",
+        id.get()
+    )
+}
+
+/// `GET /ajax/illust/{id}/bookmarkData` — the viewer's own bookmark row.
+pub(crate) fn illust_bookmark_state(id: Id) -> String {
+    format!(
+        "{WEB_HOST}/ajax/illust/{}/bookmarkData?lang={LANG}",
         id.get()
     )
 }
@@ -102,20 +120,31 @@ pub(crate) fn user_bookmarks(user: Id, private_only: bool, page: u32) -> String 
     )
 }
 
-/// `POST /ajax/illusts/bookmarks/add` or `.../delete`.
-pub(crate) fn bookmark_mutation(add: bool) -> String {
-    format!(
-        "{WEB_HOST}/ajax/illusts/bookmarks/{}",
-        if add { "add" } else { "delete" }
-    )
+/// `POST /ajax/illusts/bookmarks/add`.
+pub(crate) fn bookmark_add() -> String {
+    format!("{WEB_HOST}/ajax/illusts/bookmarks/add")
 }
 
-/// `POST /ajax/user/follow` or `/ajax/user/unfollow`.
-pub(crate) fn follow_mutation(follow: bool) -> String {
-    format!(
-        "{WEB_HOST}/ajax/user/{}",
-        if follow { "follow" } else { "unfollow" }
-    )
+/// `POST /ajax/illusts/bookmarks/delete`.
+///
+/// Addressed by the *bookmark row* id, not the illustration id, so the id from
+/// `bookmarkData` (or from the add response) has to be carried along.
+pub(crate) fn bookmark_delete() -> String {
+    format!("{WEB_HOST}/ajax/illusts/bookmarks/delete")
+}
+
+/// `POST /bookmark_add.php` — how the web client toggles a *user* follow.
+///
+/// Following an artist is not an `ajax` route: the modern web front end still
+/// posts to the legacy script. `POST /ajax/user/follow` answers `404`, which is
+/// why the follow button did nothing.
+pub(crate) fn follow_add() -> String {
+    format!("{WEB_HOST}/bookmark_add.php")
+}
+
+/// `POST /rpc_group_setting.php` — unfollow, also a legacy script.
+pub(crate) fn follow_remove() -> String {
+    format!("{WEB_HOST}/rpc_group_setting.php")
 }
 
 /// `GET /ajax/search/tags/{tag}`.
@@ -126,28 +155,46 @@ pub(crate) fn search_tags(tag: &str) -> String {
     )
 }
 
-/// Field pairs for a bookmark mutation.
+/// JSON body for `POST /ajax/illusts/bookmarks/add`.
 ///
-/// The `add` flag only exists on the `add` endpoint; `delete` is identified by
-/// its path alone. `rest` is required by both, because Pixiv stores the table
-/// the bookmark belongs to.
-pub(crate) fn bookmark_form(illust: Id, add: bool, private: bool) -> Vec<(&'static str, String)> {
-    let restrict = if private {
-        BookmarkRestrict::Private
-    } else {
-        BookmarkRestrict::Public
-    };
-    let mut fields = vec![("illust_id", illust.get().to_string())];
-    if add {
-        fields.push(("add", "1".to_string()));
-    }
-    fields.push(("rest", restrict.as_param().to_string()));
-    fields
+/// The endpoint takes a **JSON** object, not a form: `restrict` (`0` public,
+/// `1` private) replaces the old `add`/`rest` pair. Sending
+/// `illust_id=..&add=1&rest=public` as a form is rejected with
+/// `422 不正なリクエストです。` — that was why no bookmark ever succeeded.
+pub(crate) fn bookmark_add_body(illust: Id, restrict: BookmarkRestrict) -> String {
+    // Built by hand so the field order and types are fixed and testable; the id
+    // is a string on the wire even though it is numeric.
+    format!(
+        "{{\"illust_id\":\"{}\",\"restrict\":{},\"comment\":\"\",\"tags\":[]}}",
+        illust.get(),
+        restrict.as_flag()
+    )
 }
 
-/// Field pairs for a follow mutation.
-pub(crate) fn follow_form(user: Id) -> Vec<(&'static str, String)> {
-    vec![("user_id", user.get().to_string())]
+/// Field pairs for `POST /ajax/illusts/bookmarks/delete`.
+pub(crate) fn bookmark_delete_form(bookmark_id: &str) -> Vec<(&'static str, String)> {
+    vec![("bookmark_id", bookmark_id.to_string())]
+}
+
+/// Field pairs for `POST /bookmark_add.php` (follow a user).
+pub(crate) fn follow_add_form(user: Id, restrict: BookmarkRestrict) -> Vec<(&'static str, String)> {
+    vec![
+        ("mode", "add".to_string()),
+        ("type", "user".to_string()),
+        ("user_id", user.get().to_string()),
+        ("tag", String::new()),
+        ("restrict", restrict.as_flag().to_string()),
+        ("format", "json".to_string()),
+    ]
+}
+
+/// Field pairs for `POST /rpc_group_setting.php` (unfollow a user).
+pub(crate) fn follow_remove_form(user: Id) -> Vec<(&'static str, String)> {
+    vec![
+        ("mode", "del".to_string()),
+        ("type", "bookuser".to_string()),
+        ("id", user.get().to_string()),
+    ]
 }
 
 /// Render `application/x-www-form-urlencoded` content from field pairs.
@@ -288,41 +335,78 @@ mod tests {
     }
 
     #[test]
-    fn mutation_paths_follow_the_add_delete_pairing() {
+    fn bookmark_mutations_use_the_ajax_routes_that_answer() {
         assert_eq!(
-            bookmark_mutation(true),
+            bookmark_add(),
             "https://www.pixiv.net/ajax/illusts/bookmarks/add"
         );
         assert_eq!(
-            bookmark_mutation(false),
+            bookmark_delete(),
             "https://www.pixiv.net/ajax/illusts/bookmarks/delete"
         );
+    }
+
+    #[test]
+    fn identity_and_bookmark_state_target_their_ajax_routes() {
         assert_eq!(
-            follow_mutation(true),
-            "https://www.pixiv.net/ajax/user/follow"
+            user_self(),
+            "https://www.pixiv.net/ajax/user/self?lang=zh"
         );
         assert_eq!(
-            follow_mutation(false),
-            "https://www.pixiv.net/ajax/user/unfollow"
+            illust_bookmark_state(Id(42)),
+            "https://www.pixiv.net/ajax/illust/42/bookmarkData?lang=zh"
+        );
+    }
+
+    /// Following is a legacy script, not an `ajax` route. `POST /ajax/user/follow`
+    /// answers `404`, which is what made the follow button inert.
+    #[test]
+    fn follow_mutations_target_the_legacy_scripts() {
+        assert_eq!(follow_add(), "https://www.pixiv.net/bookmark_add.php");
+        assert_eq!(
+            follow_remove(),
+            "https://www.pixiv.net/rpc_group_setting.php"
         );
     }
 
     #[test]
-    fn bookmark_form_matches_the_captured_field_list() {
+    fn bookmark_add_body_is_the_json_the_live_endpoint_accepts() {
         assert_eq!(
-            form_body(&bookmark_form(Id(99), true, false)),
-            "illust_id=99&add=1&rest=public"
+            bookmark_add_body(Id(99), BookmarkRestrict::Public),
+            r#"{"illust_id":"99","restrict":0,"comment":"","tags":[]}"#
         );
-        // Deleting carries no `add` field at all.
         assert_eq!(
-            form_body(&bookmark_form(Id(99), false, true)),
-            "illust_id=99&rest=private"
+            bookmark_add_body(Id(99), BookmarkRestrict::Private),
+            r#"{"illust_id":"99","restrict":1,"comment":"","tags":[]}"#
+        );
+        // The body must be valid JSON, not a form string.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&bookmark_add_body(Id(7), BookmarkRestrict::Private))
+                .expect("body is JSON");
+        assert_eq!(parsed["illust_id"], "7");
+        assert_eq!(parsed["restrict"], 1);
+        assert_eq!(parsed["comment"], "");
+        assert!(parsed["tags"].is_array());
+    }
+
+    #[test]
+    fn bookmark_delete_is_addressed_by_the_bookmark_row() {
+        assert_eq!(
+            form_body(&bookmark_delete_form("39714494245")),
+            "bookmark_id=39714494245"
         );
     }
 
     #[test]
-    fn follow_form_sends_the_user_id() {
-        assert_eq!(form_body(&follow_form(Id(123))), "user_id=123");
+    fn follow_forms_match_the_verified_script_payloads() {
+        assert_eq!(
+            form_body(&follow_add_form(Id(123), BookmarkRestrict::Public)),
+            "mode=add&type=user&user_id=123&tag=&restrict=0&format=json"
+        );
+        assert_eq!(
+            form_body(&follow_remove_form(Id(123))),
+            "mode=del&type=bookuser&id=123"
+        );
     }
 
     #[test]

@@ -11,3 +11,9 @@ target/
 target-rel/
 # Harness scratch output.
 /docs/*.log
+
+# Local live-test credentials and captured network samples. Never committed.
+.local-secrets/
+
+# Local probe / harness scratch (never part of the project).
+tools/_*

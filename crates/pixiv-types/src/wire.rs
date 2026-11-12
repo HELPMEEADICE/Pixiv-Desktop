@@ -165,6 +165,55 @@ pub struct BookmarkDataWire {
     pub is_private: bool,
 }
 
+/// `GET /ajax/user/self` document.
+///
+/// Unlike every other endpoint in this module this one is **not** wrapped in an
+/// `{error, message, body}` envelope: `userData`, `token` and `services` sit at
+/// the top level. `user_data` is `null` for an anonymous request, which is how
+/// the client tells "no session" apart from "expired session" (that one is a
+/// `401`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserSelfWire {
+    #[serde(default)]
+    pub user_data: Option<UserSelfDataWire>,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub lang: String,
+    #[serde(default)]
+    pub services: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserSelfDataWire {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub pixiv_id: String,
+    #[serde(default)]
+    pub profile_img: String,
+    #[serde(default)]
+    pub profile_img_big: String,
+    #[serde(default)]
+    pub premium: bool,
+}
+
+/// `GET /ajax/illust/{id}/bookmarkData` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookmarkStateWire {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default)]
+    pub is_bookmarkable: bool,
+    #[serde(default)]
+    pub bookmark_data: Option<BookmarkDataWire>,
+}
+
 /// `/ajax/illust/{id}` body.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -20,9 +20,9 @@ pub mod id;
 pub mod wire;
 
 pub use domain::{
-    Author, Bookmark, BookmarkRestrict, Illust, IllustKind, IllustStats, IllustUrls, PageMeta,
-    PageUrls, RankingKind, RankingRow, SearchQuery, SearchResult, SearchTarget, SortOrder,
-    TypeFilter, UgoiraFrame, UgoiraMeta, UserProfile,
+    Account, Author, Bookmark, BookmarkRestrict, BookmarkState, Illust, IllustKind, IllustStats,
+    IllustUrls, PageMeta, PageUrls, RankingKind, RankingRow, SearchQuery, SearchResult, SearchTarget,
+    SortOrder, TypeFilter, UgoiraFrame, UgoiraMeta, UserProfile,
 };
 pub use error::PixivError;
 pub use id::Id;

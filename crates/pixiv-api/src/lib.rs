@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 
 use pixiv_types::{
-    Id, Illust, PIXIV_REFERER, PageMeta, PixivError, RankingKind, RankingRow, SearchQuery,
-    SearchResult, UgoiraMeta, UserProfile,
+    Account, BookmarkRestrict, BookmarkState, Id, Illust, PIXIV_REFERER, PageMeta, PixivError,
+    RankingKind, RankingRow, SearchQuery, SearchResult, UgoiraMeta, UserProfile,
 };
 
 mod endpoint;
@@ -46,10 +46,17 @@ pub struct Session {
     /// Value of the `PHPSESSID` cookie. Written with `secrecy`-style discipline:
     /// the `Debug` impl must redact it.
     pub phpsessid: Option<String>,
-    /// The signed-in user's id, needed for `/ajax/user/{id}/...` calls.
+    /// The signed-in user's id, needed for `/ajax/user/{id}/...` calls and
+    /// echoed as `x-user-id` on every request the web client makes.
     pub user_id: Option<Id>,
     /// Display name, purely for the UI.
     pub user_name: Option<String>,
+    /// CSRF token from `/ajax/user/self`. Every state-changing request must
+    /// echo it in `x-csrf-token` or Pixiv answers `422 不正なリクエストです。`.
+    ///
+    /// It is refreshed on demand rather than trusted forever: it is session
+    /// scoped, so a stale copy would turn every mutation into a 422.
+    pub csrf_token: Option<String>,
 }
 
 impl std::fmt::Debug for Session {
@@ -58,6 +65,7 @@ impl std::fmt::Debug for Session {
             .field("phpsessid", &self.phpsessid.as_ref().map(|_| "<redacted>"))
             .field("user_id", &self.user_id)
             .field("user_name", &self.user_name)
+            .field("csrf_token", &self.csrf_token.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -133,6 +141,13 @@ impl std::fmt::Debug for Client {
 struct Failure {
     error: PixivError,
     retry_after: Option<Duration>,
+    /// HTTP status of the attempt, when the failure came from one.
+    ///
+    /// Kept because [`PixivError`] deliberately flattens a flagged `4xx` into
+    /// [`PixivError::Api`], and the one place that needs the raw code is CSRF
+    /// recovery: Pixiv answers a stale token with `422`, which is worth exactly
+    /// one retry after refreshing the token.
+    status: Option<u16>,
 }
 
 impl Failure {
@@ -140,11 +155,26 @@ impl Failure {
         Self {
             error,
             retry_after: None,
+            status: None,
         }
     }
 
     fn with_hint(error: PixivError, retry_after: Option<Duration>) -> Self {
-        Self { error, retry_after }
+        Self {
+            error,
+            retry_after,
+            status: None,
+        }
+    }
+
+    fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// True when Pixiv refused the request's CSRF token.
+    fn is_csrf_rejection(&self) -> bool {
+        self.status == Some(422)
     }
 }
 
@@ -304,28 +334,125 @@ impl Client {
         mapping::parse_bookmarks(&raw, endpoint::BOOKMARK_PAGE_SIZE)
     }
 
-    /// `POST /ajax/illusts/bookmarks/add|delete` — requires a session.
+    /// `GET /ajax/user/self` — the account behind this session.
     ///
-    /// Must return [`PixivError::Unauthorized`] without a cookie, and must
-    /// surface server rejection as an error rather than assuming success.
+    /// The only honest sign-in check: it proves the cookie is live *and* returns
+    /// the id and display name, which a bare "the cookie is non-empty" test
+    /// cannot. It also yields the CSRF token, so every caller that needs to
+    /// mutate something calls this first.
+    pub async fn account(&self) -> Result<Account, PixivError> {
+        let raw = self.get_text(&endpoint::user_self()).await?;
+        let account = mapping::parse_account(&raw)?;
+        {
+            let mut session = self.inner.session.write();
+            session.user_id = Some(account.id);
+            session.user_name = Some(account.name.clone());
+            if account.csrf_token.is_some() {
+                session.csrf_token = account.csrf_token.clone();
+            }
+        }
+        Ok(account)
+    }
+
+    /// Re-read the account without surfacing the result, used to recover a stale
+    /// CSRF token.
+    async fn refresh_identity(&self) -> Result<(), PixivError> {
+        self.account().await.map(|_| ())
+    }
+
+    /// Make sure a CSRF token is available before a mutation.
+    async fn ensure_csrf(&self) -> Result<(), PixivError> {
+        self.require_session()?;
+        if self
+            .inner
+            .session
+            .read()
+            .csrf_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
+        {
+            return Ok(());
+        }
+        self.refresh_identity().await
+    }
+
+    /// `GET /ajax/illust/{id}/bookmarkData` — the viewer's own bookmark row.
+    pub async fn bookmark_state(&self, illust: Id) -> Result<BookmarkState, PixivError> {
+        let raw = self
+            .get_text(&endpoint::illust_bookmark_state(illust))
+            .await?;
+        mapping::parse_bookmark_state(&raw)
+    }
+
+    /// `GET /ajax/user/{id}?full=1` — is this artist followed?
+    pub async fn follow_state(&self, user: Id) -> Result<bool, PixivError> {
+        let raw = self.get_text(&endpoint::user_detail(user)).await?;
+        mapping::parse_follow_state(&raw)
+    }
+
+    /// Add or remove a bookmark — requires a session.
+    ///
+    /// The two directions are not symmetric and both details are easy to get
+    /// wrong:
+    ///
+    /// * **add** takes a JSON body `{illust_id, restrict, comment, tags}`;
+    ///   a form body is rejected with `422`.
+    /// * **delete** is addressed by the *bookmark row* id via `bookmark_id`, not
+    ///   by the illustration id — so the row id has to be read first.
+    ///
+    /// Returns the state the server reports *after* the mutation, not an
+    /// assumption: a `200` on the POST is not proof the bookmark moved.
     pub async fn set_bookmark(
         &self,
         illust: Id,
         add: bool,
-        private: bool,
-    ) -> Result<(), PixivError> {
+        restrict: BookmarkRestrict,
+    ) -> Result<BookmarkState, PixivError> {
         self.require_session()?;
-        let fields = endpoint::bookmark_form(illust, add, private);
-        self.post_form(&endpoint::bookmark_mutation(add), &fields)
-            .await
+        if add {
+            self.ensure_csrf().await?;
+            let body = endpoint::bookmark_add_body(illust, restrict);
+            let reply = self.post_json(&endpoint::bookmark_add(), body).await?;
+            // A 2xx is not success on its own: these routes answer a 200
+            // envelope whose `error` flag is the authoritative verdict.
+            mapping::check_mutation(200, &reply)?;
+        } else {
+            let current = self.bookmark_state(illust).await?;
+            if !current.bookmarked {
+                // Already absent: removing it again is a no-op, not an error.
+                return Ok(current);
+            }
+            let Some(row) = current.id.clone() else {
+                return Err(PixivError::Api(
+                    "服务端报告已收藏但没有返回收藏条目 id，无法安全取消".to_string(),
+                ));
+            };
+            self.ensure_csrf().await?;
+            let fields = endpoint::bookmark_delete_form(&row);
+            let reply = self.post_form(&endpoint::bookmark_delete(), &fields).await?;
+            mapping::check_mutation(200, &reply)?;
+        }
+        // Confirm against the server instead of trusting the POST.
+        self.bookmark_state(illust).await
     }
 
-    /// `POST /ajax/user/follow|unfollow` — requires a session.
+    /// Follow or unfollow an artist — requires a session.
+    ///
+    /// Both directions live on legacy scripts, and each reports success its own
+    /// way: `bookmark_add.php` answers an empty JSON array, and
+    /// `rpc_group_setting.php` echoes the user it acted on.
     pub async fn follow(&self, user: Id, follow: bool) -> Result<(), PixivError> {
         self.require_session()?;
-        let fields = endpoint::follow_form(user);
-        self.post_form(&endpoint::follow_mutation(follow), &fields)
-            .await
+        self.ensure_csrf().await?;
+        if follow {
+            let fields = endpoint::follow_add_form(user, BookmarkRestrict::Public);
+            let body = self.post_form(&endpoint::follow_add(), &fields).await?;
+            mapping::check_follow_add(200, &body)
+        } else {
+            let fields = endpoint::follow_remove_form(user);
+            let body = self.post_form(&endpoint::follow_remove(), &fields).await?;
+            mapping::check_follow_remove(200, &body, user)
+        }
     }
 
     /// `GET /ajax/search/tags/{tag}` — translated tag metadata.
@@ -393,12 +520,42 @@ impl Client {
         }
     }
 
-    /// Attach the session cookie when the target is the web host and we have one.
+    /// Attach everything the live site attaches to a request.
+    ///
+    /// Captured from the web client's own `fetch` wrapper, which sends this set on
+    /// *every* call to `www.pixiv.net`:
+    ///
+    /// * `Cookie: PHPSESSID=...`
+    /// * `x-csrf-token` — required by every state-changing route
+    /// * `x-user-id` — required alongside it
+    /// * `x-pixiv-next: 1` — marks the request as coming from the new front end
+    /// * `Referer: https://www.pixiv.net/`
+    ///
+    /// Omitting the middle two is what made `POST /ajax/illusts/bookmarks/add`
+    /// answer `422 不正なリクエストです。` no matter how correct the body was.
+    ///
+    /// The cookie is still scoped to the web host only: image traffic goes to
+    /// `i.pximg.net`, which needs the Referer and must not receive the session.
     fn authorize(&self, url: &str, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.cookie_for(url) {
-            Some(cookie) => builder.header(reqwest::header::COOKIE, cookie),
-            None => builder,
+        let Some(cookie) = self.cookie_for(url) else {
+            return builder;
+        };
+        let session = self.inner.session.read();
+        let mut builder = builder
+            .header(reqwest::header::COOKIE, cookie)
+            .header(reqwest::header::REFERER, PIXIV_REFERER)
+            .header("x-pixiv-next", "1");
+        if let Some(token) = session
+            .csrf_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+        {
+            builder = builder.header("x-csrf-token", token);
         }
+        if let Some(user) = session.user_id {
+            builder = builder.header("x-user-id", user.get().to_string());
+        }
+        builder
     }
 
     async fn attempt_text(&self, url: &str) -> Result<String, Failure> {
@@ -470,7 +627,19 @@ impl Client {
         }
     }
 
-    async fn attempt_form(&self, url: &str, body: &str) -> Result<(), Failure> {
+    /// One `POST` attempt, handing back the raw status and body.
+    ///
+    /// The body is returned rather than pre-checked because the mutation routes do
+    /// not share one success envelope: the `ajax` routes answer
+    /// `{error, message, body}`, `bookmark_add.php` answers a JSON array, and
+    /// `rpc_group_setting.php` answers an object echoing the user. Each caller
+    /// validates with the check that matches its route.
+    async fn attempt_post(
+        &self,
+        url: &str,
+        body: String,
+        content_type: &'static str,
+    ) -> Result<String, Failure> {
         self.inner.limiter.wait().await;
         let response = self
             .authorize(
@@ -478,11 +647,8 @@ impl Client {
                 self.inner
                     .http
                     .post(url)
-                    .header(
-                        reqwest::header::CONTENT_TYPE,
-                        "application/x-www-form-urlencoded",
-                    )
-                    .body(body.to_string()),
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(body),
             )
             .send()
             .await
@@ -498,9 +664,14 @@ impl Client {
             .bytes()
             .await
             .map_err(|e| Failure::with_hint(network_error(&e), hint))?;
-        let text = String::from_utf8_lossy(&bytes);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
 
-        mapping::check_mutation(status, &text).map_err(|error| Failure::with_hint(error, hint))
+        if (200..300).contains(&status) {
+            Ok(text)
+        } else {
+            Err(Failure::with_hint(mapping::map_status_error(status, &text), hint)
+                .with_status(status))
+        }
     }
 
     /// `GET` returning the response body, retrying retryable failures.
@@ -529,16 +700,46 @@ impl Client {
     /// `POST` a form body, retrying retryable failures.
     ///
     /// Retries are limited to transport-level failures (network error, `429`,
-    /// `5xx`); a `{"error": true}` answer is final and is reported as such.
-    async fn post_form(&self, url: &str, fields: &[(&str, String)]) -> Result<(), PixivError> {
-        let body = endpoint::form_body(fields);
+    /// `5xx`) plus one CSRF recovery: a `422` means the token went stale, and
+    /// refreshing it is the fix rather than a second identical request. A
+    /// `{"error": true}` answer is final and is reported as such.
+    async fn post_form(&self, url: &str, fields: &[(&str, String)]) -> Result<String, PixivError> {
+        self.post_with_retry(
+            url,
+            endpoint::form_body(fields),
+            "application/x-www-form-urlencoded",
+        )
+        .await
+    }
+
+    /// `POST` a JSON body (the bookmark routes take JSON, not a form).
+    async fn post_json(&self, url: &str, body: String) -> Result<String, PixivError> {
+        self.post_with_retry(url, body, "application/json").await
+    }
+
+    /// The shared `POST` retry loop.
+    async fn post_with_retry(
+        &self,
+        url: &str,
+        body: String,
+        content_type: &'static str,
+    ) -> Result<String, PixivError> {
         let max_retries = self.inner.config.max_retries;
         let mut attempt = 0;
+        let mut refreshed = false;
         loop {
-            let failure = match self.attempt_form(url, &body).await {
-                Ok(()) => return Ok(()),
+            let failure = match self.attempt_post(url, body.clone(), content_type).await {
+                Ok(text) => return Ok(text),
                 Err(failure) => failure,
             };
+            if !refreshed && failure.is_csrf_rejection() {
+                // The session token rotated out from under us. Refresh once and
+                // replay: retrying with the same token would just fail again.
+                tracing::debug!(url = %url, "CSRF 校验失败，刷新令牌后重试");
+                self.refresh_identity().await?;
+                refreshed = true;
+                continue;
+            }
             if !mapping::should_retry(attempt, max_retries, &failure.error) {
                 return Err(failure.error);
             }
@@ -571,11 +772,13 @@ mod tests {
             phpsessid: Some("SECRET-COOKIE-VALUE".to_string()),
             user_id: Some(Id(7)),
             user_name: Some("me".to_string()),
+            csrf_token: Some("SECRET-CSRF-VALUE".to_string()),
         };
         let rendered = format!("{session:?}");
         assert!(!rendered.contains("SECRET"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(rendered.contains("me"), "{rendered}");
+        assert!(!rendered.contains("CSRF-VALUE"), "{rendered}");
         assert!(session.is_authenticated());
         assert!(!Session::default().is_authenticated());
         assert!(
@@ -612,6 +815,7 @@ mod tests {
             phpsessid: Some("abc".to_string()),
             user_id: Some(Id(11)),
             user_name: None,
+            csrf_token: None,
         });
         assert!(client.session().is_authenticated());
         assert_eq!(client.session().user_id, Some(Id(11)));
@@ -676,11 +880,15 @@ mod tests {
             Err(PixivError::Unauthorized)
         ));
         assert!(matches!(
-            client.set_bookmark(Id(1), true, false).await,
+            client
+                .set_bookmark(Id(1), true, BookmarkRestrict::Public)
+                .await,
             Err(PixivError::Unauthorized)
         ));
         assert!(matches!(
-            client.set_bookmark(Id(1), false, true).await,
+            client
+                .set_bookmark(Id(1), false, BookmarkRestrict::Private)
+                .await,
             Err(PixivError::Unauthorized)
         ));
         assert!(matches!(
@@ -732,7 +940,9 @@ mod tests {
         )
         .expect("client builds");
         assert!(matches!(
-            client.set_bookmark(Id(1), true, false).await,
+            client
+                .set_bookmark(Id(1), true, BookmarkRestrict::Public)
+                .await,
             Err(PixivError::Unauthorized)
         ));
         assert!(matches!(

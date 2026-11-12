@@ -166,12 +166,34 @@ impl BookmarkRestrict {
         }
     }
 
-    /// Value for the `rest` field of bookmark listings.
+    /// Value for the `rest` query parameter of bookmark *listings*.
     #[must_use]
     pub const fn as_list_filter(self) -> &'static str {
         match self {
             Self::Public => "show",
             Self::Private => "hide",
+        }
+    }
+
+    /// Value for the `restrict` field of bookmark *mutations*.
+    ///
+    /// The mutation endpoints take `0`/`1`, not the `public`/`private` words the
+    /// listing endpoint uses — mixing the two is rejected by Pixiv with a `422`.
+    #[must_use]
+    pub const fn as_flag(self) -> u8 {
+        match self {
+            Self::Public => 0,
+            Self::Private => 1,
+        }
+    }
+
+    /// Inverse of [`Self::as_flag`].
+    #[must_use]
+    pub const fn from_flag(flag: u8) -> Self {
+        if flag == 1 {
+            Self::Private
+        } else {
+            Self::Public
         }
     }
 }
@@ -182,6 +204,59 @@ pub struct Bookmark {
     pub bookmarked: bool,
     pub restrict: BookmarkRestrict,
     pub count: u64,
+}
+
+/// What the server says about the signed-in account.
+///
+/// Obtained from `GET /ajax/user/self`, which is the only endpoint that both
+/// proves the cookie is live *and* names the account behind it. A bare cookie
+/// value is not evidence of a session: Pixiv answers `200` with
+/// `"userData": null` when the cookie belongs to nobody, and `401` when it is
+/// present but no longer valid.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Account {
+    pub id: UserId,
+    /// Display name, e.g. `HELPMEEADICE`.
+    pub name: String,
+    /// Handle without the `@`, e.g. `helpmeeadice`.
+    pub account: String,
+    /// `170x170` avatar URL when the payload carried one.
+    pub avatar: Option<String>,
+    /// CSRF token that every state-changing request must echo back in
+    /// `x-csrf-token`. Rotates with the session, so it is stored next to the
+    /// cookie rather than hardcoded.
+    pub csrf_token: Option<String>,
+}
+
+/// The viewer's own bookmark state for one illustration, as the server reports
+/// it.
+///
+/// `id` is the *bookmark row* id, which is not the illustration id: deleting a
+/// bookmark is addressed by this value, so a client that drops it cannot undo a
+/// bookmark it just created.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BookmarkState {
+    pub bookmarked: bool,
+    pub restrict: BookmarkRestrict,
+    pub id: Option<String>,
+}
+
+impl BookmarkState {
+    /// State for "this illustration is not bookmarked".
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// State for "this illustration is bookmarked at `restrict`".
+    #[must_use]
+    pub fn bookmarked(restrict: BookmarkRestrict, id: Option<String>) -> Self {
+        Self {
+            bookmarked: true,
+            restrict,
+            id,
+        }
+    }
 }
 
 /// Aggregate engagement counters.
