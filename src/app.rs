@@ -4119,6 +4119,18 @@ fn install_callbacks(app: &Shared) {
                         App::open_detail_route(&shared, id, false);
                     }
                 }
+                // These two have no feed to reload. Ctrl+R means "refresh what is
+                // in front of me", and on these pages that is the queue and the
+                // cache accounting - not a silently re-fetched grid nobody sees.
+                Destination::Downloads => {
+                    let app = shared.borrow();
+                    app.push_downloads();
+                    app.refresh_chrome();
+                }
+                Destination::Settings => {
+                    let app = shared.borrow();
+                    app.refresh_chrome();
+                }
                 _ => App::load_page(&shared, false),
             }
         });

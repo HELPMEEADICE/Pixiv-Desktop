@@ -275,9 +275,10 @@ API observations: [`docs/API-NOTES.md`](docs/API-NOTES.md)
 | Key | Action |
 | --- | --- |
 | `Ctrl+F` | Focus search |
+| `Ctrl+K` | Focus search (the other half of the pair every search box has) |
 | `Alt+←` / `Alt+→` | Back / forward through page history |
-| `Ctrl+1` … `Ctrl+7` | Home, Discover, Ranking, Bookmarks, History, Downloads, Settings |
-| `Ctrl+R` | Reload the current feed |
+| `Ctrl+1` … `Ctrl+7` | Home, Discover, Ranking, Bookmarks, History, Downloads, Settings (`Ctrl+,` also works for Settings) |
+| `Ctrl+R` | Refresh the page in front of you: the feed on a feed page, the work on the detail page, the queue on downloads |
 | wheel | Zoom the viewer, anchored at the cursor |
 | double-click | Toggle zoom at the cursor |
 | `F` | Fit to window |
