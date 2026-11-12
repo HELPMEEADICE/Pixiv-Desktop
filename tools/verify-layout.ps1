@@ -1,111 +1,79 @@
-# Layout verification matrix: for every page and window size, assert the shell's
-# invariant (status bar bottom == shell bottom) and capture a ground-truth shot.
+# Layout verification matrix.
+#
+# For every page and window size: capture a ground-truth screenshot and assert the
+# shell invariant that the "half-empty window" bug broke —
+#
+#     status_y + status_height == shell_height     (gap == 0)
+#
+# — using the app's own `PIXIV_DESKTOP_TRACE=1` numbers, which report the sizes the
+# layout actually resolved to. A positive gap means unpainted canvas below the
+# status bar, which is exactly the symptom users reported.
+#
+# Capture is delegated to tools/shot.ps1 so there is one implementation of
+# "restore the window, resize it, copy the screen". That function also crops to the
+# client area and writes a sidecar JSON with the scale factor, which is what makes
+# the screenshots usable for pixel measurements afterwards.
 #
 # Usage:
-#   pwsh -File tools/verify-layout.ps1                 # full matrix
-#   pwsh -File tools/verify-layout.ps1 -Pages settings,downloads -Sizes 1024x768
+#   pwsh -File tools/verify-layout.ps1                       # full matrix
+#   pwsh -File tools/verify-layout.ps1 -Pages settings -Sizes 1024x768
+#   pwsh -File tools/verify-layout.ps1 -Dark
 param(
     [string[]]$Pages = @("home", "discovery", "ranking", "search", "bookmarks", "history", "downloads", "settings"),
     [string[]]$Sizes = @("maximize", "1024x768", "800x600"),
     [string]$Exe     = "target\debug\pixiv-desktop.exe",
     [string]$OutDir  = "docs/screenshots/verify",
-    [int]$WaitMs     = 4500
+    [switch]$Dark,
+    # Rows the shell must account for. gap must be 0 within this tolerance.
+    [double]$Tolerance = 1.0
 )
 
 $ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Drawing
-
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class VL {
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-}
-'@
-[void][VL]::SetProcessDPIAware()
-$dpi = (New-Object System.Windows.Forms.Form).CreateGraphics().DpiX
-if (-not $dpi -or $dpi -le 0) { $dpi = 96 }
-$scale = $dpi / 96.0
-
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$env:PIXIV_DESKTOP_TRACE = "1"
-$env:PIXIV_DESKTOP_DEMO = "1"
-Remove-Item Env:\PIXIV_DESKTOP_SIZE -ErrorAction SilentlyContinue
-Remove-Item Env:\PIXIV_DESKTOP_START_ILLUST -ErrorAction SilentlyContinue
 
-$results = @()
-# `pwsh -File` passes `a,b,c` as one token, so split explicitly.
 $Pages = @($Pages | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Sizes = @($Sizes | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 Write-Host "pages: $($Pages -join ', ')"
 Write-Host "sizes: $($Sizes -join ', ')"
+
+$results = @()
 foreach ($size in $Sizes) {
     foreach ($page in $Pages) {
-        $env:PIXIV_DESKTOP_START_PAGE = $page
-        $log = [System.IO.Path]::GetTempFileName()
-        $proc = Start-Process -FilePath $Exe -PassThru -RedirectStandardError $log
-        try {
-            Start-Sleep -Milliseconds $WaitMs
-            $proc.Refresh()
-            if ($proc.HasExited) { Write-Host "  $page/$size exited early" -ForegroundColor Red; continue }
-            for ($i = 0; $i -lt 40 -and $proc.MainWindowHandle -eq [IntPtr]::Zero; $i++) {
-                Start-Sleep -Milliseconds 250; $proc.Refresh()
-            }
-            $hwnd = $proc.MainWindowHandle
-            if ($hwnd -eq [IntPtr]::Zero) { Write-Host "  $page/$size no window" -ForegroundColor Red; continue }
+        $suffix = if ($Dark) { "-dark" } else { "" }
+        $out = Join-Path $OutDir ("{0}-{1}{2}.png" -f $page, $size, $suffix)
+        $mode = if ($size -eq "maximize") { "maximize" } else { "size" }
+        $args = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $page, "-Mode", $mode,
+            "-Size", $size, "-Out", $out, "-Exe", $Exe, "-Trace")
+        if ($Dark) { $args += "-Dark" }
+        & pwsh @args | Out-Null
 
-            [void][VL]::ShowWindow($hwnd, 9)      # restore first: a resize on a
-            Start-Sleep -Milliseconds 600         # never-restored window is dropped
-            $sz = "$size".Trim()
-            if ($sz -eq "maximize") {
-                [void][VL]::ShowWindow($hwnd, 3)
-            } else {
-                $parts = $sz.Split("x")
-                $wantW = [int]([double]$parts[0] * $scale)
-                $wantH = [int]([double]$parts[1] * $scale)
-                $wr = New-Object VL+RECT; [void][VL]::GetWindowRect($hwnd, [ref]$wr)
-                $cr = New-Object VL+RECT; [void][VL]::GetClientRect($hwnd, [ref]$cr)
-                $fw = ($wr.Right - $wr.Left) - $cr.Right
-                $fh = ($wr.Bottom - $wr.Top) - $cr.Bottom
-                [void][VL]::SetWindowPos($hwnd, [IntPtr]::Zero, 20, 20, $wantW + $fw, $wantH + $fh, 0x0004)
-            }
-            [void][VL]::SetForegroundWindow($hwnd)
-            Start-Sleep -Milliseconds 2200
-
-            # The process is killed right after this read, so the final log line can
-            # arrive truncated; take the last *complete* trace line instead.
-            $line = (Get-Content $log | Select-String 'trace' | Where-Object { $_.Line -match 'gap=' } |
-                Select-Object -Last 1).Line
-            if (-not $line) { $line = (Get-Content $log | Select-String 'trace' | Select-Object -Last 1).Line }
-            $gapOk = $line -match 'gap=(-?\d+)'
-            $gap = if ($gapOk) { [double]$Matches[1] } else { [double]::NaN }
-            $wr = New-Object VL+RECT; [void][VL]::GetWindowRect($hwnd, [ref]$wr)
-            $w = $wr.Right - $wr.Left; $h = $wr.Bottom - $wr.Top
-            $shot = Join-Path $OutDir ("{0}-{1}.png" -f $page, $size)
-            $bmp = New-Object System.Drawing.Bitmap $w, $h
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.CopyFromScreen($wr.Left, $wr.Top, 0, 0, (New-Object System.Drawing.Size $w, $h), [System.Drawing.CopyPixelOperation]::SourceCopy)
-            $g.Dispose(); $bmp.Save($shot); $bmp.Dispose()
-
-            $verdict = if ([math]::Abs($gap) -lt 1.0) { "OK" } else { "GAP" }
-            $color = if ($verdict -eq "OK") { "Green" } else { "Red" }
-            Write-Host ("  {0,-10} {1,-10} {2}  {3}" -f $page, $size, $verdict, $line) -ForegroundColor $color
-            $results += [pscustomobject]@{ Page = $page; Size = $size; Gap = $gap; Verdict = $verdict; Line = $line }
+        $metaPath = [System.IO.Path]::ChangeExtension($out, ".json")
+        if (-not (Test-Path $metaPath)) {
+            Write-Host ("  {0,-10} {1,-10} NO-CAPTURE" -f $page, $size) -ForegroundColor Red
+            $results += [pscustomobject]@{ Page = $page; Size = $size; Gap = [double]::NaN; Verdict = "CAPTURE"; Line = "" }
+            continue
         }
-        finally {
-            if ($proc -and -not $proc.HasExited) { $proc | Stop-Process -Force }
-            Start-Sleep -Milliseconds 400
-            Remove-Item $log -ErrorAction SilentlyContinue
+        $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
+        $line = $meta.trace
+        if (-not $line) {
+            Write-Host ("  {0,-10} {1,-10} NO-TRACE" -f $page, $size) -ForegroundColor Red
+            $results += [pscustomobject]@{ Page = $page; Size = $size; Gap = [double]::NaN; Verdict = "TRACE"; Line = "" }
+            continue
         }
+        $gap = [double]::NaN
+        if ($line -match 'gap=(-?\d+)') { $gap = [double]$Matches[1] }
+        $verdict = if ([math]::Abs($gap) -le $Tolerance) { "OK" } else { "GAP" }
+        $color = if ($verdict -eq "OK") { "Green" } else { "Red" }
+        $short = ($line -replace 'trace ', '')
+        Write-Host ("  {0,-10} {1,-10} {2,-6} {3}" -f $page, $size, $verdict, $short) -ForegroundColor $color
+        $results += [pscustomobject]@{ Page = $page; Size = $size; Gap = $gap; Verdict = $verdict; Line = $line }
     }
 }
 
 $bad = $results | Where-Object { $_.Verdict -ne "OK" }
 Write-Host ""
-Write-Host ("{0} checks, {1} with a bottom gap" -f $results.Count, $bad.Count) -ForegroundColor $(if ($bad.Count) { "Red" } else { "Green" })
-if ($bad.Count) { $bad | Format-Table -AutoSize | Out-String | Write-Host; exit 1 }
+Write-Host ("{0} checks, {1} not OK" -f $results.Count, $bad.Count) -ForegroundColor $(if ($bad.Count) { "Red" } else { "Green" })
+if ($bad.Count) {
+    $bad | Format-Table -AutoSize | Out-String | Write-Host
+    exit 1
+}

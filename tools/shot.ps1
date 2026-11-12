@@ -25,7 +25,9 @@ param(
     [int]$WaitMs   = 4500,
     [switch]$Dark,
     [switch]$Trace,
-    [switch]$WholeWindow
+    [switch]$WholeWindow,
+    # Opens a specific artwork on the detail page (demo ids start at 700000001).
+    [string]$Illust = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,7 +52,7 @@ public class Shot {
 [void][Shot]::SetProcessDPIAware()
 
 $env:PIXIV_DESKTOP_START_PAGE = $Page
-Remove-Item Env:\PIXIV_DESKTOP_START_ILLUST -ErrorAction SilentlyContinue
+if ($Illust) { $env:PIXIV_DESKTOP_START_ILLUST = $Illust } else { Remove-Item Env:\PIXIV_DESKTOP_START_ILLUST -ErrorAction SilentlyContinue }
 Remove-Item Env:\PIXIV_DESKTOP_SIZE -ErrorAction SilentlyContinue
 if ($Trace) { $env:PIXIV_DESKTOP_TRACE = "1" } else { Remove-Item Env:\PIXIV_DESKTOP_TRACE -ErrorAction SilentlyContinue }
 if ($Dark) { $env:PIXIV_DESKTOP_THEME = "dark" } else { Remove-Item Env:\PIXIV_DESKTOP_THEME -ErrorAction SilentlyContinue }
@@ -119,8 +121,20 @@ try {
     $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
 
+    # Last complete trace line, so the layout harness does not have to re-implement
+    # window capture just to read the shell's own measurements.
+    $traceLine = $null
+    if ($Trace) {
+        $traceLine = (Get-Content $log | Select-String 'trace' | Where-Object { $_.Line -match 'gap=' } |
+            Select-Object -Last 1).Line
+        if (-not $traceLine) {
+            $traceLine = (Get-Content $log | Select-String 'trace' | Select-Object -Last 1).Line
+        }
+    }
+
     # Sidecar: everything a pixel probe needs to reason in logical units.
     $meta = [ordered]@{
+        trace       = $traceLine
         page        = $Page
         mode        = $Mode
         dark        = [bool]$Dark

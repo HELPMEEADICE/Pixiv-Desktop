@@ -350,45 +350,10 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // Demo marker: one small, quiet chip. The previous build
-                    // announced demo mode in the top bar, the page hero and twice
-                    // in the status bar; a data-source badge belongs in exactly one
-                    // place, and the status bar is the authoritative one.
-                    if root.demo-mode : Rectangle {
-                        width: demo-label.preferred-width + Theme.space-4;
-                        height: 100%;
-
-                        chip := Rectangle {
-                            width: parent.width;
-                            height: 20px;
-                            y: (parent.height - self.height) / 2;
-                            border-radius: Theme.radius-sm;
-                            background: Theme.layer-alt;
-                            border-width: 1px;
-                            border-color: Theme.border;
-
-                            demo-label := Text {
-                                x: Theme.space-2;
-                                y: 0px;
-                                height: parent.height;
-                                text: "DEMO";
-                                color: Theme.text-tertiary;
-                                font-size: Theme.font-caption;
-                                font-weight: Type.semibold;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        demo-area := TouchArea { }
-
-                        HoverTip {
-                            show: demo-area.has-hover;
-                            tip: "演示数据：本地生成，不会访问 Pixiv";
-                            placement: TipPlacement.Below;
-                            x: (parent.width - self.width) / 2;
-                            y: Theme.topbar-height + 6px;
-                        }
-                    }
+                    // No demo badge here. The status bar already reports the data
+                    // source on every page, and the home hero explains it once; a
+                    // third marker 40px away from the second is the kind of
+                    // duplication that makes the chrome feel busy for no gain.
 
                     IconButton {
                         icon: root.dark ? "light" : "dark";
@@ -514,9 +479,12 @@ export component AppWindow inherits Window {
                             selected: root.page == Destination.Settings;
                             clicked => { root.navigate(Destination.Settings); }
                         }
-                        NavItem {
-                            icon: root.rail-compact ? "chevron-right" : "chevron-left";
-                            label: root.rail-compact ? "展开侧栏" : "收起侧栏";
+                        // Hidden while the host has auto-compacted the pane: at that
+                        // size the toggle cannot change anything, and a control that
+                        // does nothing is worse than no control.
+                        if !root.narrow : NavItem {
+                            icon: root.rail-collapsed ? "chevron-right" : "chevron-left";
+                            label: root.rail-collapsed ? "展开侧栏" : "收起侧栏";
                             compact: root.rail-compact;
                             clicked => { root.rail-collapsed = !root.rail-collapsed; }
                         }

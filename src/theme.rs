@@ -47,9 +47,10 @@ pub fn setting_value(mode: ThemeMode) -> &'static str {
 /// The `AppsUseLightTheme` value for the current user, if it can be read.
 #[cfg(target_os = "windows")]
 pub fn system_is_dark() -> bool {
-    // 0 = dark. A missing value means Windows never wrote it, which happens on a
-    // fresh profile; light is the documented default there.
-    !matches!(read_apps_use_light_theme(), Some(0))
+    // 1 = light, 0 = dark. A missing value means Windows never wrote it, which
+    // happens on a fresh profile; light is the documented default there, so
+    // "unknown" must not be mistaken for "dark".
+    matches!(read_apps_use_light_theme(), Some(0))
 }
 
 #[cfg(not(target_os = "windows"))]
