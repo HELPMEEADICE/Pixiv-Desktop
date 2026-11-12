@@ -14,17 +14,16 @@
 // stores only the resulting session cookie, validated against a real endpoint
 // before it is trusted.
 
-import { Theme, Type } from "../theme.slint";
+import { Theme, Type, ThemeMode } from "../theme.slint";
 import { FluentGlyph } from "../icons.slint";
 import {
     AppButton, ButtonKind, ToggleSwitch, Divider, Badge, TextField, InfoBar, InfoKind,
-    PageScroll, SettingsCard, SettingsRow,
+    PageScroll, SettingsCard, SettingsRow, SegmentedControl, IconSlot,
 } from "../components.slint";
 
 export component SettingsPage inherits Rectangle {
-    // appearance
-    in-out property <bool> dark: false;
-    in property <bool> follow-system-theme: true;
+    // No theme mirror here: the page reads `Theme.mode` / `Theme.dark` straight
+    // from the `Theme` global and asks Rust to change them. One copy, one owner.
 
     // session
     in property <bool> authenticated: false;
@@ -45,8 +44,7 @@ export component SettingsPage inherits Rectangle {
     in property <bool> demo-mode: false;
     in property <string> app-version: "";
 
-    callback toggle-theme(bool);
-    callback toggle-follow-system(bool);
+    callback select-theme-mode(ThemeMode);
     callback sign-in-browser();
     callback submit-cookie();
     callback sign-out();
@@ -197,23 +195,35 @@ export component SettingsPage inherits Rectangle {
         SettingsCard {
             title: "外观";
             icon: "light";
-            SettingsRow {
-                label: "深色模式";
-                available-width: page.body-width;
-                hint: "也可以随时用顶部栏的按钮切换";
-                ToggleSwitch {
-                    checked <=> root.dark;
-                    toggled(v) => { root.toggle-theme(v); }
+            description: "主题跟随 Windows 的“应用模式”设置，也可以在这里固定为浅色或深色。切换立即生效。";
+
+            VerticalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: "主题";
+                    color: Theme.text;
+                    font-size: Theme.font-body;
                 }
-            }
-            Divider { }
-            SettingsRow {
-                label: "跟随系统主题";
-                available-width: page.body-width;
-                hint: "系统切换浅色/深色时自动应用";
-                ToggleSwitch {
-                    checked: root.follow-system-theme;
-                    toggled(v) => { root.toggle-follow-system(v); }
+                Text {
+                    text: Theme.mode == ThemeMode.System
+                        ? ("跟随系统：当前系统为" + (Theme.system-dark ? "深色" : "浅色"))
+                        : "已固定为" + (Theme.mode == ThemeMode.Dark ? "深色" : "浅色");
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    alignment: start;
+                    SegmentedControl {
+                        items: ["跟随系统", "浅色", "深色"];
+                        current: Theme.mode == ThemeMode.System ? 0
+                            : (Theme.mode == ThemeMode.Light ? 1 : 2);
+                        selected(i) => {
+                            root.select-theme-mode(i == 0 ? ThemeMode.System
+                                : (i == 1 ? ThemeMode.Light : ThemeMode.Dark));
+                        }
+                    }
                 }
             }
         }

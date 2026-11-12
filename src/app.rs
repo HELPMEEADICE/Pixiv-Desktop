@@ -44,7 +44,7 @@ use pixiv_types::domain::{Illust, PageMeta, RankingKind, SearchQuery};
 use crate::images::{COVER_CONCURRENCY, CoverLoader};
 use crate::layout::{self, GridGeometry};
 use crate::route::History;
-use crate::{AppWindow, Destination, DownloadRow, IllustItem, ViewerPage};
+use crate::{AppWindow, Destination, DownloadRow, IllustItem, Theme, ThemeMode, ViewerPage};
 
 /// Which data source is answering. Rendered in the status bar and as a top-bar
 /// badge so demo data can never be mistaken for live data.
@@ -106,6 +106,10 @@ struct App {
     detail_epoch: u64,
     /// Reused so a burst of notices does not leak one timer per message.
     notice_timer: slint::Timer,
+    /// Persisted three-state theme choice; Theme.dark is derived from it.
+    theme_mode: ThemeMode,
+    /// Slow AppsUseLightTheme watcher, running only while the mode is System.
+    theme_timer: slint::Timer,
 }
 
 type Shared = Rc<RefCell<App>>;
@@ -302,21 +306,19 @@ impl App {
             Err(_) => (None, Mode::Demo),
         };
 
-        let dark = std::env::var("PIXIV_DESKTOP_THEME")
-            .ok()
-            .map(|theme| theme == "dark")
-            .unwrap_or_else(|| {
-                persisted(&store, "theme")
-                    .map(|value| value == "dark")
-                    .unwrap_or(false)
-            });
-        let follow_system = persisted(&store, "follow_system_theme")
-            .map(|value| value != "false")
-            .unwrap_or(true);
+        // One persisted value, three states. PIXIV_DESKTOP_THEME stays as an
+        // explicit override for the capture harness (it must be able to force a
+        // theme without touching the user's saved choice).
+        let theme_mode = match std::env::var("PIXIV_DESKTOP_THEME").ok().as_deref() {
+            Some("dark") => ThemeMode::Dark,
+            Some("light") => ThemeMode::Light,
+            _ => crate::theme::mode_from_setting(
+                persisted(&store, crate::theme::SETTING_KEY).as_deref(),
+            ),
+        };
 
         if let Some(ui) = ui.upgrade() {
-            ui.set_dark(dark);
-            ui.set_follow_system_theme(follow_system);
+            crate::theme::apply(&ui, theme_mode);
             ui.set_demo_mode(mode == Mode::Demo);
             ui.set_authenticated(session.is_authenticated());
             ui.set_session_user(session.user_name.clone().unwrap_or_default().into());
@@ -369,11 +371,40 @@ impl App {
             detail_models: None,
             detail_epoch: 0,
             notice_timer: slint::Timer::default(),
+            theme_mode,
+            theme_timer: slint::Timer::default(),
         }
     }
 
     fn ui(&self) -> AppWindow {
         self.ui.upgrade().expect("window alive")
+    }
+    /// Keep `Theme.system-dark` in step with Windows while the user asked to
+    /// follow it.
+    ///
+    /// Reads one registry DWORD every five seconds and *only* while the mode is
+    /// `System`: picking Light or Dark stops the timer, so the poll costs nothing
+    /// in the common case. Slint 1.18 exposes no colour-scheme notification and no
+    /// raw window procedure, so this is the honest substitute — documented in
+    /// `docs/UI-NOTES.md` rather than hidden.
+    fn watch_system_theme(&self, mode: ThemeMode) {
+        if mode != ThemeMode::System {
+            self.theme_timer.stop();
+            return;
+        }
+        let weak = self.ui.clone();
+        self.theme_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(5),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    let dark = crate::theme::system_is_dark();
+                    if ui.global::<Theme>().get_system_dark() != dark {
+                        ui.global::<Theme>().set_system_dark(dark);
+                    }
+                }
+            },
+        );
     }
 
     // ------------------------------------------------------------- chrome
@@ -403,30 +434,21 @@ impl App {
         )
     }
 
+    /// The one page-specific fact the status bar shows.
+    ///
+    /// Connection state (demo / signed-in / read-only) is *not* repeated here:
+    /// the shell renders it once from the properties it already holds. The old
+    /// line carried the mode and the auth state too, which is how one screen ended
+    /// up saying "演示模式" in three separate places.
     fn status_line(&self) -> String {
-        let mode = if self.mode == Mode::Demo {
-            "演示模式（本地数据）"
-        } else {
-            "真实 Pixiv 会话"
-        };
-        let auth = if self.session.is_authenticated() {
-            "已登录"
-        } else {
-            "未登录 · 只读"
-        };
-        // The item count only means something on a page that shows a feed.
-        if matches!(
-            self.page,
+        match self.page {
             Destination::Home
-                | Destination::Discovery
-                | Destination::Ranking
-                | Destination::Search
-                | Destination::Bookmarks
-                | Destination::History
-        ) {
-            format!("{mode} · {auth} · {} 项", self.items.len())
-        } else {
-            format!("{mode} · {auth}")
+            | Destination::Discovery
+            | Destination::Ranking
+            | Destination::Search
+            | Destination::Bookmarks
+            | Destination::History => format!("{} 项作品", self.items.len()),
+            _ => String::new(),
         }
     }
 
@@ -1992,27 +2014,27 @@ fn install_callbacks(app: &Shared) {
         });
     }
     // ---- theme ----
+    // Two entry points, one implementation. The top-bar button is a two-state
+    // quick switch (a single button can only honestly mean "give me the other
+    // one"); the three-state choice lives in Settings, where "follow the system"
+    // is a real option rather than a dead toggle.
     {
         let shared = app.clone();
-        ui.on_toggle_theme(move |dark| {
+        ui.on_toggle_theme(move || {
             let app = shared.borrow();
-            app.ui().set_dark(dark);
-            // A manual choice means "do not follow the system any more".
-            app.ui().set_follow_system_theme(false);
-            let _ = app
-                .store
-                .set_setting("theme", if dark { "dark" } else { "light" });
-            let _ = app.store.set_setting("follow_system_theme", "false");
+            let next = if app.ui().get_dark() {
+                ThemeMode::Light
+            } else {
+                ThemeMode::Dark
+            };
+            set_theme_mode(&app, next);
         });
     }
     {
         let shared = app.clone();
-        ui.on_toggle_follow_system(move |follow| {
+        ui.on_select_theme_mode(move |mode| {
             let app = shared.borrow();
-            app.ui().set_follow_system_theme(follow);
-            let _ = app
-                .store
-                .set_setting("follow_system_theme", if follow { "true" } else { "false" });
+            set_theme_mode(&app, mode);
         });
     }
     // ---- settings ----
@@ -2289,6 +2311,12 @@ fn current_image_size(ui: &AppWindow, app: &App) -> (f32, f32) {
 // ---------------------------------------------------------------- timers
 
 fn start_timers(app: &Shared) {
+    // Arm the system-theme watcher according to the persisted choice. It stops
+    // itself immediately when the mode is not System.
+    {
+        let mode = app.borrow().theme_mode;
+        app.borrow().watch_system_theme(mode);
+    }
     // Layout diagnostics for high-DPI verification: `PIXIV_DESKTOP_TRACE=1` logs
     // the numbers the layout actually resolved to, once a second. This is how the
     // 100/125/150/200% scaling matrix is checked without a debugger.
@@ -2362,6 +2390,17 @@ fn ranking_index(kind: RankingKind) -> i32 {
         .unwrap_or(0)
 }
 
+/// Apply the theme, persist the choice and re-arm (or stop) the system watcher.
+///
+/// One function so the three entry points — start-up, the top-bar quick switch and
+/// the Settings segmented control — cannot disagree about what a mode change means.
+fn set_theme_mode(app: &App, mode: ThemeMode) {
+    crate::theme::apply(&app.ui(), mode);
+    let _ = app
+        .store
+        .set_setting(crate::theme::SETTING_KEY, crate::theme::setting_value(mode));
+    app.watch_system_theme(mode);
+}
 fn persisted(store: &Store, key: &str) -> Option<String> {
     store.get_setting(key).ok().flatten()
 }

@@ -1,23 +1,39 @@
 // Design tokens for Pixiv Desktop.
 //
-// Visual brief: 70% Pixiv artwork-browsing experience + 30% Windows 11 / WinUI 3
-// desktop chrome. Concretely:
-//   * Pixiv's blue accent and artwork-first density survive;
-//   * Fluent 2 supplies layered neutral surfaces, 1px low-contrast strokes,
-//     4px control radius / 8px card radius, 32px control heights, a real
-//     light+dark pairing and a 12/13/14/16/20/24 type ramp.
+// Visual brief: 70% Windows 11 / WinUI 3 desktop chrome + 30% Pixiv's
+// artwork-browsing experience. Concretely:
+//   * WinUI 3 supplies the navigation system, control metrics (32px controls,
+//     4px control radius / 8px card radius), layered neutral surfaces, 1px
+//     low-contrast strokes, the Light/Dark/System theme triad and the type ramp;
+//   * Pixiv supplies its blue accent, the artwork-first density and the tag
+//     chips — nothing else. It is not a web wrapper with a native frame.
 //
 // Rules this file exists to enforce:
 //   * No page hard-codes a colour, radius, spacing or control size.
-//   * Flipping `Theme.dark` restyles the whole app without touching a page.
+//   * Theme is a three-state choice (`ThemeMode`), never a bare boolean, so
+//     "follow the system" is a real mode instead of a toggle that does nothing.
 //   * Every length that two files must agree on (card width bounds, scrollbar
-//     gutter, caption height) is defined here *once* and mirrored by the Rust
-//     layout model in `src/layout.rs`.
+//     gutter, caption height, nav item height) is defined here *once* and mirrored
+//     by the Rust layout model in `src/layout.rs`.
+
+/// Light / dark choice. `System` follows the Windows "app mode" setting.
+export enum ThemeMode {
+    System,
+    Light,
+    Dark,
+}
 
 export global Theme {
-    // Flipped by the system preference at start-up and by the top-bar toggle.
-    // `in-out` because the settings page and the title-bar button both write it.
-    in-out property <bool> dark: false;
+    /// User's explicit choice, persisted to SQLite and pushed in by Rust.
+    in-out property <ThemeMode> mode: ThemeMode.System;
+    /// The OS's app-mode preference, read from the registry by Rust. Meaningful
+    /// only while `mode == System`; kept as an input so the shell stays a pure
+    /// function of its properties.
+    in-out property <bool> system-dark: false;
+
+    /// Single source of truth for every colour choice in the app.
+    out property <bool> dark:
+        mode == ThemeMode.Dark || (mode == ThemeMode.System && system-dark);
 
     // ---- brand ---------------------------------------------------------
     // Pixiv's signature blue. Kept exact in light mode; lifted in dark mode so
@@ -70,17 +86,18 @@ export global Theme {
 
     // ---- elevation -----------------------------------------------------
     // Slint has no blur, so elevation is emulated with a low-alpha offset
-    // rectangle behind flyouts. Two steps only: cards stay flat.
+    // rectangle behind flyouts (or `drop-shadow-*`, which blurs on the GPU
+    // renderer only). Two steps only: cards stay flat.
     out property <color> shadow-1: dark ? #4d000000 : #0f000000;
     out property <color> shadow-2: dark ? #73000000 : #24000000;
 
     // ---- fixed geometry ------------------------------------------------
     out property <length> topbar-height: 48px;
-    out property <length> rail-width: 240px;
+    out property <length> rail-width: 232px;
     out property <length> rail-width-compact: 52px;
-    out property <length> statusbar-height: 24px;
+    out property <length> statusbar-height: 26px;
     /// Horizontal page inset. The gallery maths in `src/layout.rs` mirrors this.
-    out property <length> page-padding: 16px;
+    out property <length> page-padding: 20px;
     /// Widest a text column is allowed to get before it becomes unreadable.
     out property <length> reading-max: 720px;
 
@@ -94,10 +111,19 @@ export global Theme {
     /// sits underneath the thumb.
     out property <length> scrollbar-gutter: 10px;
 
-    // ---- type scale ----------------------------------------------------
+    // ---- type ----------------------------------------------------------
+    // WinUI 3's ramp, compressed for a dense browse client: the settings rows
+    // and list rows WinUI draws at 14px stay at 14px, captions drop to 11 so a
+    // card can carry a title and an author inside 44px.
+    //
+    // Font family note: the app sets `default-font-family` on the root window, so
+    // every `Text` inherits it. "Segoe UI Variable Text" is Win11's UI face;
+    // Windows falls back per-glyph for CJK, which keeps Chinese and Japanese
+    // metrics correct without bundling a font.
+    out property <string> font-family: "Segoe UI Variable Text";
     out property <length> font-caption: 11px;
     out property <length> font-small: 12px;
-    out property <length> font-body: 13px;
+    out property <length> font-body: 14px;
     out property <length> font-subhead: 14px;
     out property <length> font-title: 16px;
     out property <length> font-page: 20px;
@@ -126,6 +152,8 @@ export global Theme {
     out property <length> icon-size: 16px;
     out property <length> icon-size-lg: 20px;
     out property <length> row-height: 56px;
+    /// NavigationView row metric. WinUI uses 36px for a standard-density pane.
+    out property <length> nav-item-height: 36px;
 
     // ---- motion --------------------------------------------------------
     // Short and linear-ish: a desktop tool should never feel animated.

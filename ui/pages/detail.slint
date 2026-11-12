@@ -11,10 +11,11 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type } from "../theme.slint";
-import { FluentGlyph } from "../icons.slint";
+
 import {
     AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind,
     Skeleton, HoverTip, InfoBar, InfoKind, PageScroll, ProgressBar, SectionHeader,
+    IconPresenter, IconSlot,
 } from "../components.slint";
 
 /// One viewable page. `thumb` is the thumbnail-strip image; `source` is either
@@ -86,10 +87,9 @@ export component ZoomViewer inherits Rectangle {
         HorizontalLayout {
             width: 100%;
             Rectangle { horizontal-stretch: 1; }
-            FluentGlyph {
+            IconPresenter {
                 name: "warning";
-                width: 28px;
-                height: 28px;
+                glyph-size: 28px;
                 tint: Theme.danger;
             }
             Rectangle { horizontal-stretch: 1; }
@@ -505,7 +505,12 @@ export component DetailPage inherits Rectangle {
                 padding-right: Theme.space-2;
                 spacing: Theme.space-1;
 
-                IconButton { icon: "back"; tip: "返回"; clicked => { root.back(); } }
+                IconButton {
+                    icon: "back";
+                    tip: "返回";
+                    row-height: 44px;
+                    clicked => { root.back(); }
+                }
 
                 Text {
                     text: root.title;

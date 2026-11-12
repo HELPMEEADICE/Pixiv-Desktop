@@ -11,9 +11,8 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type } from "../theme.slint";
-import { FluentGlyph } from "../icons.slint";
 import {
-    AppButton, ButtonKind, IconButton, TagChip, PageScroll, StateView, StateKind,
+    AppButton, ButtonKind, IconButton, IconSlot, TagChip, PageScroll, StateView, StateKind,
     Skeleton, ProgressBar, IllustItem,
 } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
@@ -64,7 +63,7 @@ export component HomePage inherits Rectangle {
         // single largest block of colour in the app and competed with the artwork
         // for attention, which is the opposite of what a Pixiv client should do.
         hero := Rectangle {
-            height: 84px;
+            height: 76px;
             background: transparent;
 
             HorizontalLayout {
@@ -78,23 +77,22 @@ export component HomePage inherits Rectangle {
                     HorizontalLayout {
                         spacing: Theme.space-2;
                         alignment: start;
-                        FluentGlyph {
+                        IconSlot {
                             name: "sparkle";
-                            width: Theme.icon-size-lg;
-                            height: Theme.icon-size-lg;
+                            slot: Theme.icon-size-lg;
                             tint: Theme.accent;
                         }
                         Text {
                             text: root.greeting;
                             color: Theme.text;
-                            font-size: Theme.font-title;
+                            font-size: Theme.font-page;
                             font-weight: Type.semibold;
                             vertical-alignment: center;
                             overflow: elide;
                         }
                         if root.count-label != "" : Text {
                             text: root.count-label;
-                            color: Theme.accent-ink;
+                            color: Theme.text-tertiary;
                             font-size: Theme.font-small;
                             vertical-alignment: center;
                         }
@@ -114,6 +112,7 @@ export component HomePage inherits Rectangle {
                     label: "换一批";
                     icon: "refresh";
                     kind: ButtonKind.Secondary;
+                    row-height: 76px;
                     clicked => { root.refresh(); }
                 }
             }
@@ -126,10 +125,9 @@ export component HomePage inherits Rectangle {
             HorizontalLayout {
                 spacing: Theme.space-2;
                 alignment: start;
-                FluentGlyph {
+                IconSlot {
                     name: "tag";
-                    width: Theme.icon-size;
-                    height: Theme.icon-size;
+                    slot: Theme.icon-size;
                     tint: Theme.text-tertiary;
                 }
                 Text {

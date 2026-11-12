@@ -1,15 +1,19 @@
 // Download manager.
 //
 // A WinUI ListView-style queue rather than tiles: each task is one row with a
-// title, a state badge, a determinate progress bar and the actions that make
-// sense for its state. Every row action maps to real manager state (cancel,
-// retry, reveal file); nothing here is decorative.
+// state glyph, a title, a state badge, a determinate progress bar and the actions
+// that make sense for its state. Every row action maps to real manager state
+// (cancel, retry, reveal file); nothing here is decorative.
+//
+// Alignment note: `TaskRow` is 76px tall and every child is a fixed-size control,
+// which a Slint horizontal layout would top-align. The row therefore hands each
+// control the row height (`IconButton.row-height`) or wraps it in a full-height
+// cell, so the badge, the buttons and the state glyph all share one centre line.
 
 import { Theme, Type } from "../theme.slint";
-import { FluentGlyph } from "../icons.slint";
 import {
     AppButton, IconButton, ButtonKind, Divider, StateView, StateKind, Badge, InfoBar,
-    InfoKind, PageScroll, ProgressBar, SettingsCard,
+    InfoKind, PageScroll, ProgressBar, SettingsCard, IconPresenter, IconSlot,
 } from "../components.slint";
 
 export struct DownloadRow {
@@ -26,7 +30,7 @@ export struct DownloadRow {
     path: string,
 }
 
-/// One queued/finished task.
+/// Row metric, mirrored by the state-colour logic below.
 component TaskRow inherits Rectangle {
     in property <DownloadRow> entry;
 
@@ -34,35 +38,48 @@ component TaskRow inherits Rectangle {
     callback retry();
     callback reveal();
 
-    height: 72px;
+    out property <bool> finished: root.entry.state == 2 || root.entry.state == 5;
+    out property <bool> running: root.entry.state == 0 || root.entry.state == 1;
+
+    height: 76px;
     border-radius: Theme.radius-md;
     background: Theme.layer;
     border-width: 1px;
     border-color: Theme.border;
 
     HorizontalLayout {
-        padding: Theme.space-3;
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-2;
         spacing: Theme.space-3;
 
-        // State glyph, so the row can be scanned without reading badges.
+        // State glyph in a tinted tile, so the row can be scanned without
+        // reading any text.
         Rectangle {
             width: 32px;
-            height: 32px;
-            border-radius: Theme.radius-md;
-            background: root.entry.state == 3 ? Theme.danger-subtle
-                : root.entry.state == 2 ? Theme.success-subtle
-                : Theme.accent-subtle;
+            height: 100%;
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                y: (parent.height - self.height) / 2;
+                border-radius: Theme.radius-md;
+                background: root.entry.state == 3 ? Theme.danger-subtle
+                    : root.entry.state == 2 ? Theme.success-subtle
+                    : root.entry.state == 4 ? Theme.layer-sunken
+                    : Theme.accent-subtle;
 
-            FluentGlyph {
-                name: root.entry.state == 2 ? "check"
-                    : root.entry.state == 3 ? "warning"
-                    : root.entry.state == 4 ? "dismiss"
-                    : "downloads";
-                width: Theme.icon-size;
-                height: Theme.icon-size;
-                tint: root.entry.state == 3 ? Theme.danger
-                    : root.entry.state == 2 ? Theme.success
-                    : Theme.accent;
+                IconPresenter {
+                    name: root.entry.state == 2 ? "check"
+                        : root.entry.state == 3 ? "warning"
+                        : root.entry.state == 4 ? "close"
+                        : root.entry.state == 5 ? "copy"
+                        : "downloads";
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    tint: root.entry.state == 3 ? Theme.danger
+                        : root.entry.state == 2 ? Theme.success
+                        : root.entry.state == 4 ? Theme.text-tertiary
+                        : Theme.accent;
+                }
             }
         }
 
@@ -71,7 +88,7 @@ component TaskRow inherits Rectangle {
             horizontal-stretch: 1;
             // Left-aligned like every other list row: `alignment: center` would
             // centre each line in the column instead of aligning it to the edge.
-            alignment: start;
+            alignment: center;
 
             Text {
                 text: root.entry.title;
@@ -87,7 +104,7 @@ component TaskRow inherits Rectangle {
                 overflow: elide;
             }
 
-            if root.entry.state == 0 || root.entry.state == 1 : ProgressBar {
+            if root.running : ProgressBar {
                 progress: root.entry.progress < 0 ? 0.0 : root.entry.progress * 1.0 / 100.0;
                 indeterminate: root.entry.progress < 0;
                 width: 100%;
@@ -100,34 +117,53 @@ component TaskRow inherits Rectangle {
             }
         }
 
-        Badge {
-            label: root.entry.state == 0 ? "等待中"
-                : root.entry.state == 1 ? (root.entry.progress < 0 ? "下载中" : (root.entry.progress + "%"))
-                : root.entry.state == 2 ? "已完成"
-                : root.entry.state == 3 ? "失败"
-                : root.entry.state == 5 ? "已存在"
-                : "已取消";
-            fill: root.entry.state == 3 ? Theme.danger-subtle
-                : root.entry.state == 2 ? Theme.success-subtle
-                : Theme.accent-subtle;
-            ink: root.entry.state == 3 ? Theme.danger
-                : root.entry.state == 2 ? Theme.success
-                : Theme.accent;
+        Rectangle {
+            width: status-badge.width;
+            height: 100%;
+
+            status-badge := Badge {
+                y: (parent.height - self.height) / 2;
+                label: root.entry.state == 0 ? "等待中"
+                    : root.entry.state == 1 ? (root.entry.progress < 0 ? "下载中" : (root.entry.progress + "%"))
+                    : root.entry.state == 2 ? "已完成"
+                    : root.entry.state == 3 ? "失败"
+                    : root.entry.state == 5 ? "已存在"
+                    : "已取消";
+                fill: root.entry.state == 3 ? Theme.danger-subtle
+                    : root.entry.state == 2 ? Theme.success-subtle
+                    : root.entry.state == 4 ? Theme.layer-sunken
+                    : Theme.accent-subtle;
+                ink: root.entry.state == 3 ? Theme.danger
+                    : root.entry.state == 2 ? Theme.success
+                    : root.entry.state == 4 ? Theme.text-tertiary
+                    : Theme.accent;
+            }
         }
 
+        // Row actions. Reveal only means something once a file exists; retry only
+        // where the task can actually be re-run.
         IconButton {
             icon: "folder";
-            tip: "在资源管理器中显示";
+            tip: root.finished ? "在资源管理器中显示" : "完成后可在此打开";
+            size: Theme.control-height-sm;
+            row-height: 76px;
+            enabled: root.finished;
             clicked => { root.reveal(); }
         }
-        if root.entry.state == 3 || root.entry.state == 4 : IconButton {
+        IconButton {
             icon: "refresh";
             tip: "重试";
+            size: Theme.control-height-sm;
+            row-height: 76px;
+            visible: root.entry.state == 3 || root.entry.state == 4;
             clicked => { root.retry(); }
         }
-        if root.entry.state == 0 || root.entry.state == 1 : IconButton {
+        IconButton {
             icon: "dismiss";
             tip: "取消";
+            size: Theme.control-height-sm;
+            row-height: 76px;
+            visible: root.running;
             clicked => { root.cancel(); }
         }
     }
@@ -184,9 +220,12 @@ export component DownloadsPage inherits Rectangle {
         }
 
         // ---- command bar ----
+        // `row-height` on each button keeps the whole strip on one centre line
+        // even though the buttons are 32px and the strip is taller.
         command-bar := HorizontalLayout {
             spacing: Theme.space-2;
             alignment: start;
+            height: Theme.control-height;
 
             AppButton {
                 label: "选择文件夹";
@@ -217,6 +256,7 @@ export component DownloadsPage inherits Rectangle {
         // ---- destination ----
         destination-card := SettingsCard {
             title: "保存位置";
+            icon: "downloads";
             description: "仅用于个人离线浏览你在账号内已经可以查看的作品。";
 
             VerticalLayout {
@@ -254,8 +294,11 @@ export component DownloadsPage inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 kind: StateKind.Empty;
+                // A download queue that is empty has nothing to do with a failed
+                // image; the state carries its own glyph.
+                glyph: "downloads";
                 title: "还没有下载任务";
-                description: "在作品详情页点击“下载”即可加入队列。";
+                description: "打开任意作品，点击「下载」或「下载全部」即可加入队列。";
             }
         }
 

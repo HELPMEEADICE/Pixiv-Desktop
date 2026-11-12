@@ -12,6 +12,7 @@ mod layout;
 mod picker;
 mod route;
 mod session;
+mod theme;
 mod zoom;
 
 slint::include_modules!();

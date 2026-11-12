@@ -15,12 +15,20 @@
 // Keyboard: every shortcut is handled by one ancestor `FocusScope`, so it works
 // whether focus is on the window itself or inside the search box. Only
 // modifier-qualified combinations are intercepted, so typing never fights the UI.
+//
+// Vertical alignment note: inside a `HorizontalLayout` a child with a fixed height
+// is aligned to the *start* of the cross axis, not centred (measured: 15.5 physical
+// px at 150 % DPI on the old navigation rail). Every fixed-size element in the top
+// bar therefore either fills the bar (`IconButton.row-height`, `AppButton.row-height`)
+// or derives its `y` from `Theme.topbar-height`.
 
-import { Theme, Type } from "theme.slint";
-import { FluentGlyph } from "icons.slint";
+// Re-exported rather than merely imported: `slint::include_modules!` only emits
+// bindings for what the root file *exports*, and Rust has to reach the `Theme`
+// global (`ui.global::<Theme>()`) to push the persisted theme choice into it.
+import { Theme, Type, ThemeMode } from "theme.slint";
+export { Theme, Type, ThemeMode } from "theme.slint";
 import {
-    AppButton, IconButton, ButtonKind, TextField, NavItem, Badge, Divider, HoverTip,
-    IllustItem,
+    IconButton, TextField, NavItem, Divider, HoverTip, IllustItem, IconSlot, TipPlacement,
 } from "components.slint";
 import { HomePage } from "pages/home.slint";
 import { GalleryPage } from "pages/gallery.slint";
@@ -42,11 +50,15 @@ export enum Destination {
 
 export component AppWindow inherits Window {
     title: "Pixiv Desktop";
-    min-width: 640px;
-    min-height: 480px;
+    min-width: 720px;
+    min-height: 520px;
     preferred-width: 1180px;
     preferred-height: 820px;
     background: Theme.canvas;
+    // One place sets the app's typeface: every `Text` that does not override
+    // `font-family` inherits this, and Windows falls back per-glyph for CJK.
+    default-font-family: Theme.font-family;
+    default-font-size: Theme.font-body;
 
     in property <Destination> page: Destination.Home;
     /// User's manual override for the NavigationView pane.
@@ -66,7 +78,15 @@ export component AppWindow inherits Window {
     in property <string> status-text: "";
     in property <string> session-user: "";
     in property <bool> authenticated: false;
-    in-out property <bool> dark <=> Theme.dark;
+
+    // ---- theme ----
+    /// `Theme.mode` and `Theme.system-dark` live in the `Theme` global, which
+    /// Rust writes directly: the theme is a process-wide choice, not a property of
+    /// one window, and routing it through the shell only added a copy that could
+    /// disagree. `dark` is derived inside the global, so no page can set a
+    /// contradictory state.
+    out property <bool> dark: Theme.dark;
+
     in-out property <string> search-text: "";
     in property <string> search-word: "";
     in property <bool> can-go-back: false;
@@ -125,7 +145,6 @@ export component AppWindow inherits Window {
     in property <string> cache-summary: "";
     in property <int> cache-memory-mb: 192;
     in property <int> cache-disk-mb: 1024;
-    in property <bool> follow-system-theme: true;
     in property <string> app-version: "0.1.0";
     in property <bool> busy: false;
     in property <string> notice: "";
@@ -137,7 +156,8 @@ export component AppWindow inherits Window {
     callback go-back();
     callback go-forward();
     callback search-submitted(string);
-    callback toggle-theme(bool);
+    callback select-theme-mode(ThemeMode);
+    callback toggle-theme();
     callback shell-shortcut(string);
 
     // ---- artwork feed ----
@@ -181,7 +201,6 @@ export component AppWindow inherits Window {
     callback download-open-task(int);
 
     // ---- settings ----
-    callback toggle-follow-system(bool);
     callback sign-in-browser();
     callback submit-cookie();
     callback sign-out();
@@ -194,6 +213,8 @@ export component AppWindow inherits Window {
     callback open-data-folder();
     callback open-project();
     callback dismiss-notice();
+
+
 
     out property <bool> is-gallery-page:
         root.page == Destination.Discovery || root.page == Destination.Ranking
@@ -258,6 +279,7 @@ export component AppWindow inherits Window {
         shell := VerticalLayout {
             width: 100%;
             height: 100%;
+
             // ================= top command bar =================
             Rectangle {
                 height: Theme.topbar-height;
@@ -266,96 +288,143 @@ export component AppWindow inherits Window {
                 border-color: Theme.border;
 
                 HorizontalLayout {
-                    padding-left: Theme.space-3;
-                    padding-right: Theme.space-3;
+                    padding-left: Theme.space-2;
+                    padding-right: Theme.space-2;
                     spacing: Theme.space-1;
 
-                    // Wordmark: Pixiv blue square + label. Not a fake button.
+                    // Wordmark: a Pixiv-blue tile with the brand letter. Not a
+                    // fake button — it does not respond to the pointer. Wrapped in a
+                    // full-height cell because a fixed-height child of this row
+                    // would otherwise be top-aligned.
                     Rectangle {
-                        width: 30px;
-                        height: 30px;
-                        border-radius: Theme.radius-md;
-                        background: Theme.accent;
-                        Text {
-                            text: "P";
-                            color: Theme.on-accent;
-                            font-size: Theme.font-title;
-                            font-weight: Type.bold;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        width: 28px;
+                        height: 100%;
+                        Rectangle {
+                            width: 28px;
+                            height: 28px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: Theme.radius-md;
+                            background: Theme.accent;
+                            Text {
+                                text: "P";
+                                color: Theme.on-accent;
+                                font-size: Theme.font-title;
+                                font-weight: Type.bold;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
+
+                    Rectangle { width: Theme.space-1; }
 
                     IconButton {
                         icon: "back";
                         tip: "后退 (Alt+←)";
                         enabled: root.can-go-back;
+                        row-height: Theme.topbar-height;
+                        tip-placement: TipPlacement.Below;
                         clicked => { root.go-back(); }
                     }
                     IconButton {
                         icon: "forward";
                         tip: "前进 (Alt+→)";
                         enabled: root.can-go-forward;
+                        row-height: Theme.topbar-height;
+                        tip-placement: TipPlacement.Below;
                         clicked => { root.go-forward(); }
                     }
 
                     Rectangle {
                         horizontal-stretch: 1;
                         height: Theme.topbar-height;
-                        min-width: 96px;
+                        min-width: 120px;
 
                         search-field := TextField {
                             height: Theme.control-height;
                             y: (parent.height - self.height) / 2;
-                            placeholder: "搜索插画、漫画、动图或标签…";
+                            placeholder: "搜索插画、漫画、动图或标签…  (Ctrl+F)";
                             leading-icon: "search";
                             text <=> root.search-text;
                             accepted(t) => { root.search-submitted(t); }
                         }
                     }
 
+                    // Demo marker: one small, quiet chip. The previous build
+                    // announced demo mode in the top bar, the page hero and twice
+                    // in the status bar; a data-source badge belongs in exactly one
+                    // place, and the status bar is the authoritative one.
                     if root.demo-mode : Rectangle {
-                        height: 22px;
-                        border-radius: Theme.radius-sm;
-                        background: Theme.warning-subtle;
-                        HorizontalLayout {
-                            padding-left: Theme.space-2;
-                            padding-right: Theme.space-2;
-                            alignment: center;
-                            Text {
-                                text: "DEMO 演示数据";
-                                color: Theme.warning;
+                        width: demo-label.preferred-width + Theme.space-4;
+                        height: 100%;
+
+                        chip := Rectangle {
+                            width: parent.width;
+                            height: 20px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.layer-alt;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            demo-label := Text {
+                                x: Theme.space-2;
+                                y: 0px;
+                                height: parent.height;
+                                text: "DEMO";
+                                color: Theme.text-tertiary;
                                 font-size: Theme.font-caption;
                                 font-weight: Type.semibold;
                                 vertical-alignment: center;
                             }
+                        }
+
+                        demo-area := TouchArea { }
+
+                        HoverTip {
+                            show: demo-area.has-hover;
+                            tip: "演示数据：本地生成，不会访问 Pixiv";
+                            placement: TipPlacement.Below;
+                            x: (parent.width - self.width) / 2;
+                            y: Theme.topbar-height + 6px;
                         }
                     }
 
                     IconButton {
                         icon: root.dark ? "light" : "dark";
                         tip: root.dark ? "切换到浅色主题" : "切换到深色主题";
-                        clicked => { root.toggle-theme(!root.dark); }
+                        row-height: Theme.topbar-height;
+                        tip-placement: TipPlacement.Below;
+                        clicked => { root.toggle-theme(); }
                     }
 
                     // Account affordance: opens Settings, where the sign-in flow lives.
                     Rectangle {
-                        width: 30px;
-                        height: 30px;
-                        border-radius: Theme.radius-pill;
-                        background: root.authenticated ? Theme.accent : Theme.layer-alt;
-                        border-width: root.authenticated ? 0px : 1px;
-                        border-color: Theme.border-strong;
-                        clip: true;
+                        width: 28px;
+                        height: 100%;
 
-                        Text {
-                            text: root.authenticated ? root.session-user : "登";
-                            color: root.authenticated ? Theme.on-accent : Theme.text-tertiary;
-                            font-size: Theme.font-caption;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            overflow: elide;
+                        avatar := Rectangle {
+                            width: 28px;
+                            height: 28px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: Theme.radius-pill;
+                            background: root.authenticated ? Theme.accent : Theme.layer-alt;
+                            border-width: root.authenticated ? 0px : 1px;
+                            border-color: Theme.border-strong;
+                            clip: true;
+
+                            Text {
+                                text: root.authenticated
+                                    ? (root.session-user == "" ? "已" : root.session-user)
+                                    : "登";
+                                color: root.authenticated ? Theme.on-accent : Theme.text-tertiary;
+                                font-size: Theme.font-caption;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
                         }
+
                         avatar-area := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.navigate(Destination.Settings); }
@@ -363,8 +432,9 @@ export component AppWindow inherits Window {
                         HoverTip {
                             show: avatar-area.has-hover;
                             tip: root.authenticated ? "账户与设置" : "未登录，点击前往设置";
-                            x: -self.width + 30px;
-                            y: 36px;
+                            placement: TipPlacement.Below;
+                            x: (parent.width - self.width) / 2;
+                            y: Theme.topbar-height + 6px;
                         }
                     }
                 }
@@ -375,13 +445,12 @@ export component AppWindow inherits Window {
                 // Height is *derived from the window*, not negotiated with the
                 // layout system. Slint walks constraints up from content: this row
                 // contains the navigation column, whose preferred height is the sum
-                // of its fixed rows (≈379px). That becomes the row's implicit
-                // max-height, so `vertical-stretch: 1` cannot grow it — the layout
-                // keeps the row at its content height, parks the status bar right
-                // under it and leaves every pixel below unpainted. Stating the
-                // height as "window minus the two fixed bars" is exact, monotone in
-                // the window height, and leaves no leftover for a stretch rule to
-                // get wrong.
+                // of its fixed rows. That becomes the row's implicit max-height, so
+                // `vertical-stretch: 1` cannot grow it — the layout keeps the row at
+                // its content height, parks the status bar right under it and leaves
+                // every pixel below unpainted. Stating the height as "window minus
+                // the two fixed bars" is exact, monotone in the window height, and
+                // leaves no leftover for a stretch rule to get wrong.
                 height: root.height - Theme.topbar-height - Theme.statusbar-height;
                 spacing: 0px;
 
@@ -594,8 +663,7 @@ export component AppWindow inherits Window {
                         width: parent.width;
                         height: parent.height;
                         visible: root.page == Destination.Settings;
-                        dark <=> root.dark;
-                        follow-system-theme: root.follow-system-theme;
+
                         authenticated: root.authenticated;
                         busy: root.busy;
                         session-user: root.session-user;
@@ -607,8 +675,7 @@ export component AppWindow inherits Window {
                         template-input <=> root.template-input;
                         demo-mode: root.demo-mode;
                         app-version: root.app-version;
-                        toggle-theme(v) => { root.toggle-theme(v); }
-                        toggle-follow-system(v) => { root.toggle-follow-system(v); }
+                        select-theme-mode(m) => { root.select-theme-mode(m); }
                         sign-in-browser => { root.sign-in-browser(); }
                         submit-cookie => { root.submit-cookie(); }
                         sign-out => { root.sign-out(); }
@@ -628,12 +695,12 @@ export component AppWindow inherits Window {
                     // of a 480px-tall window. As an overlay it is visible on every
                     // page and steals no layout space.
                     if root.notice != "" : Rectangle {
-                        x: Theme.space-3;
-                        // Literal 44px rather than `self.height`: a self-referencing
-                        // binding in `y` resolves against height 0 and puts the bar outside
-                        // the clip.
-                        y: parent.height - 44px - Theme.space-3;
-                        width: parent.width - Theme.space-3 * 2;
+                        x: Theme.space-4;
+                        // Literal height rather than `self.height`: a self-referencing
+                        // binding in `y` resolves against height 0 and puts the bar
+                        // outside the clip.
+                        y: parent.height - 44px - Theme.space-4;
+                        width: parent.width - Theme.space-4 * 2;
                         height: 44px;
                         border-radius: Theme.radius-md;
                         background: root.notice-kind == 3 ? Theme.danger-subtle
@@ -645,19 +712,21 @@ export component AppWindow inherits Window {
                             : root.notice-kind == 2 ? Theme.warning
                             : root.notice-kind == 1 ? Theme.success
                             : Theme.border;
+                        drop-shadow-blur: 10px;
+                        drop-shadow-color: Theme.shadow-2;
+                        drop-shadow-offset-y: 2px;
 
                         HorizontalLayout {
                             padding-left: Theme.space-3;
                             padding-right: Theme.space-2;
                             spacing: Theme.space-2;
 
-                            FluentGlyph {
+                            IconSlot {
                                 name: root.notice-kind == 3 ? "warning"
                                     : root.notice-kind == 2 ? "warning"
                                     : root.notice-kind == 1 ? "check"
                                     : "info";
-                                width: Theme.icon-size;
-                                height: Theme.icon-size;
+                                slot: Theme.icon-size;
                                 tint: root.notice-kind == 3 ? Theme.danger
                                     : root.notice-kind == 2 ? Theme.warning
                                     : root.notice-kind == 1 ? Theme.success
@@ -677,6 +746,7 @@ export component AppWindow inherits Window {
                                 icon: "dismiss";
                                 size: 24px;
                                 tip: "关闭";
+                                row-height: 44px;
                                 clicked => { root.dismiss-notice(); }
                             }
                         }
@@ -685,6 +755,9 @@ export component AppWindow inherits Window {
             }
 
             // ================= status bar =================
+            // The shell owns connection state; pages supply the one page-specific
+            // fact through `status-text`. Anything more is the duplication that used
+            // to repeat "演示模式（本地数据）" three times on one screen.
             status-row := Rectangle {
                 height: Theme.statusbar-height;
                 background: Theme.chrome;
@@ -694,7 +767,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     padding-left: Theme.space-3;
                     padding-right: Theme.space-3;
-                    spacing: Theme.space-3;
+                    spacing: Theme.space-2;
 
                     Text {
                         text: root.status-text;
@@ -704,9 +777,25 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                         overflow: elide;
                     }
+
+                    Rectangle {
+                        width: 6px;
+                        height: 100%;
+                        Rectangle {
+                            width: 6px;
+                            height: 6px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: Theme.radius-pill;
+                            background: root.demo-mode ? Theme.warning
+                                : (root.authenticated ? Theme.success : Theme.text-tertiary);
+                        }
+                    }
+
                     Text {
-                        text: root.demo-mode ? "演示模式（本地数据）" : "真实 Pixiv 会话";
-                        color: root.demo-mode ? Theme.warning : Theme.success;
+                        text: root.demo-mode ? "演示模式"
+                            : (root.authenticated ? "已登录" : "未登录 · 只读");
+                        color: root.demo-mode ? Theme.warning
+                            : (root.authenticated ? Theme.text-secondary : Theme.text-tertiary);
                         font-size: Theme.font-caption;
                         vertical-alignment: center;
                     }

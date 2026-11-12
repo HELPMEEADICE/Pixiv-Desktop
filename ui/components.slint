@@ -17,16 +17,100 @@ import { FluentGlyph } from "icons.slint";
 import { ScrollView } from "std-widgets.slint";
 
 // ======================================================================
+// Icons — the one place a glyph is positioned
+// ======================================================================
+
+// Two measured facts drive the whole icon layer. Neither is guessable from a
+// Slint declaration, which is why they are written down here:
+//
+//  1. `Path` places itself at `x: 0; y: 0`. `FluentIcon` gives it a size but not
+//     a position, so a 16px glyph inside a 32px button used to sit in the
+//     button's top-left corner — 8px right and 8px down of centre.
+//  2. A child of a `HorizontalLayout` with a *fixed* height is aligned to the
+//     start of the cross axis, not centred. Measured on the navigation rail: every
+//     glyph's centre sat 15.5 physical px (10.3 logical px at 150 % DPI) above the
+//     centre line of its row, while the `Text` siblings — which fill the row and
+//     centre their own baseline — were within 1px.
+//
+// So: no call site hands a glyph a bare size again. Either it hands it a box
+// (`IconPresenter` centres inside a box the caller owns) or it hands it a row
+// (`IconSlot` claims the full cross axis and centres inside that).
+
+/// One Fluent glyph, centred inside its own square box.
+///
+/// The box may be larger than the glyph (`glyph-size`), which is what makes a
+/// 13px heart sit in the middle of a 28px pill without a magic offset.
+export component IconPresenter inherits Rectangle {
+    in property <string> name: "";
+    in property <length> glyph-size: Theme.icon-size;
+    in property <color> tint: Theme.text;
+    in property <bool> enabled: true;
+
+    width: root.glyph-size;
+    height: root.glyph-size;
+    background: transparent;
+
+    FluentGlyph {
+        name: root.name;
+        width: root.glyph-size;
+        height: root.glyph-size;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        tint: root.tint;
+        opacity: root.enabled ? 1.0 : 0.4;
+    }
+}
+
+/// A glyph on the centre line of whatever row it is placed in.
+///
+/// `height: 100%` is load-bearing: it is the only way to make a fixed-size child
+/// of a horizontal layout claim the cross axis. `slot` reserves a fixed column so
+/// that icon+label rows keep their labels on one shared vertical rule no matter
+/// how wide an individual glyph's ink happens to be.
+export component IconSlot inherits Rectangle {
+    in property <string> name: "";
+    in property <length> glyph-size: Theme.icon-size;
+    in property <length> slot: Theme.icon-size;
+    in property <color> tint: Theme.text;
+    in property <bool> enabled: true;
+
+    width: root.slot;
+    height: 100%;
+    background: transparent;
+
+    FluentGlyph {
+        name: root.name;
+        width: root.glyph-size;
+        height: root.glyph-size;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        tint: root.tint;
+        opacity: root.enabled ? 1.0 : 0.4;
+    }
+}
+
+// ======================================================================
 // Small overlays
 // ======================================================================
 
 /// Minimal hover hint. Slint's built-in `Tooltip` takes `styled-text`, which
 /// cannot be fed a dynamic `string` without markdown wrapping, so the app uses
 /// this fully-themeable equivalent instead.
+///
+/// `placement` matters: the top command bar is only 48px tall and a tip drawn
+/// *above* a button there lands outside the window, where it is silently
+/// invisible. Chrome near the top of the window therefore passes `below`.
+export enum TipPlacement {
+    Above,
+    Below,
+    Right,
+}
+
 export component HoverTip inherits Rectangle {
     in property <string> tip: "";
     in property <bool> show: false;
     in property <length> max-tip-width: 300px;
+    in property <TipPlacement> placement: TipPlacement.Above;
 
     visible: root.show && root.tip != "";
     height: 24px;
@@ -35,6 +119,9 @@ export component HoverTip inherits Rectangle {
     background: Theme.dark ? #f0f0f0 : #2b2b2b;
     border-width: 1px;
     border-color: Theme.dark ? #3d3d3d : transparent;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: Theme.shadow-2;
+    drop-shadow-offset-y: 2px;
 
     label := Text {
         x: Theme.space-3;
@@ -68,61 +155,76 @@ export component AppButton inherits Rectangle {
     in property <string> icon: "";
     in property <bool> compact: false;
     in property <bool> enabled: true;
+    /// Visual height. Ignored when `row-height` is set.
+    in property <length> visual-height: 0px;
+    /// Set to the height of the enclosing bar to let the button claim the whole
+    /// cross axis and centre its own pill, instead of being top-aligned by the
+    /// surrounding horizontal layout.
+    in property <length> row-height: 0px;
     callback clicked();
 
-    height: root.compact ? Theme.control-height-sm : Theme.control-height;
+    out property <length> button-height:
+        root.visual-height > 0px ? root.visual-height
+            : (root.compact ? Theme.control-height-sm : Theme.control-height);
+
+    height: root.row-height > 0px ? root.row-height : root.button-height;
     // Hug the label, with a floor for icon-only and short labels. Without an
     // explicit width a button is a stretch candidate in any enclosing layout,
     // which is how "换一批" ended up as a 600px white slab across the home hero
     // with its label floating in the middle.
-    width: max(root.compact ? 44px : 64px, content.preferred-width);
-    border-radius: Theme.radius-sm;
-    border-width: (root.kind == ButtonKind.Secondary) ? 1px : 0px;
-    border-color: ta.has-hover ? Theme.border-strong : Theme.border;
-    background: (root.kind == ButtonKind.Primary)
-        ? (ta.pressed ? Theme.accent-pressed : (ta.has-hover ? Theme.accent-hover : Theme.accent))
-        : (root.kind == ButtonKind.Danger)
-            ? (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.danger-subtle : transparent))
-            : (root.kind == ButtonKind.Subtle)
-                ? (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent))
-                : (ta.pressed ? Theme.layer-sunken : (ta.has-hover ? Theme.layer-alt : Theme.layer));
-    opacity: root.enabled ? 1.0 : 0.42;
+    width: max(root.compact ? 40px : 64px, content.preferred-width);
+    background: transparent;
 
-    // Fluent draws the focus ring *outside* the fill; a 2px inner stroke is the
-    // closest honest approximation without an outset ring.
-    if key_focus.has-focus : Rectangle {
+    fill := Rectangle {
+        y: (root.height - root.button-height) / 2;
+        height: root.button-height;
         border-radius: Theme.radius-sm;
-        border-width: 2px;
-        border-color: Theme.focus-ring;
-        background: transparent;
-    }
+        border-width: (root.kind == ButtonKind.Secondary) ? 1px : 0px;
+        border-color: ta.has-hover ? Theme.border-strong : Theme.border;
+        background: (root.kind == ButtonKind.Primary)
+            ? (ta.pressed ? Theme.accent-pressed : (ta.has-hover ? Theme.accent-hover : Theme.accent))
+            : (root.kind == ButtonKind.Danger)
+                ? (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.danger-subtle : transparent))
+                : (root.kind == ButtonKind.Subtle)
+                    ? (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent))
+                    : (ta.pressed ? Theme.layer-sunken : (ta.has-hover ? Theme.layer-alt : Theme.layer));
 
-    content := HorizontalLayout {
-        padding-left: root.compact ? Theme.space-2 : Theme.space-3;
-        padding-right: root.compact ? Theme.space-2 : Theme.space-3;
-        spacing: Theme.space-2;
-        alignment: center;
+        content := HorizontalLayout {
+            padding-left: root.compact ? Theme.space-2 : Theme.space-3;
+            padding-right: root.compact ? Theme.space-2 : Theme.space-3;
+            spacing: Theme.space-2;
+            alignment: center;
 
-        if root.icon != "" : FluentGlyph {
-            name: root.icon;
-            width: Theme.icon-size;
-            height: Theme.icon-size;
-            tint: (root.kind == ButtonKind.Primary) ? Theme.on-accent
-                : (root.kind == ButtonKind.Danger) ? Theme.danger
-                : Theme.text;
+            if root.icon != "" : IconSlot {
+                name: root.icon;
+                slot: Theme.icon-size;
+                tint: (root.kind == ButtonKind.Primary) ? Theme.on-accent
+                    : (root.kind == ButtonKind.Danger) ? Theme.danger
+                    : Theme.text;
+                enabled: root.enabled;
+            }
+
+            Text {
+                text: root.label;
+                color: (root.kind == ButtonKind.Primary) ? Theme.on-accent
+                    : (root.kind == ButtonKind.Danger) ? Theme.danger
+                    : Theme.text;
+                font-size: Theme.font-body;
+                font-weight: Type.medium;
+                vertical-alignment: center;
+                overflow: elide;
+            }
         }
 
-        Text {
-            text: root.label;
-            color: (root.kind == ButtonKind.Primary) ? Theme.on-accent
-                : (root.kind == ButtonKind.Danger) ? Theme.danger
-                : Theme.text;
-            font-size: Theme.font-body;
-            font-weight: Type.medium;
-            vertical-alignment: center;
-            overflow: elide;
+        if key_focus.has-focus : Rectangle {
+            border-radius: Theme.radius-sm;
+            border-width: 2px;
+            border-color: Theme.focus-ring;
+            background: transparent;
         }
     }
+
+    opacity: root.enabled ? 1.0 : 0.42;
 
     key_focus := FocusScope {
         key-pressed(e) => {
@@ -142,27 +244,43 @@ export component AppButton inherits Rectangle {
 }
 
 /// Square icon-only button, used in the top bar and the image viewer.
+///
+/// The glyph is centred against `size` (the visual square), not against the
+/// element, so passing `row-height` lets the button fill a 48px command bar while
+/// its hover wash and its glyph stay a 32px square in the middle of it.
 export component IconButton inherits Rectangle {
     in property <string> icon: "";
     in property <string> tip: "";
     in property <bool> active: false;
     in property <bool> enabled: true;
     in property <length> size: Theme.control-height;
+    in property <length> row-height: 0px;
     in property <color> tint: Theme.text;
+    in property <TipPlacement> tip-placement: TipPlacement.Above;
     callback clicked();
 
     width: root.size;
-    height: root.size;
-    border-radius: Theme.radius-sm;
-    background: ta.pressed ? Theme.pressed
-        : ta.has-hover ? Theme.hover
-        : (root.active ? Theme.accent-subtle : transparent);
+    height: root.row-height > 0px ? root.row-height : root.size;
+    background: transparent;
+
+    wash := Rectangle {
+        y: (root.height - root.size) / 2;
+        width: root.size;
+        height: root.size;
+        border-radius: Theme.radius-sm;
+        background: ta.pressed ? Theme.pressed
+            : ta.has-hover ? Theme.hover
+            : (root.active ? Theme.accent-subtle : transparent);
+    }
+
     opacity: root.enabled ? 1.0 : 0.4;
 
     FluentGlyph {
         name: root.icon;
         width: Theme.icon-size;
         height: Theme.icon-size;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
         tint: root.active ? Theme.accent : root.tint;
     }
 
@@ -175,8 +293,11 @@ export component IconButton inherits Rectangle {
     HoverTip {
         show: ta.has-hover && root.tip != "";
         tip: root.tip;
+        placement: root.tip-placement;
         x: (root.width - self.width) / 2;
-        y: -self.height - 6px;
+        y: root.tip-placement == TipPlacement.Below
+            ? root.height + 6px
+            : -self.height - 6px;
     }
 }
 
@@ -185,6 +306,12 @@ export component IconButton inherits Rectangle {
 // ======================================================================
 
 /// Fluent text field with a leading glyph and a clear affordance.
+///
+/// Child order is hit-test order in Slint (the last declared element is on top),
+/// so the layout here is deliberate: the padding touch target first, the input
+/// above it, the clear button last. The previous version put a full-size
+/// `TouchArea` *after* the layout, which covered the clear button and made it
+/// unclickable — the click only ever re-focused the field.
 export component TextField inherits Rectangle {
     in property <string> placeholder: "";
     in property <string> leading-icon: "";
@@ -203,9 +330,15 @@ export component TextField inherits Rectangle {
     border-radius: Theme.radius-sm;
     border-width: 1px;
     border-color: input.has-focus ? Theme.accent
-        : (ta.has-hover ? Theme.border-strong : Theme.border);
+        : (hover.has-hover ? Theme.border-strong : Theme.border);
     background: input.has-focus ? Theme.layer : Theme.layer-alt;
     opacity: root.enabled ? 1.0 : 0.5;
+
+    out property <length> leading-extent:
+        root.leading-icon == "" ? 0px : Theme.icon-size + Theme.space-2;
+    out property <length> trailing-extent:
+        (root.text != "" && root.enabled) ? 22px + Theme.space-1 * 2 : Theme.space-2;
+    out property <length> text-x: Theme.space-2 + root.leading-extent;
 
     // Fluent accents the focused field with a 2px bottom rule.
     if input.has-focus : Rectangle {
@@ -215,47 +348,44 @@ export component TextField inherits Rectangle {
         border-radius: Theme.radius-sm;
     }
 
-    HorizontalLayout {
-        padding-left: Theme.space-2;
-        padding-right: Theme.space-1;
-        spacing: Theme.space-2;
-        alignment: start;
+    // Padding hit target, painted *under* everything else.
+    hover := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.text;
+        clicked => { input.focus(); }
+    }
 
-        if root.leading-icon != "" : FluentGlyph {
-            name: root.leading-icon;
-            width: Theme.icon-size;
-            height: Theme.icon-size;
-            tint: input.has-focus ? Theme.accent : Theme.text-secondary;
-        }
+    if root.leading-icon != "" : FluentGlyph {
+        name: root.leading-icon;
+        width: Theme.icon-size;
+        height: Theme.icon-size;
+        x: Theme.space-2;
+        y: (root.height - self.height) / 2;
+        tint: input.has-focus ? Theme.accent : Theme.text-secondary;
+    }
 
-        input := TextInput {
-            enabled: root.enabled;
-            color: Theme.text;
-            font-size: Theme.font-body;
-            vertical-alignment: center;
-            single-line: true;
-            edited => { root.edited(root.text); }
-            accepted => { root.accepted(root.text); }
-        }
-
-        if root.text != "" && root.enabled : IconButton {
-            icon: "dismiss";
-            tint: Theme.text-secondary;
-            size: 22px;
-            clicked => {
-                root.text = "";
-                root.cleared();
-            }
-        }
+    input := TextInput {
+        x: root.text-x;
+        y: 0px;
+        width: max(0px, root.width - root.text-x - root.trailing-extent);
+        height: root.height - 4px;
+        enabled: root.enabled;
+        color: Theme.text;
+        font-size: Theme.font-body;
+        vertical-alignment: center;
+        single-line: true;
+        edited => { root.edited(root.text); }
+        accepted => { root.accepted(root.text); }
     }
 
     // TextInput has no placeholder of its own, so it is drawn underneath with an
     // explicit width: a bare Text would report the full placeholder width as a
     // minimum for the whole field.
     if root.text == "" : Text {
-        x: Theme.space-2 + (root.leading-icon != "" ? Theme.icon-size + Theme.space-2 : 0px);
-        y: (root.height - self.height) / 2;
-        width: max(0px, root.width - self.x - 28px);
+        x: root.text-x;
+        y: 0px;
+        width: max(0px, root.width - root.text-x - root.trailing-extent);
+        height: root.height - 4px;
         overflow: elide;
         text: root.placeholder;
         color: Theme.text-tertiary;
@@ -263,9 +393,17 @@ export component TextField inherits Rectangle {
         vertical-alignment: center;
     }
 
-    ta := TouchArea {
-        mouse-cursor: MouseCursor.text;
-        clicked => { input.focus(); }
+    if root.text != "" && root.enabled : IconButton {
+        icon: "dismiss";
+        tint: Theme.text-secondary;
+        size: 22px;
+        x: root.width - self.width - Theme.space-1;
+        y: (root.height - self.height) / 2;
+        clicked => {
+            root.text = "";
+            root.cleared();
+            input.focus();
+        }
     }
 }
 
@@ -305,6 +443,65 @@ export component ToggleSwitch inherits Rectangle {
     }
 }
 
+/// Segmented selector, the WinUI "radio buttons" idiom rendered as a pill group.
+///
+/// Used for the three-way theme choice (跟随系统 / 浅色 / 深色): a boolean toggle
+/// cannot express three states, and a `ComboBox` would hide two of them behind a
+/// click. Generic over its labels so the same control serves sort order and
+/// ranking period.
+export component SegmentedControl inherits Rectangle {
+    in property <[string]> items: [];
+    in-out property <int> current: 0;
+    in property <bool> enabled: true;
+    callback selected(int);
+
+    height: Theme.control-height;
+    width: row.preferred-width;
+    border-radius: Theme.radius-sm;
+    background: Theme.layer-alt;
+    border-width: 1px;
+    border-color: Theme.border;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    row := HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+        alignment: start;
+
+        for item[i] in root.items : Rectangle {
+            border-radius: Theme.radius-sm;
+            background: i == root.current
+                ? Theme.layer
+                : (hit.has-hover ? Theme.hover : transparent);
+            border-width: i == root.current ? 1px : 0px;
+            border-color: Theme.border-strong;
+
+            HorizontalLayout {
+                padding-left: Theme.space-3;
+                padding-right: Theme.space-3;
+                alignment: center;
+                Text {
+                    text: item;
+                    color: i == root.current ? Theme.text : Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    font-weight: i == root.current ? Type.semibold : Type.regular;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            hit := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: pointer;
+                clicked => {
+                    root.current = i;
+                    root.selected(i);
+                }
+            }
+        }
+    }
+}
+
 /// Small count/type badge. Declared before the elements that embed it: Slint
 /// resolves component names in source order, so a type cannot be used above its
 /// own definition.
@@ -314,11 +511,14 @@ export component Badge inherits Rectangle {
     in property <color> ink: Theme.accent;
 
     height: 18px;
-    min-width: 18px;
+    // Explicit width rather than the default "fill the parent": a badge is also
+    // used absolutely positioned (rail counters, toolbar indicators), where the
+    // default width would stretch it across the whole bar.
+    width: max(18px, row.preferred-width);
     border-radius: Theme.radius-sm;
     background: root.fill;
 
-    HorizontalLayout {
+    row := HorizontalLayout {
         padding-left: 6px;
         padding-right: 6px;
         alignment: center;
@@ -336,8 +536,14 @@ export component Badge inherits Rectangle {
 // Navigation
 // ======================================================================
 
-/// One entry in the NavigationView pane. Selected state = accent wash + a 3px
-/// accent bar on the leading edge, exactly as WinUI NavigationView draws it.
+/// One entry in the NavigationView pane.
+///
+/// Selected state = accent wash + a 3px accent bar on the leading edge, exactly
+/// as WinUI NavigationView draws it. The internals are positioned absolutely and
+/// derived from the item's own height: a horizontal layout here top-aligns every
+/// fixed-size child, which is what put the rail's glyphs ~10 logical px above
+/// their labels. Absolute geometry makes the centre line exact and DPI-proof, and
+/// it is why the glyphs stay put on hover/press/select.
 export component NavItem inherits Rectangle {
     in property <string> icon: "";
     in property <string> label: "";
@@ -346,47 +552,49 @@ export component NavItem inherits Rectangle {
     in property <int> badge: 0;
     callback clicked();
 
-    height: 38px;
+    out property <length> inset: root.compact ? 0px : Theme.space-3;
+
+    height: Theme.nav-item-height;
     border-radius: Theme.radius-sm;
     background: root.selected
         ? Theme.accent-subtle
-        : (ta.pressed ? Theme.pressed : (ta.has_hover ? Theme.hover : transparent));
+        : (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.hover : transparent));
 
     if root.selected : Rectangle {
         x: 0px;
-        y: (parent.height - 16px) / 2;
+        y: (root.height - 16px) / 2;
         width: 3px;
         height: 16px;
         border-radius: Theme.radius-pill;
         background: Theme.accent;
     }
 
-    HorizontalLayout {
-        padding-left: root.compact ? 0px : Theme.space-3 + 4px;
-        padding-right: root.compact ? 0px : Theme.space-2;
-        spacing: Theme.space-3;
-        alignment: root.compact ? center : start;
+    FluentGlyph {
+        name: root.icon;
+        width: Theme.icon-size;
+        height: Theme.icon-size;
+        x: root.compact ? (root.width - self.width) / 2 : root.inset;
+        y: (root.height - self.height) / 2;
+        tint: root.selected ? Theme.accent : Theme.text-secondary;
+    }
 
-        FluentGlyph {
-            name: root.icon;
-            width: Theme.icon-size-lg;
-            height: Theme.icon-size-lg;
-            tint: root.selected ? Theme.accent : Theme.text-secondary;
-        }
+    if !root.compact : Text {
+        x: root.inset + Theme.icon-size + Theme.space-3;
+        y: 0px;
+        width: max(0px, root.width - self.x - (root.badge > 0 ? 44px : Theme.space-2));
+        height: root.height;
+        text: root.label;
+        color: root.selected ? Theme.accent : Theme.text;
+        font-size: Theme.font-body;
+        font-weight: root.selected ? Type.semibold : Type.regular;
+        vertical-alignment: center;
+        overflow: elide;
+    }
 
-        if !root.compact : Text {
-            text: root.label;
-            color: root.selected ? Theme.accent : Theme.text;
-            font-size: Theme.font-body;
-            font-weight: root.selected ? Type.semibold : Type.regular;
-            vertical-alignment: center;
-            overflow: elide;
-            horizontal-stretch: 1;
-        }
-
-        if !root.compact && root.badge > 0 : Badge {
-            label: root.badge > 99 ? "99+" : root.badge;
-        }
+    if !root.compact && root.badge > 0 : Badge {
+        label: root.badge > 99 ? "99+" : root.badge;
+        x: root.width - self.width - Theme.space-2;
+        y: (root.height - self.height) / 2;
     }
 
     ta := TouchArea {
@@ -395,9 +603,9 @@ export component NavItem inherits Rectangle {
     }
 
     HoverTip {
-        show: root.compact && ta.has-hover;
+        show: root.compact && ta.has-hover && root.label != "";
         tip: root.label;
-        x: root.width + 8px;
+        x: root.width + Theme.space-2;
         y: (root.height - self.height) / 2;
     }
 }
@@ -528,13 +736,14 @@ export component InfoBar inherits Rectangle {
         padding-bottom: Theme.space-2;
         spacing: Theme.space-2;
 
-        FluentGlyph {
+        // `height: 100%` inside `IconSlot` puts the glyph on the bar's centre
+        // line even when the message wraps to two lines.
+        IconSlot {
             name: (root.kind == InfoKind.Error) ? "warning"
                 : (root.kind == InfoKind.Success) ? "check"
                 : (root.kind == InfoKind.Warning) ? "warning"
                 : "info";
-            width: Theme.icon-size;
-            height: Theme.icon-size;
+            slot: Theme.icon-size;
             tint: (root.kind == InfoKind.Error) ? Theme.danger
                 : (root.kind == InfoKind.Warning) ? Theme.warning
                 : (root.kind == InfoKind.Success) ? Theme.success
@@ -612,6 +821,10 @@ export component StateView inherits Rectangle {
     in property <string> title: "";
     in property <string> description: "";
     in property <string> action-label: "";
+    /// Overrides the glyph derived from `kind`. A page must be able to say
+    /// "nothing downloaded yet" with a download glyph instead of reusing the
+    /// generic "image failed" one, which is what an empty-state here used to show.
+    in property <string> glyph: "";
     callback retry();
     callback action();
 
@@ -630,13 +843,13 @@ export component StateView inherits Rectangle {
         HorizontalLayout {
             width: 100%;
             Rectangle { horizontal-stretch: 1; }
-            FluentGlyph {
-                name: (root.kind == StateKind.Loading) ? "refresh"
+            IconPresenter {
+                name: root.glyph != "" ? root.glyph
+                    : (root.kind == StateKind.Loading) ? "refresh"
                     : (root.kind == StateKind.Error) ? "warning"
                     : (root.kind == StateKind.Locked) ? "key"
                     : "image-off";
-                width: 28px;
-                height: 28px;
+                glyph-size: 28px;
                 tint: root.kind == StateKind.Error ? Theme.danger : Theme.text-tertiary;
             }
             Rectangle { horizontal-stretch: 1; }
@@ -781,15 +994,19 @@ component BookmarkPill inherits Rectangle {
     in property <bool> marked: false;
     callback clicked();
 
-    width: 26px;
-    height: 26px;
+    width: 28px;
+    height: 28px;
     border-radius: Theme.radius-pill;
     background: ta.has-hover ? Theme.layer : #d9ffffff;
+    border-width: 1px;
+    border-color: ta.has-hover ? Theme.border-strong : transparent;
 
     FluentGlyph {
         name: "follow";
-        width: 13px;
-        height: 13px;
+        width: 14px;
+        height: 14px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
         // Filled-in is impossible with a stroke-only path set, so "marked" is
         // signalled by colour alone: no layout shift, no glyph swap.
         tint: root.marked ? Theme.accent : #2b2b2b;
@@ -813,6 +1030,11 @@ component BookmarkPill inherits Rectangle {
 /// Height is *exactly* `width * clamped-aspect + caption`, which is the same
 /// formula `src/layout.rs` uses to balance the masonry columns. Keeping the two
 /// in sync is what makes the columns end ragged-but-even instead of jumping.
+///
+/// Hit-testing note: Slint hit-tests in reverse declaration order, so the card's
+/// open-on-click `TouchArea` is declared **first** here. When it was declared last
+/// it covered the bookmark pill, and the pill was unclickable — every click on the
+/// heart opened the artwork instead.
 export component IllustCard inherits Rectangle {
     in property <IllustItem> item;
     in property <bool> show-author: true;
@@ -832,10 +1054,13 @@ export component IllustCard inherits Rectangle {
     width: root.column-width;
     height: root.cover-height + Theme.card-caption-height;
 
-    // One layout, no absolute siblings that participate in it: mixing a layout
-    // child with absolutely positioned siblings is what silently shifted the
-    // cover ~24px below the card's top edge (the rank/type badges, positioned at
-    // y: 6, ended up straddling the card border instead of sitting on the image).
+    // Open-on-click, underneath every interactive child.
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open(); }
+        double-clicked => { root.open(); }
+    }
+
     VerticalLayout {
         spacing: 0px;
 
@@ -857,11 +1082,15 @@ export component IllustCard inherits Rectangle {
                 background: Theme.layer-alt;
                 VerticalLayout {
                     alignment: center;
-                    FluentGlyph {
-                        name: "image-off";
-                        width: Theme.icon-size-lg;
-                        height: Theme.icon-size-lg;
-                        tint: Theme.text-disabled;
+                    HorizontalLayout {
+                        width: 100%;
+                        Rectangle { horizontal-stretch: 1; }
+                        IconPresenter {
+                            name: "image-off";
+                            glyph-size: Theme.icon-size-lg;
+                            tint: Theme.text-disabled;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                 }
             }
@@ -870,11 +1099,15 @@ export component IllustCard inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     spacing: Theme.space-1;
-                    FluentGlyph {
-                        name: "warning";
-                        width: Theme.icon-size-lg;
-                        height: Theme.icon-size-lg;
-                        tint: Theme.text-tertiary;
+                    HorizontalLayout {
+                        width: 100%;
+                        Rectangle { horizontal-stretch: 1; }
+                        IconPresenter {
+                            name: "warning";
+                            glyph-size: Theme.icon-size-lg;
+                            tint: Theme.text-tertiary;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                     Text {
                         text: "加载失败";
@@ -885,10 +1118,17 @@ export component IllustCard inherits Rectangle {
                 }
             }
 
+            // Hover: a soft scrim inside the cover. It cannot reflow anything and
+            // it is drawn under the pill and the badges.
+            Rectangle {
+                background: ta.has-hover ? #12000000 : transparent;
+                border-radius: Theme.radius-lg;
+            }
+
             // Ranking position, top-left, only where it means something.
             if root.item.rank > 0 : Rectangle {
-                x: 6px;
-                y: 6px;
+                x: Theme.space-2;
+                y: Theme.space-2;
                 width: rank-label.width + 10px;
                 height: 20px;
                 border-radius: Theme.radius-sm;
@@ -896,18 +1136,20 @@ export component IllustCard inherits Rectangle {
 
                 rank-label := Text {
                     x: 5px;
-                    y: 2px;
+                    y: 0px;
+                    height: parent.height;
                     text: "#" + root.item.rank;
                     color: #ffffff;
                     font-size: Theme.font-caption;
                     font-weight: Type.semibold;
+                    vertical-alignment: center;
                 }
             }
 
             // Type badge, top-right: only for multi-page, manga and ugoira.
             if root.item.page-count > 1 || root.item.kind != 0 : Rectangle {
-                x: parent.width - self.width - 6px;
-                y: 6px;
+                x: parent.width - self.width - Theme.space-2;
+                y: Theme.space-2;
                 width: type-label.width + 10px;
                 height: 20px;
                 border-radius: Theme.radius-sm;
@@ -915,21 +1157,21 @@ export component IllustCard inherits Rectangle {
 
                 type-label := Text {
                     x: 5px;
-                    y: 2px;
+                    y: 0px;
+                    height: parent.height;
                     text: (root.item.kind == 1) ? "漫画"
                         : (root.item.kind == 2) ? "动图"
                         : ("共" + root.item.page-count + "张");
                     color: #ffffff;
                     font-size: Theme.font-caption;
                     font-weight: Type.medium;
+                    vertical-alignment: center;
                 }
             }
 
-            // Bookmark affordance, bottom-right of the cover. Inside the cover, so
-            // it is hit-tested above the open() TouchArea and never reflows.
             BookmarkPill {
-                x: parent.width - self.width - 8px;
-                y: parent.height - self.height - 8px;
+                x: parent.width - self.width - Theme.space-2;
+                y: parent.height - self.height - Theme.space-2;
                 marked: root.item.bookmarked;
                 clicked => { root.toggle-bookmark(); }
             }
@@ -942,9 +1184,9 @@ export component IllustCard inherits Rectangle {
 
             Text {
                 x: 0px;
-                y: 5px;
+                y: 4px;
                 width: parent.width;
-                height: 17px;
+                height: 18px;
                 text: root.item.title;
                 color: Theme.text;
                 font-size: Theme.font-small;
@@ -954,9 +1196,9 @@ export component IllustCard inherits Rectangle {
             }
             if root.show-author : Text {
                 x: 0px;
-                y: 23px;
+                y: 22px;
                 width: parent.width;
-                height: 15px;
+                height: 16px;
                 text: root.item.author;
                 color: Theme.text-tertiary;
                 font-size: Theme.font-caption;
@@ -964,20 +1206,6 @@ export component IllustCard inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-    }
-
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.open(); }
-        double-clicked => { root.open(); }
-    }
-
-    HoverTip {
-        show: ta.has-hover && root.item.title != "";
-        tip: root.item.title;
-        x: 0px;
-        y: root.height + 4px;
-        max-tip-width: Math.max(120px, root.width);
     }
 }
 
@@ -1012,10 +1240,10 @@ export component SettingsCard inherits Rectangle {
             spacing: Theme.space-3;
             height: max(24px, title-block.preferred-height);
 
-            if root.icon != "" : FluentGlyph {
+            if root.icon != "" : IconSlot {
                 name: root.icon;
-                width: Theme.icon-size-lg;
-                height: Theme.icon-size-lg;
+                slot: Theme.icon-size-lg;
+                glyph-size: Theme.icon-size-lg;
                 tint: Theme.accent;
             }
 
