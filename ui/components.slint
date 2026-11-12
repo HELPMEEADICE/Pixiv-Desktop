@@ -996,7 +996,7 @@ component BookmarkPill inherits Rectangle {
     width: 28px;
     height: 28px;
     border-radius: Theme.radius-pill;
-    background: ta.has-hover ? Theme.layer : #d9ffffff;
+    background: ta.has-hover ? Theme.layer : #ffffffd9;
     border-width: 1px;
     border-color: ta.has-hover ? Theme.border-strong : transparent;
 
@@ -1119,7 +1119,7 @@ export component IllustCard inherits Rectangle {
             // Hover: a soft scrim inside the cover. It cannot reflow anything and
             // it is drawn under the pill and the badges.
             Rectangle {
-                background: ta.has-hover ? #12000000 : transparent;
+                background: ta.has-hover ? #00000012 : transparent;
                 border-radius: Theme.radius-lg;
             }
 
@@ -1130,7 +1130,7 @@ export component IllustCard inherits Rectangle {
                 width: rank-label.width + 10px;
                 height: 20px;
                 border-radius: Theme.radius-sm;
-                background: root.item.rank <= 3 ? Theme.accent-fill : #a6000000;
+                background: root.item.rank <= 3 ? Theme.accent-fill : #000000a6;
 
                 rank-label := Text {
                     x: 5px;
@@ -1151,7 +1151,7 @@ export component IllustCard inherits Rectangle {
                 width: type-label.width + 10px;
                 height: 20px;
                 border-radius: Theme.radius-sm;
-                background: #a6000000;
+                background: #000000a6;
 
                 type-label := Text {
                     x: 5px;

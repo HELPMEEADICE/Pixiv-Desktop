@@ -72,7 +72,7 @@ export global Theme {
     out property <color> layer-sunken: dark ? #1a1a1a : #ececee;
     out property <color> chrome: dark ? #272727 : #f3f3f3;
     out property <color> flyout: dark ? #2f2f2f : #fbfbfb;
-    out property <color> scrim: dark ? #b3050505 : #66000000;
+    out property <color> scrim: dark ? #050505b3 : #00000066;
 
     // ---- strokes -------------------------------------------------------
     // Fluent leans on 1px strokes instead of heavy borders or drop shadows.
@@ -98,8 +98,8 @@ export global Theme {
     out property <color> warning-subtle: dark ? #3d2f10 : #fff4ce;
 
     // Transparent overlays for hover/press so nothing ever resizes on hover.
-    out property <color> hover: dark ? #14ffffff : #0a000000;
-    out property <color> pressed: dark ? #1fffffff : #14000000;
+    out property <color> hover: dark ? #ffffff14 : #0000000a;
+    out property <color> pressed: dark ? #ffffff1f : #00000014;
     out property <color> focus-ring: dark ? #7ac0f0 : #0a84d8;
 
     // ---- inverted surfaces ---------------------------------------------
@@ -112,13 +112,13 @@ export global Theme {
     /// Backdrop of the image viewer, behind the artwork on both axes.
     out property <color> viewer-surface: dark ? #101012 : #e8eaed;
     /// Floating control bar over the artwork: translucent so the image reads through.
-    out property <color> viewer-chrome: dark ? #dd1c1c20 : #e8ffffff;
+    out property <color> viewer-chrome: dark ? #1c1c20dd : #ffffffe8;
     // ---- elevation -----------------------------------------------------
     // Slint has no blur, so elevation is emulated with a low-alpha offset
     // rectangle behind flyouts (or `drop-shadow-*`, which blurs on the GPU
     // renderer only). Two steps only: cards stay flat.
-    out property <color> shadow-1: dark ? #4d000000 : #0f000000;
-    out property <color> shadow-2: dark ? #73000000 : #24000000;
+    out property <color> shadow-1: dark ? #0000004d : #0000000f;
+    out property <color> shadow-2: dark ? #00000073 : #00000024;
 
     // ---- fixed geometry ------------------------------------------------
     out property <length> topbar-height: 48px;

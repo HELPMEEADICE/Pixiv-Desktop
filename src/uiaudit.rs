@@ -173,9 +173,9 @@ mod tests {
         // Each of these is an overlay drawn over artwork, where a themed colour
         // would be wrong: #ffffff on a dark scrim, #a6000000 for the scrim itself,
         // #d9ffffff for the floating bookmark pill, #2b2b2b for its glyph.
-        const ARTWORK_OVERLAY: [&str; 4] = ["#ffffff", "#a6000000", "#d9ffffff", "#2b2b2b"];
+        const ARTWORK_OVERLAY: [&str; 4] = ["#ffffff", "#000000a6", "#ffffffd9", "#2b2b2b"];
         // Hover/press scrim drawn inside a cover.
-        const COVER_SCRIM: [&str; 1] = ["#12000000"];
+        const COVER_SCRIM: [&str; 1] = ["#00000012"];
 
         let mut offenders = Vec::new();
         for path in page_files() {
@@ -371,12 +371,14 @@ mod tests {
         let (r, g, b) = match digits.len() {
             3 => (digits[0] * 17, digits[1] * 17, digits[2] * 17),
             6 | 8 => {
-                // 8 digits carry a leading alpha, which contrast ignores.
-                let base = if digits.len() == 8 { 2 } else { 0 };
+                // 8 digits are #RRGGBBAA in Slint: the alpha is *trailing* and
+                // contrast ignores it. (The first version of this helper assumed a
+                // leading alpha - the same mistake the theme itself made; see
+                // `translucent_colours_use_the_rrggbbaa_order`.)
                 (
-                    digits[base] * 16 + digits[base + 1],
-                    digits[base + 2] * 16 + digits[base + 3],
-                    digits[base + 4] * 16 + digits[base + 5],
+                    digits[0] * 16 + digits[1],
+                    digits[2] * 16 + digits[3],
+                    digits[4] * 16 + digits[5],
                 )
             }
             _ => return None,
@@ -486,6 +488,51 @@ mod tests {
             offenders.join("\n")
         );
     }
+    /// Rule: an 8-digit colour literal is `#RRGGBBAA`, and its alpha must be usable.
+    ///
+    /// Slint parses 8-digit hex as `#RRGGBBAA` (`i-slint-common::color_parsing`,
+    /// asserted by its own test as `#01234567 -> 0x67012345`). This file used to
+    /// write them as `#AARRGGBB`, which put the alpha byte at the front and the red
+    /// channel in the alpha slot. Every translucent colour in the app was therefore
+    /// wrong: light-mode `hover` was `#0a000000` = alpha 0 (invisible), dark-mode
+    /// `hover` was `#14ffffff` = alpha 255 of bright cyan (a colour no theme picks),
+    /// and both `shadow-*` tokens were fully transparent.
+    ///
+    /// The check is order-independent: it rejects an 8-digit literal whose final
+    /// byte is 0 (invisible - almost always the old mistake) and one that is a
+    /// near-opaque saturated hue while claiming to be a low-alpha overlay.
+    #[test]
+    fn translucent_colours_use_the_rrggbbaa_order() {
+        let mut offenders = Vec::new();
+        for path in page_files() {
+            let source = read(&path);
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                for (at, _) in code.match_indices('#') {
+                    let rest = &code[at..];
+                    let len = rest
+                        .char_indices()
+                        .take_while(|(_, c)| c.is_ascii_hexdigit() || *c == '#')
+                        .count();
+                    if len != 9 {
+                        continue;
+                    }
+                    let literal = &rest[..len];
+                    let alpha = u8::from_str_radix(&literal[7..9], 16).unwrap_or(255);
+                    if alpha == 0 {
+                        offenders.push(format!("{name}:{}: {literal} has alpha 0", index + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "8-digit colours are #RRGGBBAA; a zero alpha byte means the colour is invisible:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Collect the double-quoted strings at the top level of an expression.
     ///
     /// Stops at the terminating `;` so a ternary's branches are all included but
