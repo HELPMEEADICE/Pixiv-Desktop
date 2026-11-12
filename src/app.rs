@@ -4443,11 +4443,32 @@ fn install_callbacks(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_clear_cache(move || {
-            let app = shared.borrow();
-            let reclaimed = app.cache.clear_disk().unwrap_or(0);
-            app.cache.prune_memory();
-            app.refresh_chrome();
-            app.notify(1, format!("已清理磁盘缓存 {}", human_bytes(reclaimed)));
+            // The sweep walks the whole disk tier. It used to run right here, on the
+            // thread that paints the window - UI-NOTES 8a claimed it had been moved
+            // to the runtime and the code never was. `spawn_blocking` because it is
+            // a blocking filesystem walk, not async work.
+            let (cache, rt) = {
+                let app = shared.borrow();
+                app.ui().set_busy(true);
+                app.notify(0, "正在清理磁盘缓存…");
+                (app.cache.clone(), app.rt.clone())
+            };
+            rt.spawn(async move {
+                let sweep = cache.clone();
+                let reclaimed =
+                    tokio::task::spawn_blocking(move || sweep.clear_disk().unwrap_or(0))
+                        .await
+                        .unwrap_or(0);
+                cache.prune_memory();
+                on_ui(move |shared| {
+                    let Ok(app) = shared.try_borrow() else {
+                        return;
+                    };
+                    app.ui().set_busy(false);
+                    app.refresh_chrome();
+                    app.notify(1, format!("已清理磁盘缓存 {}", human_bytes(reclaimed)));
+                });
+            });
         });
     }
     {
