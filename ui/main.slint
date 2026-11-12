@@ -26,7 +26,9 @@
 // bindings for what the root file *exports*, and Rust has to reach the `Theme`
 // global (`ui.global::<Theme>()`) to push the persisted theme choice into it.
 import { Theme, Type, ThemeMode } from "theme.slint";
+import { Tip, TipSide } from "tip.slint";
 export { Theme, Type, ThemeMode } from "theme.slint";
+export { Tip, TipSide } from "tip.slint";
 import {
     IconButton, TextField, NavItem, Divider, HoverTip, IllustItem, IconSlot, TipPlacement,
     Avatar, RecommendTagItem, RecommendUserItem, SuggestionItem, ProfileStatItem,
@@ -123,6 +125,9 @@ export component AppWindow inherits Window {
     /// pages never have to read the window width from inside their own layout.
     in property <length> content-width: 880px;
     in property <bool> demo-mode: false;
+    /// Debug-only anchor for one tooltip, set from `PIXIV_DESKTOP_TIP`. Hover
+    /// cannot be synthesised here, so this is how the overlay is measured.
+    in property <bool> debug-tip: false;
     in property <string> status-text: "";
     in property <string> session-user: "";
     in property <bool> authenticated: false;
@@ -453,7 +458,7 @@ export component AppWindow inherits Window {
 
                     Rectangle { width: Theme.space-1; }
 
-                    IconButton {
+                    back-button := IconButton {
                         icon: "back";
                         tip: "后退 (Alt+←)";
                         enabled: root.can-go-back;
@@ -531,12 +536,24 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                        HoverTip {
-                            show: avatar-area.has-hover;
-                            tip: root.authenticated ? "我的主页（登录管理在设置里）" : "未登录，点击前往设置";
-                            placement: TipPlacement.Below;
-                            x: (parent.width - self.width) / 2;
-                            y: Theme.topbar-height + 6px;
+                        // Published, not drawn here: `y: Theme.topbar-height + 6px`
+                        // put this bubble under the page, which is painted after
+                        // the command bar and owns an opaque background.
+                        property <bool> hovering: avatar-area.has-hover;
+                        changed hovering => {
+                            if (hovering) {
+                                Tip.text = root.authenticated
+                                    ? "我的主页（登录管理在设置里）"
+                                    : "未登录，点击前往设置";
+                                Tip.side = TipSide.Below;
+                                Tip.anchor-x = avatar-area.absolute-position.x
+                                    + avatar-area.width / 2;
+                                Tip.anchor-y = avatar-area.absolute-position.y
+                                    + avatar-area.height;
+                                Tip.visible = true;
+                            } else {
+                                Tip.visible = false;
+                            }
                         }
                     }
                 }
@@ -964,6 +981,36 @@ export component AppWindow inherits Window {
                 }
             }
         }
+
+    // ================= tooltips =================
+    // One bubble for the whole window, declared after the shell so nothing a
+    // page paints can cover it and no ancestor `clip` can eat it. Controls
+    // publish text plus an anchor to the `Tip` global; this is the only
+    // `HoverTip` instance in the app (`uiaudit` fails the build otherwise).
+    //
+    // It sits before the suggestion panel on purpose: a dropdown the user just
+    // opened outranks a 24px hint about the control behind it.
+    // `changed` only accepts a bare property of the enclosing element, so the
+    // "drop the bubble when the page changes" reset cannot live here; `App::go`
+    // clears it on the Rust side, which also covers a control that disappears
+    // while it is hovered (a cancelled download row, a reloaded feed).
+
+    tip-host := HoverTip {
+        // `debug-tip` is a binding, not a write to the global: the anchor has to
+        // come from a real control, and `absolute-position` is only meaningful
+        // once layout has run, which a binding survives and an `init` does not.
+        show: (Tip.visible && Tip.text != "") || root.debug-tip;
+        tip: root.debug-tip ? "后退 (Alt+←)" : Tip.text;
+        side: root.debug-tip ? TipSide.Below : Tip.side;
+        anchor-x: root.debug-tip
+            ? back-button.absolute-position.x + back-button.width / 2
+            : Tip.anchor-x;
+        anchor-y: root.debug-tip
+            ? back-button.absolute-position.y + back-button.height
+            : Tip.anchor-y;
+        window-width: root.width;
+        window-height: root.height;
+    }
 
     // ================= search suggestions =================
     // Declared as a sibling of the whole shell, not inside the command bar:

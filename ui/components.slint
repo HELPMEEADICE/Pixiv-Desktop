@@ -13,6 +13,7 @@
 //     text node here has an explicit width or an overflow policy.
 
 import { Theme, Type } from "theme.slint";
+import { Tip, TipSide } from "tip.slint";
 import { FluentGlyph } from "icons.slint";
 import { ScrollView } from "std-widgets.slint";
 
@@ -110,11 +111,35 @@ export component HoverTip inherits Rectangle {
     in property <string> tip: "";
     in property <bool> show: false;
     in property <length> max-tip-width: 300px;
-    in property <TipPlacement> placement: TipPlacement.Above;
+    /// Below/Above: the control's horizontal centre. Right: its right edge.
+    in property <length> anchor-x: 0px;
+    /// Below: the control's bottom edge. Above: its top edge. Right: its centre.
+    in property <length> anchor-y: 0px;
+    in property <TipSide> side: TipSide.Below;
+    /// The window box the bubble has to stay inside. Chrome sits at the edge of
+    /// the window, so a bubble that is not clamped loses its first or last glyph.
+    in property <length> window-width: 0px;
+    in property <length> window-height: 0px;
 
     visible: root.show && root.tip != "";
     height: 24px;
     width: Math.min(label.preferred-width + Theme.space-3 * 2, root.max-tip-width);
+
+    // The position is derived from the anchor, never written by the caller: three
+    // of the four old call sites placed themselves, and each was wrong for a
+    // different reason.
+    out property <length> wanted-x: root.side == TipSide.Right
+        ? root.anchor-x + Theme.space-1
+        : root.anchor-x - self.width / 2;
+    out property <length> wanted-y: root.side == TipSide.Below
+        ? root.anchor-y + Theme.space-1
+        : root.side == TipSide.Above
+            ? root.anchor-y - self.height - Theme.space-1
+            : root.anchor-y - self.height / 2;
+    x: Math.min(Math.max(Theme.space-1, root.wanted-x),
+        Math.max(Theme.space-1, root.window-width - self.width - Theme.space-1));
+    y: Math.min(Math.max(Theme.space-1, root.wanted-y),
+        Math.max(Theme.space-1, root.window-height - self.height - Theme.space-1));
     border-radius: Theme.radius-sm;
     background: Theme.tip-surface;
     border-width: 1px;
@@ -290,14 +315,25 @@ export component IconButton inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    HoverTip {
-        show: ta.has-hover && root.tip != "";
-        tip: root.tip;
-        placement: root.tip-placement;
-        x: (root.width - self.width) / 2;
-        y: root.tip-placement == TipPlacement.Below
-            ? root.height + 6px
-            : -self.height - 6px;
+    // Not a child element: a 48px command bar has nowhere to draw a tip inside
+    // itself, and a child cannot paint over the page that follows the bar. The
+    // control publishes text and an anchor; the window draws the bubble last.
+    // `changed` only watches a property of this element, so the child's hover is
+    // mirrored into one. Cheap, one-way, and it is what lets the tip be
+    // republished when the pointer enters without the user having to move.
+    property <bool> hovering: ta.has-hover;
+    changed hovering => {
+        if (hovering && root.enabled && root.tip != "") {
+            Tip.text = root.tip;
+            Tip.side = root.tip-placement == TipPlacement.Below ? TipSide.Below : TipSide.Above;
+            Tip.anchor-x = ta.absolute-position.x + root.width / 2;
+            Tip.anchor-y = Tip.side == TipSide.Below
+                ? ta.absolute-position.y + root.height
+                : ta.absolute-position.y;
+            Tip.visible = true;
+        } else {
+            Tip.visible = false;
+        }
     }
 }
 
@@ -612,11 +648,19 @@ export component NavItem inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    HoverTip {
-        show: root.compact && ta.has-hover && root.label != "";
-        tip: root.label;
-        x: root.width + Theme.space-2;
-        y: (root.height - self.height) / 2;
+    // `Right`, because that is the only direction with room: the rail clips its
+    // children at 52px in compact mode, which is where the label tip used to die.
+    property <bool> hovering: ta.has-hover;
+    changed hovering => {
+        if (hovering && root.compact && root.label != "") {
+            Tip.text = root.label;
+            Tip.side = TipSide.Right;
+            Tip.anchor-x = ta.absolute-position.x + root.width;
+            Tip.anchor-y = ta.absolute-position.y + root.height / 2;
+            Tip.visible = true;
+        } else {
+            Tip.visible = false;
+        }
     }
 }
 
@@ -1094,11 +1138,17 @@ component BookmarkPill inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    HoverTip {
-        show: ta.has-hover;
-        tip: root.marked ? "取消收藏" : "收藏";
-        x: (root.width - self.width) / 2;
-        y: -self.height - 6px;
+    property <bool> hovering: ta.has-hover;
+    changed hovering => {
+        if (hovering) {
+            Tip.text = root.marked ? "取消收藏" : "收藏";
+            Tip.side = TipSide.Above;
+            Tip.anchor-x = ta.absolute-position.x + root.width / 2;
+            Tip.anchor-y = ta.absolute-position.y;
+            Tip.visible = true;
+        } else {
+            Tip.visible = false;
+        }
     }
 }
 
@@ -1302,11 +1352,17 @@ export component IllustCard inherits Rectangle {
                     mouse-cursor: pointer;
                     clicked => { root.open-author(); }
                 }
-                HoverTip {
-                    show: author-ta.has-hover;
-                    tip: root.item.author;
-                    x: 0px;
-                    y: -self.height - 4px;
+                property <bool> hovering: author-ta.has-hover;
+                changed hovering => {
+                    if (hovering && root.item.author != "") {
+                        Tip.text = root.item.author;
+                        Tip.side = TipSide.Above;
+                        Tip.anchor-x = author-ta.absolute-position.x + author-ta.width / 2;
+                        Tip.anchor-y = author-ta.absolute-position.y;
+                        Tip.visible = true;
+                    } else {
+                        Tip.visible = false;
+                    }
                 }
             }
         }

@@ -49,7 +49,7 @@ use crate::layout::{self, GridGeometry};
 use crate::route::{History, Route, RouteHistory};
 use crate::{
     AppWindow, Destination, DownloadRow, IllustItem, ProfileStatItem, RecommendTagItem,
-    RecommendUserItem, SuggestionItem, Theme, ThemeMode, ViewerPage,
+    RecommendUserItem, SuggestionItem, Theme, ThemeMode, Tip, ViewerPage,
 };
 
 /// Real in-memory cache budget, in MiB. Settings displays this value, so the page
@@ -372,6 +372,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
             std::mem::forget(timer);
         }
     }
+
+    // Tooltips only appear on hover and this host has no input automation, so
+    // the one thing the UI cannot show on its own is that the bubble is drawn
+    // above the page at all. PIXIV_DESKTOP_TIP=1 raises one over the back button
+    // so a capture can prove it; nothing else ever sets this.
+    ui.set_debug_tip(std::env::var_os("PIXIV_DESKTOP_TIP").is_some());
 
     // Optional deep link for smoke-testing and visual regression captures:
     //   PIXIV_DESKTOP_START_PAGE=settings
@@ -748,6 +754,12 @@ impl App {
             app.loading_more = false;
             app.suggest_close();
             let ui = app.ui();
+            // A tooltip belongs to the page it was raised on. Navigating can
+            // destroy the hovered control (a cancelled row, a reloaded feed), and
+            // nothing would ever clear the bubble afterwards: `changed` in Slint
+            // only watches a bare property of the enclosing element, so the reset
+            // cannot live in the UI.
+            ui.global::<Tip>().set_visible(false);
             ui.set_page(route.page);
             ui.set_grid_loading_more(false);
             ui.set_ranking_filter(ranking_index(app.ranking_kind));

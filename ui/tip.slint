@@ -1,0 +1,34 @@
+// The one tooltip channel for the window.
+//
+// Why a global and not a child element on every control: a tooltip is the only
+// piece of UI that must be drawn *outside* the control that owns it, and Slint
+// gives a child no way to escape either of the two constraints it meets there.
+//
+//   * `clip: true` on an ancestor removes it completely. Measured on the
+//     navigation rail: above 720px the rail is compact, the labels are replaced
+//     by glyphs, and the tooltip that explains the glyph was placed at
+//     `x: item.width + 8px` - outside the 52px clip, therefore painted by
+//     nothing.
+//   * A sibling declared later paints over it. Measured on the command bar: its
+//     `TipPlacement.Below` tip lands at y = 54px, under the page, which is
+//     declared after the top bar and owns an opaque `Theme.canvas` background.
+//
+// Round three fixed the *direction* of those tips (Above -> Below) and left the
+// layering alone, so both were still invisible. The fix is one surface at the
+// top of the z-order: controls publish text plus an anchor, `AppWindow` renders
+// a single `HoverTip` after every page.
+export enum TipSide {
+    Below,
+    Above,
+    Right,
+}
+
+export global Tip {
+    in-out property <string> text: "";
+    /// Below/Above: the control's horizontal centre. Right: its right edge.
+    in-out property <length> anchor-x: 0px;
+    /// Below: the control's bottom edge. Above: its top edge. Right: its centre.
+    in-out property <length> anchor-y: 0px;
+    in-out property <TipSide> side: TipSide.Below;
+    in-out property <bool> visible: false;
+}

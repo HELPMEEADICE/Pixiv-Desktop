@@ -602,6 +602,51 @@ mod tests {
         }
     }
 
+    /// Rule: there is exactly one tooltip surface, and the window owns it.
+    ///
+    /// A tooltip is the only piece of UI that has to be drawn outside the control
+    /// that owns it, and a child element can do neither of the two things that
+    /// requires: it cannot escape an ancestor `clip`, and it cannot paint over a
+    /// sibling that is declared later. Both failures shipped:
+    ///
+    /// * the compact navigation rail set `clip: true` on a 52px column and every
+    ///   label tooltip was declared at `x: item.width + 8px`, i.e. outside it;
+    /// * the command bar drew its `below` tooltips at `y: 54px`, under the page,
+    ///   which is declared after the bar and paints an opaque background.
+    ///
+    /// Round three changed `above` to `below` and left the layering as it was, so
+    /// the affordance stayed invisible for another release. The fix is one
+    /// `HoverTip` in `main.slint`, fed by the `Tip` global; this keeps it that way.
+    #[test]
+    fn tooltips_are_rendered_by_one_overlay() {
+        let mut offenders = Vec::new();
+        let mut overlays = 0;
+        for path in page_files() {
+            let source = read(&path);
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("").trim();
+                if !code.contains("HoverTip {") {
+                    continue;
+                }
+                if name == "main.slint" {
+                    overlays += 1;
+                } else {
+                    offenders.push(format!("{name}:{}: {code}", index + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "publish to the Tip global instead of parenting a HoverTip; a child cannot escape a clip or paint over a later sibling:\n{}",
+            offenders.join("\n")
+        );
+        assert_eq!(
+            overlays, 1,
+            "main.slint must own exactly one tooltip surface"
+        );
+    }
+
     /// Collect the double-quoted strings at the top level of an expression.
     ///
     /// Stops at the terminating `;` so a ternary's branches are all included but
