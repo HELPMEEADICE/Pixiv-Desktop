@@ -48,7 +48,7 @@ export component ZoomViewer inherits Rectangle {
     callback toggle-fullscreen();
 
     clip: true;
-    background: Theme.dark ? #101012 : #e8eaed;
+    background: Theme.viewer-surface;
 
     // Fit scale: the largest scale that shows the whole page inside the box.
     out property <float> fit-scale:
@@ -164,7 +164,7 @@ export component ZoomViewer inherits Rectangle {
         y: root.height - self.height - Theme.space-3;
         height: 36px;
         border-radius: Theme.radius-lg;
-        background: Theme.dark ? #dd1c1c20 : #e8ffffff;
+        background: Theme.viewer-chrome;
         border-width: 1px;
         border-color: Theme.border;
         drop-shadow-blur: 12px;

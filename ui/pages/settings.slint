@@ -15,7 +15,6 @@
 // before it is trusted.
 
 import { Theme, Type, ThemeMode } from "../theme.slint";
-import { FluentGlyph } from "../icons.slint";
 import {
     AppButton, ButtonKind, ToggleSwitch, Divider, Badge, TextField, InfoBar, InfoKind,
     PageScroll, SettingsCard, SettingsRow, SegmentedControl, IconSlot,
@@ -100,10 +99,9 @@ export component SettingsPage inherits Rectangle {
                 padding-right: Theme.space-2;
                 spacing: Theme.space-2;
 
-                FluentGlyph {
+                IconSlot {
                     name: "warning";
-                    width: Theme.icon-size;
-                    height: Theme.icon-size;
+                    slot: Theme.icon-size;
                     tint: Theme.danger;
                 }
 

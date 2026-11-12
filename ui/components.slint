@@ -116,9 +116,9 @@ export component HoverTip inherits Rectangle {
     height: 24px;
     width: Math.min(label.preferred-width + Theme.space-3 * 2, root.max-tip-width);
     border-radius: Theme.radius-sm;
-    background: Theme.dark ? #f0f0f0 : #2b2b2b;
+    background: Theme.tip-surface;
     border-width: 1px;
-    border-color: Theme.dark ? #3d3d3d : transparent;
+    border-color: Theme.tip-border;
     drop-shadow-blur: 8px;
     drop-shadow-color: Theme.shadow-2;
     drop-shadow-offset-y: 2px;
@@ -128,7 +128,7 @@ export component HoverTip inherits Rectangle {
         y: (root.height - self.height) / 2;
         width: root.width - Theme.space-3 * 2;
         text: root.tip;
-        color: Theme.dark ? #1a1a1a : #ffffff;
+        color: Theme.tip-ink;
         font-size: Theme.font-caption;
         vertical-alignment: center;
         overflow: elide;
@@ -275,10 +275,9 @@ export component IconButton inherits Rectangle {
 
     opacity: root.enabled ? 1.0 : 0.4;
 
-    FluentGlyph {
+    IconPresenter {
         name: root.icon;
-        width: Theme.icon-size;
-        height: Theme.icon-size;
+        glyph-size: Theme.icon-size;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         tint: root.active ? Theme.accent : root.tint;
@@ -355,10 +354,9 @@ export component TextField inherits Rectangle {
         clicked => { input.focus(); }
     }
 
-    if root.leading-icon != "" : FluentGlyph {
+    if root.leading-icon != "" : IconPresenter {
         name: root.leading-icon;
-        width: Theme.icon-size;
-        height: Theme.icon-size;
+        glyph-size: Theme.icon-size;
         x: Theme.space-2;
         y: (root.height - self.height) / 2;
         tint: input.has-focus ? Theme.accent : Theme.text-secondary;
@@ -569,10 +567,9 @@ export component NavItem inherits Rectangle {
         background: Theme.accent;
     }
 
-    FluentGlyph {
+    IconPresenter {
         name: root.icon;
-        width: Theme.icon-size;
-        height: Theme.icon-size;
+        glyph-size: Theme.icon-size;
         x: root.compact ? (root.width - self.width) / 2 : root.inset;
         y: (root.height - self.height) / 2;
         tint: root.selected ? Theme.accent : Theme.text-secondary;
@@ -1001,10 +998,9 @@ component BookmarkPill inherits Rectangle {
     border-width: 1px;
     border-color: ta.has-hover ? Theme.border-strong : transparent;
 
-    FluentGlyph {
+    IconPresenter {
         name: "follow";
-        width: 14px;
-        height: 14px;
+        glyph-size: 14px;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         // Filled-in is impossible with a stroke-only path set, so "marked" is

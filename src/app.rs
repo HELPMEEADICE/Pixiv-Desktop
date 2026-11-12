@@ -46,6 +46,11 @@ use crate::layout::{self, GridGeometry};
 use crate::route::History;
 use crate::{AppWindow, Destination, DownloadRow, IllustItem, Theme, ThemeMode, ViewerPage};
 
+/// Real in-memory cache budget, in MiB. Settings displays this value, so the page
+/// cannot describe a limit the cache is not actually enforcing.
+const CACHE_MEMORY_MB: usize = 192;
+/// Real on-disk cache budget, in GiB.
+const CACHE_DISK_MB: u64 = 1024;
 /// Which data source is answering. Rendered in the status bar and as a top-bar
 /// badge so demo data can never be mistaken for live data.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -279,9 +284,13 @@ impl App {
             .or_else(|_| Store::open_in_memory())
             .expect("in-memory store always opens");
 
+        // Cache budgets, defined once. Settings renders these numbers, and before
+        // this the page showed a second hard-coded 192/1024 that merely happened to
+        // match; changing the real budget would have left the UI describing a limit
+        // that was not in force.
         let cache = ImageCache::new(CacheConfig {
-            memory_budget_bytes: 192 * 1024 * 1024,
-            disk_budget_bytes: 1024 * 1024 * 1024,
+            memory_budget_bytes: CACHE_MEMORY_MB * 1024 * 1024,
+            disk_budget_bytes: CACHE_DISK_MB * 1024 * 1024 * 1024,
             disk_dir: Some(data_dir.join("images")),
             concurrency: COVER_CONCURRENCY,
         });
@@ -326,8 +335,8 @@ impl App {
             ui.set_download_template(template.clone().into());
             ui.set_template_input(template.into());
             ui.set_app_version(env!("CARGO_PKG_VERSION").into());
-            ui.set_cache_memory_mb(192);
-            ui.set_cache_disk_mb(1024);
+            ui.set_cache_memory_mb(CACHE_MEMORY_MB as i32);
+            ui.set_cache_disk_mb(CACHE_DISK_MB as i32);
             ui.set_ranking_filters(ModelRc::from(Rc::new(VecModel::from(
                 RankingKind::ALL
                     .iter()

@@ -13,6 +13,7 @@ mod picker;
 mod route;
 mod session;
 mod theme;
+mod uiaudit;
 mod zoom;
 
 slint::include_modules!();

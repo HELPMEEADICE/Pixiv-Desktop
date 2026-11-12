@@ -84,6 +84,17 @@ export global Theme {
     out property <color> pressed: dark ? #1fffffff : #14000000;
     out property <color> focus-ring: dark ? #7ac0f0 : #0a84d8;
 
+    // ---- inverted surfaces ---------------------------------------------
+    // A tooltip is deliberately the inverse of the surface under it (WinUI does
+    // the same), so it cannot be expressed as a light/dark pair of the normal
+    // neutrals: in dark mode the tip is light with dark ink.
+    out property <color> tip-surface: dark ? #f0f0f0 : #2b2b2b;
+    out property <color> tip-ink: dark ? #1a1a1a : #ffffff;
+    out property <color> tip-border: dark ? #3d3d3d : transparent;
+    /// Backdrop of the image viewer, behind the artwork on both axes.
+    out property <color> viewer-surface: dark ? #101012 : #e8eaed;
+    /// Floating control bar over the artwork: translucent so the image reads through.
+    out property <color> viewer-chrome: dark ? #dd1c1c20 : #e8ffffff;
     // ---- elevation -----------------------------------------------------
     // Slint has no blur, so elevation is emulated with a low-alpha offset
     // rectangle behind flyouts (or `drop-shadow-*`, which blurs on the GPU
