@@ -101,15 +101,20 @@ impl Default for ClientConfig {
             timeout: Duration::from_secs(20),
             max_retries: 2,
             min_interval: Duration::from_millis(250),
-            user_agent: concat!(
-                "PixivDesktop/",
-                env!("CARGO_PKG_VERSION"),
-                " (Rust; desktop client)"
-            )
-            .to_string(),
+            user_agent: DEFAULT_USER_AGENT.to_string(),
         }
     }
 }
+
+/// The User-Agent every request carries.
+///
+/// This is deliberately a stock desktop Chrome string. pixiv.net sits behind a
+/// bot-protection edge that answers a non-browser User-Agent with a 403
+/// Cloudflare interstitial ("Just a moment...") before Pixiv itself sees the
+/// request -- verified: the same cookie and URL return 200 with a browser UA and
+/// 403 with a "PixivDesktop/..." one. The client identifies itself in the UI,
+/// not by sabotaging its own requests.
+pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)      AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /// The Pixiv HTTP client.
 ///
@@ -248,9 +253,21 @@ fn retry_hint(response: &reqwest::Response) -> Option<Duration> {
 impl Client {
     /// Build a client. Returns an error only if the TLS backend cannot start.
     pub fn new(config: ClientConfig, session: Session) -> Result<Self, PixivError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static(
+                "application/json, text/plain, */*",
+            ),
+        );
+        headers.insert(
+            reqwest::header::ACCEPT_LANGUAGE,
+            reqwest::header::HeaderValue::from_static("zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7"),
+        );
         let http = reqwest::Client::builder()
             .timeout(config.timeout)
             .user_agent(config.user_agent.clone())
+            .default_headers(headers)
             .gzip(true)
             .build()
             .map_err(|e| PixivError::Network(format!("无法初始化 HTTP 客户端：{e}")))?;
