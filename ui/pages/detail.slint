@@ -13,7 +13,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Theme, Type } from "../theme.slint";
 
 import {
-    AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind,
+    AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind, Avatar,
     Skeleton, HoverTip, InfoBar, InfoKind, PageScroll, ProgressBar, LoadingRow, SectionHeader,
     IconPresenter, IconSlot,
 } from "../components.slint";
@@ -230,6 +230,10 @@ export component InfoPanel inherits Rectangle {
     in property <string> title: "";
     in property <string> author: "";
     in property <string> author-id: "";
+    /// The author's real avatar, decoded by the same path the cards use.
+    in property <image> avatar;
+    /// 0 ok, 1 loading, 2 failed or absent
+    in property <int> avatar-state: 1;
     in property <string> description: "";
     in property <[string]> tags: [];
     in property <string> posted: "";
@@ -285,17 +289,23 @@ export component InfoPanel inherits Rectangle {
                 spacing: Theme.space-2;
                 alignment: start;
 
+                // The real face. A 32px blue disc with the character 画 was the last
+                // thing in the app that looked like an avatar without being one; the
+                // cards, the profile header and the top bar all switched to the real
+                // image and this panel was left behind.
+                //
+                // Full-height cell, centred explicitly: a fixed-size child of a
+                // horizontal layout is aligned to the start of the cross axis, which
+                // is what put the old tile 6px high in a 44px row.
                 Rectangle {
                     width: 32px;
-                    height: 32px;
-                    border-radius: Theme.radius-pill;
-                    background: Theme.accent-subtle;
-                    Text {
-                        text: "画";
-                        color: Theme.accent-ink;
-                        font-size: Theme.font-small;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    height: 100%;
+                    Avatar {
+                        size: 32px;
+                        y: (parent.height - self.height) / 2;
+                        source: root.avatar;
+                        state: root.avatar-state;
+                        fallback: root.author;
                     }
                 }
 
@@ -454,6 +464,8 @@ export component DetailPage inherits Rectangle {
     in property <string> title: "";
     in property <string> author: "";
     in property <string> author-id: "";
+    in property <image> author-avatar;
+    in property <int> author-avatar-state: 1;
     in property <string> description: "";
     in property <[string]> tags: [];
     in property <string> posted: "";
@@ -625,6 +637,10 @@ export component DetailPage inherits Rectangle {
                     title: root.title;
                     author: root.author;
                     author-id: root.author-id;
+
+                    avatar: root.author-avatar;
+
+                    avatar-state: root.author-avatar-state;
                     description: root.description;
                     tags: root.tags;
                     posted: root.posted;
@@ -688,6 +704,10 @@ export component DetailPage inherits Rectangle {
                 title: root.title;
                 author: root.author;
                 author-id: root.author-id;
+
+                avatar: root.author-avatar;
+
+                avatar-state: root.author-avatar-state;
                 description: root.description;
                 tags: root.tags;
                 posted: root.posted;

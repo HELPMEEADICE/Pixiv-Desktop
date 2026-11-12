@@ -1101,14 +1101,24 @@ export component Avatar inherits Rectangle {
         }
     }
 
+    // One glyph, centred - not a word squeezed into a circle.
+    //
+    // `fallback` carries a whole display name (「はるいりゅ*+」), Slint 1.18 has
+    // `character-count` but no `substr`, and centring an elided word rendered two
+    // clipped CJK glyphs half outside the circle. The initial is therefore obtained
+    // geometrically: a box exactly one character wide, centred, clipped.
     if root.state != 1 && !root.has-image : Text {
+        x: (root.width - self.width) / 2;
+        y: 0px;
+        width: max(9px, root.size * 0.52);
+        height: root.height;
         text: root.fallback == "" ? "?" : root.fallback;
         color: Theme.text-tertiary;
         font-size: max(9px, root.size * 0.42);
         font-weight: Type.semibold;
         horizontal-alignment: center;
         vertical-alignment: center;
-        overflow: elide;
+        overflow: clip;
     }
 }
 

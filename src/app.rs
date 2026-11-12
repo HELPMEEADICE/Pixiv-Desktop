@@ -133,6 +133,10 @@ struct App {
 
     // detail
     detail: Option<Illust>,
+    /// Avatar URL the metadata panel is waiting for. Stored rather than recomputed:
+    /// a resolved lookup lands in `author_avatars`, not in `illust.author.avatar`,
+    /// so the repaint has to match what was actually requested.
+    detail_author_avatar_url: Option<String>,
     detail_pages: Vec<PageMeta>,
     detail_models: Option<Rc<VecModel<ViewerPage>>>,
     detail_epoch: u64,
@@ -570,6 +574,7 @@ impl App {
             author_avatar_lookup: HashSet::new(),
             account_avatar: None,
             detail: None,
+            detail_author_avatar_url: None,
             detail_pages: Vec::new(),
             detail_models: None,
             detail_epoch: 0,
@@ -1663,6 +1668,33 @@ impl App {
             let tags: Vec<slint::SharedString> =
                 illust.tags.iter().map(|t| t.display().into()).collect();
             ui.set_detail_tags(ModelRc::from(Rc::new(VecModel::from(tags))));
+
+            // The author's face, from the same map the cards use. A work payload
+            // usually carries the avatar URL; when it does not, the id lookup the
+            // cards already do is reused rather than asking for a second endpoint.
+            let avatar_url = illust
+                .author
+                .avatar
+                .clone()
+                .or_else(|| self.author_avatars.get(&illust.author.id.get()).cloned());
+            let avatar = avatar_url
+                .as_deref()
+                .and_then(|url| self.avatars.get(url).cloned());
+            match &avatar {
+                Some(image) => {
+                    ui.set_detail_author_avatar(image.clone());
+                    ui.set_detail_author_avatar_state(BAND_OK);
+                }
+                None => {
+                    ui.set_detail_author_avatar(slint::Image::default());
+                    ui.set_detail_author_avatar_state(if avatar_url.is_some() {
+                        BAND_LOADING
+                    } else {
+                        BAND_EMPTY
+                    });
+                }
+            }
+            self.detail_author_avatar_url = avatar_url;
         }
 
         // Demo works must never enter the on-disk history: their cover URLs are
@@ -1765,6 +1797,14 @@ impl App {
         self.detail = Some(illust);
         self.detail_pages = pages;
         self.detail_models = Some(target);
+
+        // Only now, with this page owning the work: the bounded id lookup reads
+        // `self.detail`, so asking before the move resolves the *previous* page's
+        // author, which is what the first attempt did.
+        match self.detail_author_avatar_url.clone() {
+            Some(url) => self.spawn_avatars(vec![url]),
+            None => self.backfill_author_avatars(),
+        }
         self.refresh_chrome();
     }
 
@@ -2863,6 +2903,14 @@ impl App {
             self.publish_profile();
         }
 
+        if self.detail_author_avatar_url.as_deref() == Some(url)
+            && let Some(image) = self.avatars.get(url).cloned()
+        {
+            let ui = self.ui();
+            ui.set_detail_author_avatar(image);
+            ui.set_detail_author_avatar_state(BAND_OK);
+        }
+
         // Cards: match on the URL the row was built with, so only the rows that
         // wanted this face are patched.
         let Some(image) = self.avatars.get(url).cloned() else {
@@ -2895,6 +2943,16 @@ impl App {
             return;
         }
         let mut wanted: Vec<u64> = Vec::new();
+        // The open detail page is the one the user is looking at, so its author
+        // gets first claim on the four lookups this render is allowed.
+        if let Some(detail) = &self.detail
+            && detail.author.id.get() != 0
+            && detail.author.avatar.is_none()
+            && !self.author_avatars.contains_key(&detail.author.id.get())
+            && !self.author_avatar_lookup.contains(&detail.author.id.get())
+        {
+            wanted.push(detail.author.id.get());
+        }
         for illust in &self.items {
             let author = illust.author.id.get();
             if author == 0 || illust.author.avatar.is_some() {
@@ -2938,6 +2996,7 @@ impl App {
                     };
                     app.author_avatars.insert(author, url.clone());
                     app.apply_author_avatar(author, &url);
+                    app.adopt_detail_author_avatar(author, &url);
                     app.spawn_avatars(vec![url]);
                 });
             }
@@ -2945,6 +3004,25 @@ impl App {
     }
 
     /// Point every card of one author at the avatar that was just resolved.
+    /// Point the open detail panel at an avatar that was just resolved by id.
+    fn adopt_detail_author_avatar(&mut self, author: u64, url: &str) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        if detail.author.id.get() != author {
+            return;
+        }
+        self.detail_author_avatar_url = Some(url.to_string());
+        let ui = self.ui();
+        match self.avatars.get(url).cloned() {
+            Some(image) => {
+                ui.set_detail_author_avatar(image);
+                ui.set_detail_author_avatar_state(BAND_OK);
+            }
+            None => ui.set_detail_author_avatar_state(BAND_LOADING),
+        }
+    }
+
     fn apply_author_avatar(&mut self, author: u64, url: &str) {
         let key = author.to_string();
         for column in &self.columns {

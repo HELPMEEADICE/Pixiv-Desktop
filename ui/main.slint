@@ -221,6 +221,8 @@ export component AppWindow inherits Window {
     in property <string> detail-title: "";
     in property <string> detail-author: "";
     in property <string> detail-author-id: "";
+    in property <image> detail-author-avatar;
+    in property <int> detail-author-avatar-state: 1;
     in property <string> detail-description: "";
     in property <[string]> detail-tags: [];
     in property <string> detail-posted: "";
@@ -780,6 +782,8 @@ export component AppWindow inherits Window {
                         title: root.detail-title;
                         author: root.detail-author;
                         author-id: root.detail-author-id;
+                        author-avatar: root.detail-author-avatar;
+                        author-avatar-state: root.detail-author-avatar-state;
                         description: root.detail-description;
                         tags: root.detail-tags;
                         posted: root.detail-posted;
