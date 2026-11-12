@@ -441,6 +441,51 @@ mod tests {
         );
     }
 
+    /// Rule: a `key-pressed` comparison must use a Slint *character code*.
+    ///
+    /// Slint reports special keys as single character codes from `i-slint-common`'s
+    /// key table - U+F702 for the left arrow, U+F70E for F11, U+001B for Escape -
+    /// never as the English name. Comparing `e.text` against the word "LeftArrow"
+    /// compiles, reads correctly and compares a one-character string against a
+    /// thirteen-character one, so it is silently dead. That is exactly what had
+    /// happened here: Alt+Left/Right and F11 were documented in the README and had
+    /// never worked.
+    ///
+    /// A key literal is therefore only legal if it is a single character ("f",
+    /// " ", "\n") or a backslash escape ("\u{001b}").
+    #[test]
+    fn key_handlers_compare_character_codes_not_key_names() {
+        const MARKER: &str = "e.text == ";
+        let mut offenders = Vec::new();
+        for path in page_files() {
+            let source = read(&path);
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                let Some(at) = code.find(MARKER) else {
+                    continue;
+                };
+                let rest = code[at + MARKER.len()..].trim_start();
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = rest.find('"') else {
+                    continue;
+                };
+                let literal = &rest[..end];
+                let is_single_char = literal.chars().count() == 1;
+                let is_escape = literal.starts_with('\\');
+                if !is_single_char && !is_escape {
+                    offenders.push(format!("{name}:{}: {literal}", index + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "Slint reports special keys as character codes (U+F702 = left arrow); these comparisons can never match:\n{}",
+            offenders.join("\n")
+        );
+    }
     /// Collect the double-quoted strings at the top level of an expression.
     ///
     /// Stops at the terminating `;` so a ternary's branches are all included but

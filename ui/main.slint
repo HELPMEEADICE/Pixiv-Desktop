@@ -253,16 +253,23 @@ export component AppWindow inherits Window {
         width: root.width;
         height: root.height;
 
+        // Key names in Slint are *character codes*, not English words: `e.text` for
+        // the left arrow is U+F702 and for F11 is U+F70E. Comparing against
+        // "LeftArrow" or "F11" compiles, reads correctly, and never matches - which
+        // is exactly what had happened, so Alt+Left/Right and F11 had never worked
+        // despite being documented. The escapes below are the documented values
+        // from `i-slint-common`'s key table; `uiaudit` fails the build if a
+        // multi-character key name reappears here.
         key-pressed(e) => {
             if (e.modifiers.control && (e.text == "f" || e.text == "k")) {
                 search-field.focus-input();
                 return EventResult.accept;
             }
-            if (e.modifiers.alt && e.text == "LeftArrow") { root.go-back(); return EventResult.accept; }
-            if (e.modifiers.alt && e.text == "RightArrow") { root.go-forward(); return EventResult.accept; }
+            if (e.modifiers.alt && e.text == "\u{F702}") { root.go-back(); return EventResult.accept; }
+            if (e.modifiers.alt && e.text == "\u{F703}") { root.go-forward(); return EventResult.accept; }
             if (e.modifiers.control && e.text == "r") { root.grid-retry(); return EventResult.accept; }
-            if (e.text == "F11") { root.toggle-fullscreen(); return EventResult.accept; }
-            if (e.text == "Escape") { root.shell-shortcut("escape"); return EventResult.accept; }
+            if (e.text == "\u{F70E}") { root.toggle-fullscreen(); return EventResult.accept; }
+            if (e.text == "\u{001b}") { root.shell-shortcut("escape"); return EventResult.accept; }
             if (e.modifiers.control && e.text == "1") { root.navigate(Destination.Home); return EventResult.accept; }
             if (e.modifiers.control && e.text == "2") { root.navigate(Destination.Discovery); return EventResult.accept; }
             if (e.modifiers.control && e.text == "3") { root.navigate(Destination.Ranking); return EventResult.accept; }

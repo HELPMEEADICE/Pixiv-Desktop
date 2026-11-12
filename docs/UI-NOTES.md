@@ -209,7 +209,171 @@ All 24 cells pass (8 pages x {maximised 1707x1004, 1024x768, 800x600}).
   wrap, toolbar reachable;
 * dark mode restyles canvas, chrome, cards, chips, fields and scrollbars.
 
-### Not verified here
+## 7. Round three: the icons were never where they looked
+
+The reported symptom was "图标错位" — nav glyphs not lining up with their
+labels, button glyphs off-centre. The declarations all looked correct, which is
+why it survived two rounds of review.
+
+### 7a. Two facts a Slint declaration cannot show
+
+Both were measured from real captures, not inferred:
+
+1. **`Path` places itself at `(0,0)`.** `FluentIcon` gives it a size but no
+   position, so a 16px glyph inside a 32px `IconButton` rendered in the button's
+   top-left corner — 8px right and 8px down of where it belonged. Every
+   icon-only button in the app had this.
+2. **A fixed-height child of a `HorizontalLayout` is aligned to the *start* of
+   the cross axis, not centred.** Measured on the navigation rail: every glyph's
+   ink centre sat **15.5 physical px** (10.3 logical px at 150% DPI) above the
+   centre line of its row, while the `Text` siblings — which fill the row and
+   centre their own baseline — were within 1px.
+
+Both are invisible in review and neither is a Slint bug: they are the documented
+behaviour of element default position and layout cross-axis alignment.
+
+**Fix.** Two containers, and nothing else places a glyph:
+
+- `IconPresenter` — centres a glyph inside a box the caller owns (used where the
+  box is a pill, a tile or a fixed square);
+- `IconSlot` — claims the row's full height (`height: 100%`) and centres inside
+  that, which is the only way to get a centred fixed-size child out of a Slint
+  horizontal layout.
+
+`IconButton` and `AppButton` also gained `row-height`: a 32px control inside a
+48px command bar can now claim the bar and centre its own pill instead of being
+top-aligned by the row.
+
+### 7b. What the fix had to preserve
+
+Selection must not move anything. The rail's selection indicator, glyph, label and
+counter are now all positioned from the item's own height, so hover, press and
+select change paint only. The glyph column is a fixed inset, so labels share one
+vertical rule across all nine rows.
+
+### 7c. Hit-testing bugs found along the way
+
+Slint hit-tests in reverse declaration order, which produced three real defects:
+
+| Symptom | Cause |
+| --- | --- |
+| Clicking the bookmark heart opened the artwork | `IllustCard`'s open-on-click `TouchArea` was declared *last*, so it covered the pill |
+| The search field's clear button did nothing | a full-size `TouchArea` declared after the layout covered the button |
+| Top-bar tooltips never appeared | they were drawn above a 48px bar at y = 0, i.e. outside the window |
+
+### 7d. Verification: pixel geometry, not declarations
+
+`tools/verify-icons.ps1` captures the real window and finds ink runs —
+contiguous rows of pixels that differ from the surface behind them — inside a
+narrow column. Each run is one glyph or one text label, so comparing run centres
+compares what the user sees.
+
+| Size | Theme | Result |
+| --- | --- | --- |
+| 720x520 | light / dark | 8 glyph rows, all within 2.5px of the rail centre |
+| 800x600 | light / dark | same (compact pane) |
+| 1024x768 | light / dark | 9 rows, all within 1.0 logical px of their label |
+| 1280x800 | light / dark | same |
+| 1440x900 | light / dark | same |
+| 1920x1080 | — | **not measured**: needs 2880x1620 physical px and the screen is 2560x1600, so the capture is truncated. The harness reports this and exits 0 rather than measuring a cut-off frame. |
+
+`tools/pixel.ps1` does the reading. It walks the locked bitmap directly: the
+first version called a PowerShell helper per pixel and took minutes for one strip.
+
+### 7e. Three rules became tests
+
+Each of these had been enforced by review alone and each had already been broken:
+
+- `raw_glyphs_exist_only_inside_the_glyph_containers` — a bare `FluentGlyph` is
+  legal only inside `IconPresenter`/`IconSlot`. Converting the remaining call
+  sites removed four more copies of the centring arithmetic.
+- `every_referenced_icon_name_is_generated` — an unknown glyph name renders
+  *nothing* (no error, no empty box), so a typo silently deletes an icon.
+- `pages_take_colours_from_the_theme` — only artwork overlays may be literal.
+  This found three real leaks (the tooltip's inverted surface, the viewer
+  backdrop, the floating control bar), now `Theme.tip-*` / `Theme.viewer-*`.
+
+## 8. Theme: three states, not two
+
+The old model stored a boolean `theme` plus a `follow_system_theme` flag that was
+persisted, never read, and could describe a state the window was not in. Two
+consequences: "follow the system" did nothing, and `system_is_dark()` had its
+predicate inverted, so a light desktop painted the whole app dark.
+
+- `ThemeMode` is `System` / `Light` / `Dark`; `Theme.dark` is **derived** from it
+  and `Theme.system-dark`, so no page can hold a contradictory state.
+- Windows exposes the preference as one registry DWORD (`AppsUseLightTheme` under
+  `...\Themes\Personalize`), read through a hand-rolled `RegQueryValueExW` — the
+  crate pulls in no Windows bindings, matching how `session.rs` binds DPAPI.
+- Slint 1.18 has no colour-scheme notification and no reachable window procedure,
+  so a 5s watcher runs **only** while the mode is `System` and stops itself when
+  the user picks a fixed theme. Documented limitation, not a hidden poll.
+- Settings uses a segmented control; the top-bar button is a genuine two-state
+  quick switch that pins Light or Dark.
+
+### 8a. Duplicated state, removed
+
+The status bar said "演示模式（本地数据）" twice on one line, the top bar said it a
+third time, and the History page was permanently empty because it asked the
+*network* for history that lives in SQLite.
+
+- The shell owns connection state: one dot plus one label, from properties it
+  already has. Pages contribute one fact through `status-text`.
+- The top-bar DEMO chip is gone; the hero explains demo data once.
+- The pane collapse toggle hides itself when the host has auto-compacted the
+  rail, where it could not change anything.
+- `History` reads `Store::view_history` and maps rows to cards. Unknown fields
+  stay empty rather than being invented; an unknown aspect ratio renders square.
+- An empty search keyword no longer returns an unrelated default listing.
+- `clear-cache` walks the disk tier on the runtime; it used to freeze the window.
+
+## 9. Contrast: one blue, three jobs
+
+The theme had a single accent used as a decoration colour, a filled-control
+background and a text colour. That cannot satisfy all three:
+
+| Pair | Ratio | Requirement |
+| --- | --- | --- |
+| `#ffffff` on `#0096fa` (primary button, light) | 3.11:1 | 4.5:1 |
+| `#ffffff` on `#4cb0f5` (primary button, dark) | 2.38:1 | 4.5:1 |
+| `#0096fa` on `#e6f4ff` (selected nav label) | 2.78:1 | 4.5:1 |
+| `#8a8a8a` on `#f7f8f9` (hint text) | 3.25:1 | 4.5:1 |
+
+**Fix: separate roles.** `accent` keeps the exact Pixiv blue and is decoration
+only. `accent-fill` (light `#0071c2`, 5.07:1 with white) backgrounds anything
+carrying text; dark mode keeps the light blue and flips the ink to `#101010`
+(8.01:1), as WinUI's own accent buttons do. `accent-ink` is the legible variant
+for the accent wash (4.74:1 light, 6.83:1 dark). `text-tertiary` light went to
+`#6e6e6e` (4.80:1 on `layer-alt`).
+
+`theme_text_pairs_clear_wcag_aa` parses the palette out of `theme.slint`, computes
+WCAG 2.1 relative luminance for the pairs the components actually compose, and
+fails under 4.5:1 (text) or 3:1 (non-text). `accent_is_decoration_only` enforces
+the absence of `Theme.accent` from every UI file, so the roles cannot merge again.
+
+## 10. What is still not verified here
+
+- **Pointer-driven interaction.** No input automation on this host: hover,
+  press, drag, wheel and keyboard focus order are exercised by code path and unit
+  test only. Pages are reached through `PIXIV_DESKTOP_START_PAGE` and
+  `PIXIV_DESKTOP_START_ILLUST`.
+- **The DPI ladder above 150%.** 100/125/200% is not selectable on this host.
+  Layout maths is scale-independent (Slint reports logical px) and
+  `images::target_width()` is unit tested at 1.0/1.5/2.0, but only 150% was seen
+  on a real display. 1920x1080 at 150% needs a 2880px-wide screen and this one is
+  2560, so the largest size in the matrix could not be captured.
+- **Bookmark / follow against a live session.** No credential was available, so
+  those paths are implemented from observed request shapes and are covered by
+  failure-path tests only. They never fake success.
+- **Download rows with real tasks.** The page renders from the live queue and the
+  state mapping is unit tested for all six states, but no screenshot shows a
+  populated queue because demo mode refuses to write files by design.
+
+---
+
+## Appendix: round-one limits (kept for the record)
+
+### Not verified in round one
 
 **Pointer-driven interaction** (click, hover, wheel, drag, keyboard focus order)
 was exercised by code path and unit test only: this environment has no input

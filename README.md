@@ -4,26 +4,37 @@ A native desktop client for [Pixiv](https://www.pixiv.net/), built with **Rust +
 No Electron, no CEF, no Tauri, no WebView — the UI is compiled Slint drawing directly
 through a GPU/software renderer.
 
-Visual target: **60 % Windows 11 WinUI 3 / Fluent Design 2 + 40 % Pixiv web**. The
+Visual target: **70 % Windows 11 WinUI 3 / Fluent Design 2 + 30 % Pixiv web**. The
 shell is a native desktop one — NavigationView-style rail with a compact mode, a
 command bar with search/back/forward/account, a Settings page built from cards and
-toggles, InfoBars, flyout-style tooltips, real hover/pressed/disabled/focus states,
-and one light/dark pairing that covers every page. Pixiv supplies the part that
-matters for browsing: its blue accent, an illustration-first masonry feed with no
-chrome competing against the artwork, tag chips, and the detail page's
-image-dominant layout with a compact metadata column.
+segmented controls, InfoBars, flyout-style tooltips, real
+hover/pressed/disabled/focus states, and one Light/Dark/System theme that covers
+every page. Pixiv supplies the part that matters for browsing: its blue accent, an
+illustration-first masonry feed with no chrome competing against the artwork, tag
+chips, and the detail page's image-dominant layout with a compact metadata column.
 
 | Home (light) | Home (dark) |
 | --- | --- |
 | ![home light](docs/screenshots/readme/home-light.png) | ![home dark](docs/screenshots/readme/home-dark.png) |
 
-| Discover | Downloads | Settings |
-| --- | --- | --- |
-| ![discovery](docs/screenshots/readme/discovery.png) | ![downloads](docs/screenshots/readme/downloads.png) | ![settings](docs/screenshots/readme/settings.png) |
+| Detail (dark) | Discover |
+| --- | --- |
+| ![detail](docs/screenshots/readme/detail.png) | ![discovery](docs/screenshots/readme/discovery.png) |
+
+| Downloads | Settings |
+| --- | --- |
+| ![downloads](docs/screenshots/readme/downloads.png) | ![settings](docs/screenshots/readme/settings.png) |
 
 Screenshots are captured by `tools/shot.ps1` at 1280×800 logical on a 150% DPI
-display. The curated set above is tracked; everything else stays local (see
+display, cropped to the client area so a pixel can be mapped to a logical
+coordinate. The curated set above is tracked; everything else stays local (see
 `.gitignore`).
+
+Icon alignment and colour contrast are **measured, not reviewed**:
+`tools/verify-icons.ps1` finds glyph ink centres in a real capture and fails if any
+of them drifts from its row, and `cargo test` checks WCAG ratios and the
+"no raw glyph outside the icon containers" rule. Both are described in
+[`docs/UI-NOTES.md`](docs/UI-NOTES.md) § 7–9.
 
 The engineering record for the layout work — root causes, fixes and what could
 not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
@@ -35,13 +46,13 @@ not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
 | Area | Status |
 | --- | --- |
 | Native window, Fluent shell, collapsible nav rail, responsive reflow | **Implemented** |
-| Light / dark theme, switchable at runtime, persisted | **Implemented** |
+| Light / Dark / **System** theme (follows the Windows app mode), switchable at runtime, persisted | **Implemented** |
 | Illustration grid with height-balanced masonry (per-card aspect ratio, no cropping, column count measured from the real content box) | **Implemented** |
 | Demo Mode with procedurally generated artwork | **Implemented** |
 | Real Pixiv data: illustration detail, page list, search, ranking, artist work ids, tag metadata | **Implemented** (verified against the live API) |
 | Zoomable image viewer: wheel zoom anchored at cursor, drag pan, double-click toggle, fit / 1:1, fullscreen | **Implemented** |
 | Image pipeline: priority queue, single-flight, memory LRU + disk tier, generated fallbacks | **Implemented** |
-| Local SQLite: search history, view history, settings, download records | **Implemented** |
+| Local SQLite: search history, view history, settings, download records — and a History page that reads them back | **Implemented** |
 | Download queue: bounded concurrency, filename templates, cancel / retry, duplicate detection, atomic writes | **Implemented** |
 | Ugoira decode + timing + GIF export | **Implemented** (library + tests; see limits) |
 | Session login via system browser + `PHPSESSID` | **Implemented** |
@@ -92,6 +103,15 @@ worse than one that says what it does not know.
    bug that used to leave the bottom half of a maximised window unpainted, and § 6 for the
    harness that now proves it is gone (`tools/verify-layout.ps1`: 8 pages × 3 sizes, all
    with `gap=0`).
+9. **The system-theme watcher polls, and says so.** Slint 1.18 exposes no colour-scheme
+   notification and no reachable window procedure, so while the theme mode is `System` a
+   5s timer reads one registry DWORD (`AppsUseLightTheme`). It stops itself the moment a
+   fixed theme is chosen. A push notification would need a raw window procedure, which
+   this app does not have because it keeps the native frame.
+10. **1920×1080 at 150% DPI was not captured.** That needs a 2880×1620 physical client
+   area and this screen is 2560×1600, so `tools/verify-icons.ps1` reports the clamp and
+   skips instead of measuring a truncated frame. Every other size in the matrix was
+   measured.
 
 ---
 
@@ -112,12 +132,17 @@ The debug binary also runs and is what the screenshots above were taken with.
 Layout claims are checked against the screen, not against a compiler exit code:
 
 ```powershell
-# one screenshot, ground truth (BitBlt of the window rect)
+# one screenshot, ground truth (BitBlt of the window rect, cropped to the client
+# area; a sidecar JSON records the scale factor and the screen bounds)
 pwsh -File tools/shot.ps1 -Page home -Mode maximize -Out docs/screenshots/home.png
 pwsh -File tools/shot.ps1 -Page settings -Mode size -Size 1024x768 -Dark -Out .../s-dark.png
+pwsh -File tools/shot.ps1 -Page detail -Illust 700000003 -Dark -Out .../detail.png
 
 # every page x every size, asserting the shell invariant from the app's own trace
-pwsh -File tools/verify-layout.ps1
+pwsh -File tools/verify-layout.ps1        # 24 checks: 8 pages x 3 sizes
+
+# icon alignment, measured from pixels rather than from the Slint source
+pwsh -File tools/verify-icons.ps1         # add -Size 800x600 / -Dark
 ```
 
 `shot.ps1` restores the window before resizing (a resize delivered to a
@@ -129,7 +154,7 @@ about layout.
 
 ```powershell
 cargo fmt --all -- --check
-cargo test --workspace                       # 205 tests
+cargo test --workspace                       # 216 tests, 5 of them design rules
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)
@@ -212,6 +237,13 @@ The native frame is kept and Fluent chrome is drawn inside it.
 (MIT). Only the path geometry is embedded, emitted as Slint `Path` elements, so icons
 inherit theme colour and stay crisp at any DPI. No emoji, no hand-drawn substitutes.
 
+A glyph is never positioned by hand: `IconPresenter` centres one inside a box the
+caller owns, `IconSlot` centres one on the row it sits in, and a test fails the build
+if any other file names `FluentGlyph` directly. Two measured facts made that rule
+necessary — a `Path` defaults to `(0,0)` regardless of its size, and a fixed-height
+child of a `HorizontalLayout` is top-aligned, not centred. See
+[`docs/UI-NOTES.md`](docs/UI-NOTES.md) § 7.
+
 Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 API observations: [`docs/API-NOTES.md`](docs/API-NOTES.md)
 
@@ -223,6 +255,8 @@ API observations: [`docs/API-NOTES.md`](docs/API-NOTES.md)
 | --- | --- |
 | `Ctrl+F` | Focus search |
 | `Alt+←` / `Alt+→` | Back / forward through page history |
+| `Ctrl+1` … `Ctrl+7` | Home, Discover, Ranking, Bookmarks, History, Downloads, Settings |
+| `Ctrl+R` | Reload the current feed |
 | wheel | Zoom the viewer, anchored at the cursor |
 | double-click | Toggle zoom at the cursor |
 | `F` | Fit to window |

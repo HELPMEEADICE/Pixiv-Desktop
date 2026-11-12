@@ -5,4 +5,7 @@ target/
 # tracked, because everything else churns on every visual change.
 /docs/screenshots/*
 !/docs/screenshots/readme/
+# The sidecar JSON carries a capture timestamp and the host's screen bounds, so
+# it would produce a diff on every run without telling a reviewer anything.
+/docs/screenshots/readme/*.json
 target-rel/
