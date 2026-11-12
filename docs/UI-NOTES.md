@@ -282,16 +282,30 @@ first version called a PowerShell helper per pixel and took minutes for one stri
 
 ### 7e. Three rules became tests
 
-Each of these had been enforced by review alone and each had already been broken:
+`src/uiaudit.rs` turns six design rules into tests that read the `.slint` sources.
+Each of them had been enforced by review alone, and each had already been broken at
+least once in this codebase:
 
-- `raw_glyphs_exist_only_inside_the_glyph_containers` — a bare `FluentGlyph` is
-  legal only inside `IconPresenter`/`IconSlot`. Converting the remaining call
-  sites removed four more copies of the centring arithmetic.
-- `every_referenced_icon_name_is_generated` — an unknown glyph name renders
-  *nothing* (no error, no empty box), so a typo silently deletes an icon.
-- `pages_take_colours_from_the_theme` — only artwork overlays may be literal.
-  This found three real leaks (the tooltip's inverted surface, the viewer
-  backdrop, the floating control bar), now `Theme.tip-*` / `Theme.viewer-*`.
+| Test | What it prevents |
+| --- | --- |
+| `raw_glyphs_exist_only_inside_the_glyph_containers` | a bare `FluentGlyph` outside `IconPresenter`/`IconSlot` — the exact shape of the original bug. Converting the remaining call sites removed four more copies of the centring arithmetic. |
+| `every_referenced_icon_name_is_generated` | an unknown glyph name, which renders *nothing*: no error, no empty box, just a control whose icon vanished. |
+| `pages_take_colours_from_the_theme` | literal colours outside `theme.slint`. Found three real leaks — the tooltip's inverted surface, the viewer backdrop and the floating control bar — now `Theme.tip-*` / `Theme.viewer-*`. |
+| `theme_text_pairs_clear_wcag_aa` | a palette edit that makes text unreadable (see § 9). |
+| `accent_is_decoration_only` | the brand blue being reused as a fill or as text, which is what broke button contrast (see § 9). |
+| `key_handlers_compare_character_codes_not_key_names` | `e.text == "LeftArrow"`, which compiles and can never match (see § 8b). |
+
+### 7f. A second consequence: the shortcuts never fired
+
+`e.text` in Slint carries a *character code*, not a key name: the left arrow is
+U+F702, the right arrow U+F703, F11 U+F70E, Escape U+001B. The handler compared
+against `"LeftArrow"`, `"F11"` and `"Escape"` — a one-character string against a
+longer one, which compiles, reads correctly, and never matches.
+
+So three features this README advertised had never worked: **Alt+←/→** (page
+history), **F11** (fullscreen) and **Escape** (leave the detail page). Ctrl+F,
+Ctrl+R and Ctrl+1..7 were unaffected because they compare single printable
+characters.
 
 ## 8. Theme: three states, not two
 
@@ -324,8 +338,16 @@ third time, and the History page was permanently empty because it asked the
   rail, where it could not change anything.
 - `History` reads `Store::view_history` and maps rows to cards. Unknown fields
   stay empty rather than being invented; an unknown aspect ratio renders square.
-- An empty search keyword no longer returns an unrelated default listing.
-- `clear-cache` walks the disk tier on the runtime; it used to freeze the window.
+- An empty search keyword no longer returns an unrelated default listing (it used
+  to reach the API with `""` and render the reply as "your results").
+- `clear-cache` walks the disk tier on the runtime; it used to freeze the window
+  for the duration of the sweep.
+- The search history was write-only: every keyword went into SQLite and nothing
+  read it back. The empty-search state now offers the eight most recent terms as
+  chips, refreshed on submit and on "clear history".
+- Every feed page reused one sentence, the page title and a picture-unavailable
+  glyph for its empty state. `GalleryPage` gained `state-title`/`state-glyph`, and
+  each destination now says what is empty and what to do about it.
 
 ## 9. Contrast: one blue, three jobs
 
@@ -353,10 +375,12 @@ the absence of `Theme.accent` from every UI file, so the roles cannot merge agai
 
 ## 10. What is still not verified here
 
-- **Pointer-driven interaction.** No input automation on this host: hover,
+- **Pointer and keyboard interaction.** No input automation on this host: hover,
   press, drag, wheel and keyboard focus order are exercised by code path and unit
   test only. Pages are reached through `PIXIV_DESKTOP_START_PAGE` and
-  `PIXIV_DESKTOP_START_ILLUST`.
+  `PIXIV_DESKTOP_START_ILLUST`. In particular the key-code fix (§ 7f) is verified
+  by reading Slint's own key table and by a test on the source, **not** by pressing
+  F11: the harness can trace a window but cannot type into it.
 - **The DPI ladder above 150%.** 100/125/200% is not selectable on this host.
   Layout maths is scale-independent (Slint reports logical px) and
   `images::target_width()` is unit tested at 1.0/1.5/2.0, but only 150% was seen

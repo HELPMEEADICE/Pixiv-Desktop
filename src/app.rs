@@ -447,13 +447,19 @@ impl App {
     fn cache_summary(&self) -> String {
         let stats = self.cache.stats();
         let lookups = stats.memory_hits + stats.disk_hits;
-        let total = lookups + stats.network_loads;
+        let requests = lookups + stats.network_loads;
+        // The denominator used to be `max(1)`, so an untouched cache read "命中 0/1"
+        // - a ratio that describes nothing. With no requests yet, say so.
+        let hit_rate = if requests == 0 {
+            "尚未请求".to_string()
+        } else {
+            format!("命中 {lookups}/{requests}（{}%）", lookups * 100 / requests)
+        };
         format!(
-            "内存 {} · 磁盘 {} MB · 命中 {}/{}",
+            "内存 {} · 磁盘 {} · {}",
             human_bytes(stats.memory_bytes as u64),
-            stats.disk_bytes / (1024 * 1024),
-            lookups,
-            total.max(1)
+            human_bytes(stats.disk_bytes),
+            hit_rate
         )
     }
 
