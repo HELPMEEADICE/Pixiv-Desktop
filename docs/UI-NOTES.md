@@ -373,6 +373,34 @@ WCAG 2.1 relative luminance for the pairs the components actually compose, and
 fails under 4.5:1 (text) or 3:1 (non-text). `accent_is_decoration_only` enforces
 the absence of `Theme.accent` from every UI file, so the roles cannot merge again.
 
+
+### 9a. Every translucent colour had its alpha in the wrong byte
+
+Slint parses an 8-digit colour literal as `#RRGGBBAA` — the alpha is *trailing*
+(`i-slint-common::color_parsing`, whose own test asserts `#01234567 -> 0x67012345`).
+The theme was written as `#AARRGGBB`, so alpha and red were swapped on every
+translucent token:
+
+| Token | Written | Rendered | Intended |
+| --- | --- | --- | --- |
+| `hover` (light) | `#0a000000` | alpha 0 — invisible | 4% black |
+| `hover` (dark) | `#14ffffff` | alpha 255 bright cyan | 8% white |
+| `pressed` | `#14000000` | alpha 0 — invisible | 8% black |
+| `shadow-1` / `shadow-2` | `#4d000000` | alpha 0 — no shadow | 30% / 45% black |
+| `scrim` | `#b3050505` | alpha 5 | 70% black |
+| rank / type badge | `#a6000000` | alpha 0 — invisible | 65% black |
+| bookmark pill | `#d9ffffff` | opaque pale cyan | 85% white |
+| `viewer-chrome` | `#dd1c1c20` | alpha 32 | 87% near-black |
+
+Two consequences were visible in captures once you knew where to look: the detail
+page's zoom bar was a washed-out pale band instead of a dark pill, and the ranking
+grid showed bare `#4` text with no scrim behind it. Every hover and press state in
+the app was either invisible or the wrong colour.
+
+Fixed by putting every token in `#RRGGBBAA` order with its intended colour and
+alpha preserved. `translucent_colours_use_the_rrggbbaa_order` rejects any 8-digit
+literal whose alpha byte is 0 — the shape this mistake always takes.
+
 ## 10. What is still not verified here
 
 - **Pointer and keyboard interaction.** No input automation on this host: hover,

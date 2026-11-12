@@ -32,9 +32,10 @@ coordinate. The curated set above is tracked; everything else stays local (see
 
 Icon alignment and colour contrast are **measured, not reviewed**:
 `tools/verify-icons.ps1` finds glyph ink centres in a real capture and fails if any
-of them drifts from its row, and `cargo test` checks WCAG ratios and the
-"no raw glyph outside the icon containers" rule. Both are described in
-[`docs/UI-NOTES.md`](docs/UI-NOTES.md) § 7–9.
+of them drifts from its row, and `cargo test` checks WCAG contrast ratios, the
+"no raw glyph outside the icon containers" rule, the `#RRGGBBAA` byte order of
+translucent colours, and that no `key-pressed` handler compares against a key
+*name*. All of it is described in [`docs/UI-NOTES.md`](docs/UI-NOTES.md) § 7–9.
 
 The engineering record for the layout work — root causes, fixes and what could
 not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
@@ -154,7 +155,7 @@ about layout.
 
 ```powershell
 cargo fmt --all -- --check
-cargo test --workspace                       # 216 tests, 5 of them design rules
+cargo test --workspace                       # 220 tests, 7 of them design rules
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)
