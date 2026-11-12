@@ -13,9 +13,20 @@ matters for browsing: its blue accent, an illustration-first masonry feed with n
 chrome competing against the artwork, tag chips, and the detail page's
 image-dominant layout with a compact metadata column.
 
-Screenshots are kept locally in `docs/screenshots/` (git-ignored to avoid binary
-churn); the engineering record for the layout work — root causes, fixes and what
-could not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
+| Home (light) | Home (dark) |
+| --- | --- |
+| ![home light](docs/screenshots/readme/home-light.png) | ![home dark](docs/screenshots/readme/home-dark.png) |
+
+| Discover | Downloads | Settings |
+| --- | --- | --- |
+| ![discovery](docs/screenshots/readme/discovery.png) | ![downloads](docs/screenshots/readme/downloads.png) | ![settings](docs/screenshots/readme/settings.png) |
+
+Screenshots are captured by `tools/shot.ps1` at 1280×800 logical on a 150% DPI
+display. The curated set above is tracked; everything else stays local (see
+`.gitignore`).
+
+The engineering record for the layout work — root causes, fixes and what could
+not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
 
 ---
 
@@ -118,7 +129,7 @@ about layout.
 
 ```powershell
 cargo fmt --all -- --check
-cargo test --workspace                       # 197 tests
+cargo test --workspace                       # 205 tests
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)

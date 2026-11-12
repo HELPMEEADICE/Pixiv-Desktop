@@ -2483,6 +2483,25 @@ fn to_download_rows(tasks: Vec<pixiv_download::DownloadTask>) -> Vec<DownloadRow
         .collect()
 }
 
+fn data_dir() -> PathBuf {
+    directories::ProjectDirs::from("dev", "pixivdesktop", "PixivDesktop")
+        .map(|dirs| dirs.data_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn downloads_dir() -> PathBuf {
+    directories::UserDirs::new()
+        .and_then(|dirs| dirs.picture_dir().map(|path| path.join("PixivDesktop")))
+        .unwrap_or_else(|| PathBuf::from("PixivDesktop"))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::to_download_rows;
@@ -2514,15 +2533,30 @@ mod tests {
     /// does nothing - exactly the stuck-queue symptom this app had.
     #[test]
     fn task_states_map_to_the_integers_the_ui_switches_on() {
-        assert_eq!(to_download_rows(vec![task(TaskState::Queued, 0, None)])[0].state, 0);
-        assert_eq!(to_download_rows(vec![task(TaskState::Running, 5, Some(10))])[0].state, 1);
-        assert_eq!(to_download_rows(vec![task(TaskState::Completed, 10, Some(10))])[0].state, 2);
+        assert_eq!(
+            to_download_rows(vec![task(TaskState::Queued, 0, None)])[0].state,
+            0
+        );
+        assert_eq!(
+            to_download_rows(vec![task(TaskState::Running, 5, Some(10))])[0].state,
+            1
+        );
+        assert_eq!(
+            to_download_rows(vec![task(TaskState::Completed, 10, Some(10))])[0].state,
+            2
+        );
         assert_eq!(
             to_download_rows(vec![task(TaskState::Failed("boom".into()), 0, None)])[0].state,
             3
         );
-        assert_eq!(to_download_rows(vec![task(TaskState::Cancelled, 0, None)])[0].state, 4);
-        assert_eq!(to_download_rows(vec![task(TaskState::Skipped, 0, None)])[0].state, 5);
+        assert_eq!(
+            to_download_rows(vec![task(TaskState::Cancelled, 0, None)])[0].state,
+            4
+        );
+        assert_eq!(
+            to_download_rows(vec![task(TaskState::Skipped, 0, None)])[0].state,
+            5
+        );
     }
 
     #[test]
@@ -2565,23 +2599,4 @@ mod tests {
         no_path.destination = None;
         assert_eq!(to_download_rows(vec![no_path])[0].path.as_str(), "");
     }
-}
-
-fn data_dir() -> PathBuf {
-    directories::ProjectDirs::from("dev", "pixivdesktop", "PixivDesktop")
-        .map(|dirs| dirs.data_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn downloads_dir() -> PathBuf {
-    directories::UserDirs::new()
-        .and_then(|dirs| dirs.picture_dir().map(|path| path.join("PixivDesktop")))
-        .unwrap_or_else(|| PathBuf::from("PixivDesktop"))
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
 }

@@ -77,7 +77,11 @@ foreach ($size in $Sizes) {
             [void][VL]::SetForegroundWindow($hwnd)
             Start-Sleep -Milliseconds 2200
 
-            $line = (Get-Content $log | Select-String 'trace' | Select-Object -Last 1).Line
+            # The process is killed right after this read, so the final log line can
+            # arrive truncated; take the last *complete* trace line instead.
+            $line = (Get-Content $log | Select-String 'trace' | Where-Object { $_.Line -match 'gap=' } |
+                Select-Object -Last 1).Line
+            if (-not $line) { $line = (Get-Content $log | Select-String 'trace' | Select-Object -Last 1).Line }
             $gapOk = $line -match 'gap=(-?\d+)'
             $gap = if ($gapOk) { [double]$Matches[1] } else { [double]::NaN }
             $wr = New-Object VL+RECT; [void][VL]::GetWindowRect($hwnd, [ref]$wr)

@@ -174,7 +174,7 @@ disc, a stray thin circle).
 
 ```
 cargo fmt --all -- --check
-cargo test --workspace            # 197 tests
+cargo test --workspace            # 205 tests
 RUSTC_WORKSPACE_WRAPPER=C:\msys64\ucrt64\bin\clippy-driver.exe \
   cargo check --workspace --all-targets
 cargo build --release
