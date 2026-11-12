@@ -1,17 +1,16 @@
-# The gates, on a clean machine.
+# Continuous integration: formatting, lint, compile and test gates.
 #
-# This exists because every claim in the README was verified by hand on one
-# MSYS2 box: `cargo test --workspace # 232 tests` was written when the tree ran
-# 256, and the lint step could silently check nothing (see tools/gates.ps1). A
-# gate nobody re-runs is a comment.
+# The four checks are split into separate jobs so a failure names itself
+# instead of greying out one long log. Windows is the primary target: the
+# client binds shell32 / ole32 / crypt32 / advapi32 directly (the file picker,
+# DPAPI session storage and the system-theme registry read), so linting and
+# testing only make sense there. The cross-platform `check` matrix still
+# type-checks macOS and Linux, because build.yml ships binaries for both.
 #
-# Windows, not Linux: the client binds shell32 / ole32 / crypt32 / advapi32
-# directly (tools, DPAPI, the system-theme registry read), so the only honest
-# target is the one it ships for.
-#
-# The live suite is inert unless PIXIV_LIVE_PHPSESSID is set, so this workflow
-# never touches pixiv.net and needs no secret.
-name: gates
+# The live test suite stays inert unless PIXIV_LIVE_PHPSESSID is set, so this
+# workflow never touches pixiv.net and needs no secret.
+
+name: CI
 
 on:
   push:
@@ -19,12 +18,74 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: 1
 
 jobs:
-  gates:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+  workflows:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # YAML that parses is not YAML that runs; actionlint knows the workflow
+      # schema, the event payloads and the shellcheck rules for run blocks.
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+
+  check:
+    name: Check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check
+
+      # cargo check compiles every crate and runs the build scripts, so this
+      # also type-checks the .slint UI: build.rs feeds ui/**.slint through
+      # slint-build, and a syntax error there fails the crate, not just the
+      # linker step.
+      - name: Compile check
+        run: cargo check --workspace --all-targets --locked
+
+  clippy:
+    name: Clippy
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -33,29 +94,42 @@ jobs:
       - name: Install the toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       - name: Cache the build
         uses: Swatinem/rust-cache@v2
-
-      - name: Formatting
-        run: cargo fmt --all -- --check
-
-      - name: Tests
-        run: cargo test --workspace
-
-      # On a real MSVC toolchain clippy works, which is the one thing this
-      # machine cannot check; the wrapper in tools/gates.ps1 is the local
-      # substitute, not the standard.
-      - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Release build
-        run: cargo build --release
-
-      - name: Keep the binary
-        uses: actions/upload-artifact@v4
         with:
-          name: pixiv-desktop
-          path: target/release/pixiv-desktop.exe
-          if-no-files-found: error
+          shared-key: clippy
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  ci:
+    name: CI
+    # One status to require in branch protection, and it only reports success
+    # when every gate above did.
+    if: always()
+    needs: [format, workflows, check, clippy, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail when any gate failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
