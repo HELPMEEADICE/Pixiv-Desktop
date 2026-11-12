@@ -96,9 +96,14 @@ export component AppWindow inherits Window {
     in property <[[IllustItem]]> grid-columns: [];
     in property <length> grid-card-width: 220px;
     in property <int> grid-state: 0;
+    /// Headline and glyph for the empty/error/locked block of a feed page.
+    in property <string> grid-state-title: "";
+    in property <string> grid-state-glyph: "";
     in property <string> grid-message: "";
     in property <string> grid-action-label: "前往设置";
     in property <string> grid-count-label: "";
+    /// Previous search terms for the empty-search state (real local history).
+    in property <[string]> recent-searches: [];
     in property <[string]> grid-tags: [];
     in property <string> grid-active-tag: "";
     in property <bool> grid-loading-more: false;
@@ -548,10 +553,13 @@ export component AppWindow inherits Window {
                             : root.page == Destination.Bookmarks ? "你收藏的作品（需要登录）"
                             : "本机记录过的作品";
                         message: root.grid-message;
+                        state-title: root.grid-state-title;
+                        state-glyph: root.grid-state-glyph;
                         action-label: root.grid-action-label;
                         tags: root.grid-tags;
                         active-tag: root.grid-active-tag;
                         count-label: root.grid-count-label;
+                        recent-searches: root.page == Destination.Search ? root.recent-searches : [];
                         filters: root.page == Destination.Ranking ? root.ranking-filters : [];
                         active-filter: root.page == Destination.Ranking ? root.ranking-filter : -1;
                         loading-more: root.grid-loading-more;
@@ -565,6 +573,7 @@ export component AppWindow inherits Window {
                         retry => { root.grid-retry(); }
                         action => { root.grid-action(); }
                         load-more => { root.load-more(); }
+                        pick-search(w) => { root.search-submitted(w); }
                     }
 
                     DetailPage {

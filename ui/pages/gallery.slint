@@ -73,6 +73,17 @@ export component GalleryPage inherits Rectangle {
     in property <string> count-label: "";
     in property <bool> loading-more: false;
     in property <bool> show-header: true;
+    /// Previous search terms, newest first, from the local store. Rendered as
+    /// chips on the empty search state so the history the app already records is
+    /// actually usable instead of being write-only.
+    in property <[string]> recent-searches: [];
+    /// Copy for the empty/error/locked block. A page's *title* is not a state
+    /// title: the search page's heading and its "nothing here" headline used to be
+    /// the same string, which read as a bug.
+    in property <string> state-title: "";
+    /// Glyph for that block; empty means "derive from the state kind". The search
+    /// prompt must not be illustrated with a picture-unavailable icon.
+    in property <string> state-glyph: "";
     /// Preserved across page switches so navigation does not lose scroll position.
     in-out property <length> scroll-y: 0px;
     /// Measured content width, forwarded to Rust so the column count comes from
@@ -87,6 +98,7 @@ export component GalleryPage inherits Rectangle {
     callback retry();
     callback action();
     callback load-more();
+    callback pick-search(string);
 
     background: Theme.canvas;
 
@@ -210,20 +222,57 @@ export component GalleryPage inherits Rectangle {
         }
 
         // ---------------- empty / error / locked ----------------
+        //
+        // Sized to the viewport so a single short message does not leave the page
+        // looking half-built, but the recent-search chips sit directly under the
+        // message: they are the next thing to click, so they belong next to the
+        // prompt rather than pinned to the bottom of the window.
         if root.state > 1 : Rectangle {
             height: max(240px, page.viewport-height - 180px);
 
-            StateView {
-                width: parent.width;
-                height: parent.height;
-                kind: (root.state == 3) ? StateKind.Error
-                    : (root.state == 4) ? StateKind.Locked
-                    : StateKind.Empty;
-                title: root.title;
-                description: root.message;
-                action-label: root.action-label;
-                retry => { root.retry(); }
-                action => { root.action(); }
+            VerticalLayout {
+                alignment: center;
+                spacing: Theme.space-3;
+
+                StateView {
+                    width: 100%;
+                    kind: (root.state == 3) ? StateKind.Error
+                        : (root.state == 4) ? StateKind.Locked
+                        : StateKind.Empty;
+                    // The page title is the *page's* name, not the state's: reusing it
+                    // made the empty search state read "搜索" under a heading that
+                    // already said "搜索", next to a picture-unavailable glyph.
+                    glyph: root.state-glyph;
+                    title: root.state-title != "" ? root.state-title : root.title;
+                    description: root.message;
+                    action-label: root.action-label;
+                    retry => { root.retry(); }
+                    action => { root.action(); }
+                }
+
+                // Recent searches, offered where they are useful: the empty result.
+                // The app already recorded every submitted keyword in SQLite; before
+                // this the list was write-only and unreachable from the UI.
+                if root.state == 2 && root.recent-searches.length > 0 : VerticalLayout {
+                    spacing: Theme.space-2;
+
+                    Text {
+                        text: "最近搜索";
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        font-weight: Type.semibold;
+                        horizontal-alignment: center;
+                    }
+
+                    HorizontalLayout {
+                        spacing: Theme.space-2;
+                        alignment: center;
+                        for word in root.recent-searches : TagChip {
+                            label: word;
+                            clicked => { root.pick-search(word); }
+                        }
+                    }
+                }
             }
         }
 

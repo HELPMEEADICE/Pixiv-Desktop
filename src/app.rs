@@ -428,6 +428,20 @@ impl App {
         ui.set_session_user(self.session.user_name.clone().unwrap_or_default().into());
         ui.set_status_text(self.status_line().into());
         ui.set_cache_summary(self.cache_summary().into());
+        self.refresh_recent_searches();
+    }
+
+    /// Push the stored search history into the UI.
+    ///
+    /// The app has always written every submitted keyword to `search_history` and
+    /// never read it back, so the table grew and the user could not reach any of it.
+    /// The empty-search state renders these as chips that re-run the search.
+    fn refresh_recent_searches(&self) {
+        let words = self.store.search_history(8).unwrap_or_default();
+        let labels: Vec<slint::SharedString> =
+            words.into_iter().map(slint::SharedString::from).collect();
+        self.ui()
+            .set_recent_searches(ModelRc::from(Rc::new(VecModel::from(labels))));
     }
 
     fn cache_summary(&self) -> String {
@@ -633,6 +647,32 @@ impl App {
             app.remember_scroll(page, 0.0);
         }
 
+        // "Search" with no keyword is not a search. It used to reach the API with an
+        // empty string (which answered with an unrelated default listing) and, in
+        // demo mode, show the whole catalogue under a "搜索" heading. Both read as
+        // "these are your results". Prompt for input instead, and offer the recent
+        // searches that the app already records in SQLite.
+        {
+            let mut app = shared.borrow_mut();
+            if page == Destination::Search && app.search_word.trim().is_empty() {
+                app.feed_owner = Some(page);
+                app.set_tags(Vec::new());
+                let ui = app.ui();
+                ui.set_grid_state(2);
+                ui.set_grid_state_title("搜索作品".into());
+                ui.set_grid_state_glyph("search".into());
+                ui.set_grid_message("在上方搜索框输入关键词后按回车。".into());
+                ui.set_grid_action_label("".into());
+                ui.set_grid_count_label("".into());
+                ui.set_grid_columns(ModelRc::default());
+                app.columns.clear();
+                app.index.clear();
+                app.reached_end = true;
+                app.refresh_chrome();
+                return;
+            }
+        }
+
         match mode {
             Mode::Demo => {
                 let app = shared.borrow();
@@ -715,6 +755,8 @@ impl App {
     fn show_feed_error(&mut self, message: &str) {
         let ui = self.ui();
         ui.set_grid_state(3);
+        ui.set_grid_state_title("载入失败".into());
+        ui.set_grid_state_glyph("warning".into());
         ui.set_grid_message(message.into());
         ui.set_grid_action_label("重试".into());
         ui.set_grid_columns(ModelRc::default());
@@ -766,7 +808,27 @@ impl App {
         if items.is_empty() && all.is_empty() {
             let ui = self.ui();
             ui.set_grid_state(2);
-            ui.set_grid_message("这里还没有内容。试试换个关键词或标签。".into());
+            // The headline names what came back empty; the message says what to do
+            // about it. One generic sentence for every page read as filler.
+            let (headline, glyph, hint) = match self.page {
+                Destination::Search => {
+                    ("没有匹配的作品", "search", "换个关键词，或用标签再试一次。")
+                }
+                Destination::Bookmarks => (
+                    "收藏夹是空的",
+                    "star",
+                    "在作品详情页点击「收藏」后，会出现在这里。",
+                ),
+                Destination::History => (
+                    "还没有浏览记录",
+                    "history",
+                    "本机看过的作品会记录在这里，仅保存在本地。",
+                ),
+                _ => ("这里还没有内容", "", "试试刷新，或换一个标签。"),
+            };
+            ui.set_grid_state_title(headline.into());
+            ui.set_grid_state_glyph(glyph.into());
+            ui.set_grid_message(hint.into());
             ui.set_grid_action_label("".into());
             ui.set_grid_count_label("".into());
             ui.set_grid_columns(ModelRc::default());
@@ -1732,6 +1794,11 @@ fn install_callbacks(app: &Shared) {
                 app.search_word = word.clone();
                 app.feed_owner = None;
                 let _ = app.store.push_search(&word);
+                // The list the empty state renders has to include what was just
+                // searched for; `refresh_chrome` runs again on navigate but the
+                // store write and the read are ordered here so the chip appears
+                // without a second navigation.
+                app.refresh_recent_searches();
             }
             App::navigate(&shared, Destination::Search);
         });
@@ -2114,6 +2181,9 @@ fn install_callbacks(app: &Shared) {
             let app = shared.borrow();
             let views = app.store.clear_view_history();
             let searches = app.store.clear_search_history();
+            // The chips on the empty-search state read this table; leaving them on
+            // screen after "已清除" would be a lie.
+            app.refresh_recent_searches();
             if views.is_ok() && searches.is_ok() {
                 app.notify(1, "已清除浏览历史与搜索历史");
             } else {
