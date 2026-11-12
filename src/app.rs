@@ -148,6 +148,10 @@ struct App {
     theme_timer: slint::Timer,
 }
 
+/// Below this content width the profile header stacks instead of squeezing the
+/// name column between an 88px portrait and a 210px action block.
+const PROFILE_WIDE_MIN: f32 = 720.0;
+
 type Shared = Rc<RefCell<App>>;
 
 thread_local! {
@@ -396,6 +400,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
         Some("downloads") => App::navigate(&app, Destination::Downloads),
         Some("settings") => App::navigate(&app, Destination::Settings),
         _ => App::navigate(&app, Destination::Home),
+    }
+    if let Ok(id) = std::env::var("PIXIV_DESKTOP_START_USER") {
+        App::open_profile(&app, &id);
     }
     if let Ok(id) = std::env::var("PIXIV_DESKTOP_START_ILLUST") {
         App::open_detail(&app, &id);
@@ -1391,6 +1398,9 @@ impl App {
             return;
         }
         self.measured_width = width;
+        // The profile header is the one page that changes *shape* rather than just
+        // density, so it needs the same measured number the grid is built from.
+        self.ui().set_profile_wide(width >= PROFILE_WIDE_MIN);
         let geometry = GridGeometry::for_width(width);
         let columns_changed = geometry.columns != self.geometry.columns;
         let width_changed = (geometry.card_width - self.geometry.card_width).abs() >= 0.5;

@@ -173,6 +173,8 @@ export component AppWindow inherits Window {
     in property <image> profile-background;
     in property <bool> profile-premium: false;
     in property <bool> profile-self: false;
+    /// Content box is wide enough for the two-column profile header.
+    in property <bool> profile-wide: true;
     in property <bool> profile-followed: false;
     in property <bool> profile-busy: false;
     in property <[ProfileStatItem]> profile-stats: [];
@@ -752,6 +754,7 @@ export component AppWindow inherits Window {
                         cover: root.profile-background;
                         premium: root.profile-premium;
                         self: root.profile-self;
+                        wide: root.profile-wide;
                         stats: root.profile-stats;
                         followed: root.profile-followed;
                         busy: root.profile-busy;
