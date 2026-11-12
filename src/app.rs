@@ -151,6 +151,15 @@ struct App {
     theme_timer: slint::Timer,
 }
 
+/// How many decoded covers the feed keeps across a reload. `ImageCache` is the
+/// real cache (memory LRU + disk); this map only exists so a column rebuild can
+/// paint instantly instead of flashing empty, so the top of the feed is enough.
+const COVERS_KEEP: usize = 512;
+/// How many faces to keep before dropping the lot. One re-fetch is a cache hit:
+/// `ImageCache` still holds the bytes, and every row already on screen holds its
+/// own `Image` copy, so clearing this map never blanks a visible avatar.
+const AVATARS_KEEP: usize = 256;
+
 /// Below this content width the profile header stacks instead of squeezing the
 /// name column between an 88px portrait and a 210px action block.
 const PROFILE_WIDE_MIN: f32 = 720.0;
@@ -1201,6 +1210,13 @@ impl App {
         }
         all.extend(items);
         self.items = all;
+        if !append {
+            // A feed replacement is the one moment the set of live works is known
+            // exactly, so it is also the only collection point that needs no timer
+            // and no second opinion about what is on screen.
+            let ids = self.items.iter().map(|illust| illust.id.to_string());
+            prune_covers(&mut self.covers, ids, COVERS_KEEP);
+        }
         self.rebuild_columns();
     }
 
@@ -2882,6 +2898,12 @@ impl App {
                     };
                     let image = raw.to_slint();
                     app.avatars.insert(url.clone(), image);
+                    // Rows on screen already hold their own copy of the image, so
+                    // dropping the map never blanks a visible face: the next render
+                    // re-requests it and gets it from the disk/memory tier.
+                    if app.avatars.len() > AVATARS_KEEP {
+                        app.avatars.clear();
+                    }
                     app.repaint_avatars(&url);
                 });
             }
@@ -4825,6 +4847,23 @@ fn same_download_row(a: &DownloadRow, b: &DownloadRow) -> bool {
         && a.path == b.path
 }
 
+/// Keep the covers the top of `order` still references; returns how many went.
+///
+/// `covers` holds one decoded texture per work ever shown and nothing removed an
+/// entry, so an hour of browsing kept every cover alive for the rest of the
+/// session. `keep` bounds it even for an endless feed: the top of the feed is what
+/// a column rebuild can paint without waiting.
+fn prune_covers(
+    covers: &mut HashMap<String, slint::Image>,
+    order: impl Iterator<Item = String>,
+    keep: usize,
+) -> usize {
+    let live: HashSet<String> = order.take(keep).collect();
+    let before = covers.len();
+    covers.retain(|id, _| live.contains(id));
+    before - covers.len()
+}
+
 fn ranking_index(kind: RankingKind) -> i32 {
     RankingKind::ALL
         .iter()
@@ -5045,6 +5084,20 @@ mod tests {
         assert!(changed.contains("格式"), "{changed}");
         assert_ne!(unauthorized, offline);
         assert_ne!(offline, changed);
+    }
+
+    #[test]
+    fn cover_pruning_keeps_the_top_of_the_feed() {
+        let mut covers = std::collections::HashMap::new();
+        for id in ["a", "b", "c", "d"] {
+            covers.insert(id.to_string(), slint::Image::default());
+        }
+        let order = ["a", "b", "c"].iter().map(|id| id.to_string());
+        // Only the first `keep` entries of the feed survive, and an id the feed no
+        // longer lists is dropped even when it would have fitted.
+        assert_eq!(super::prune_covers(&mut covers, order, 2), 2);
+        assert!(covers.contains_key("a") && covers.contains_key("b"));
+        assert!(!covers.contains_key("c") && !covers.contains_key("d"));
     }
 
     fn download_row(id: i32, progress: i32) -> DownloadRow {
