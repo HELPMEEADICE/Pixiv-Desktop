@@ -101,6 +101,9 @@ struct App {
     // feed
     items: Vec<Illust>,
     columns: Vec<Rc<VecModel<IllustItem>>>,
+    /// Accumulated height of each column, so an appended page can go to the
+    /// shortest one without re-reading every model.
+    column_heights: Vec<f32>,
     index: HashMap<String, (usize, usize)>,
     covers: HashMap<String, slint::Image>,
     loader: CoverLoader,
@@ -580,6 +583,7 @@ impl App {
             geometry: GridGeometry::for_width(858.0),
             items: Vec::new(),
             columns: Vec::new(),
+            column_heights: Vec::new(),
             index: HashMap::new(),
             covers: HashMap::new(),
             loader: CoverLoader::new(),
@@ -1208,6 +1212,7 @@ impl App {
             self.reached_end = true;
             return;
         }
+        let already = self.items.len();
         all.extend(items);
         self.items = all;
         if !append {
@@ -1217,7 +1222,19 @@ impl App {
             let ids = self.items.iter().map(|illust| illust.id.to_string());
             prune_covers(&mut self.covers, ids, COVERS_KEEP);
         }
-        self.rebuild_columns();
+        // A new page extends the columns it finds. Rebuilding them re-ran the
+        // balancer over the whole feed, so every card above silently moved to a
+        // different column - the opposite of what `layout::distribute` is documented
+        // to preserve, and visible as a jump while scrolling.
+        if append
+            && already > 0
+            && self.columns.len() == self.geometry.columns
+            && self.column_heights.len() == self.columns.len()
+        {
+            self.append_columns(already);
+        } else {
+            self.rebuild_columns();
+        }
     }
 
     /// Recompute the column buckets from `self.items` for the current geometry.
@@ -1241,6 +1258,12 @@ impl App {
             .collect();
         let assignment = layout::distribute(&heights, geometry.columns);
         let buckets = layout::bucket(&assignment, geometry.columns);
+        // Sum what each column actually received, so an appended page can be placed
+        // without re-reading the models or recomputing the feed.
+        let heights_by_column: Vec<f32> = buckets
+            .iter()
+            .map(|rows| rows.iter().map(|index| heights[*index]).sum())
+            .collect();
 
         let mut models = Vec::with_capacity(buckets.len());
         let mut index = HashMap::new();
@@ -1276,7 +1299,46 @@ impl App {
         ui.set_status_text(self.status_line().into());
 
         self.columns = models;
+        self.column_heights = heights_by_column;
         self.index = index;
+        self.spawn_covers();
+        self.backfill_author_avatars();
+    }
+
+    /// Place the items that arrived after row `from` into the existing columns.
+    ///
+    /// Uses the same greedy rule as [`layout::distribute`] - shortest column, ties
+    /// to the left - applied one item at a time against the accumulated heights.
+    /// Nothing above the new page is touched, so the feed does not reshuffle while
+    /// the user is reading it.
+    fn append_columns(&mut self, from: usize) {
+        let geometry = self.geometry;
+        for index in from..self.items.len() {
+            let illust = &self.items[index];
+            let height = layout::card_height(
+                geometry.card_width,
+                layout::clamped_aspect(illust.width, illust.height),
+            );
+            let target = shortest_column(&self.column_heights);
+            let mut item = illust_to_item(illust, self.rank_of(illust));
+            let key = illust.id.to_string();
+            if let Some(image) = self.covers.get(&key) {
+                item.cover = image.clone();
+                item.state = 0;
+            }
+            let Some(model) = self.columns.get(target) else {
+                continue;
+            };
+            let row = model.row_count();
+            model.push(item);
+            self.index.insert(key, (target, row));
+            self.column_heights[target] += height;
+        }
+
+        let ui = self.ui();
+        ui.set_grid_card_width(geometry.card_width);
+        ui.set_grid_count_label(format!("{} 件作品", self.items.len()).into());
+        ui.set_status_text(self.status_line().into());
         self.spawn_covers();
         self.backfill_author_avatars();
     }
@@ -4864,6 +4926,21 @@ fn prune_covers(
     before - covers.len()
 }
 
+/// The column that should take the next card: the shortest one, ties to the left.
+///
+/// `layout::distribute` makes the same choice when it lays out a whole feed;
+/// appending needs the rule on its own, against the heights already accumulated.
+/// (Passing a one-element slice to `distribute` looks equivalent and is not: every
+/// total starts at zero, so the tie always resolves to column 0.)
+fn shortest_column(heights: &[f32]) -> usize {
+    heights
+        .iter()
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
 fn ranking_index(kind: RankingKind) -> i32 {
     RankingKind::ALL
         .iter()
@@ -5084,6 +5161,37 @@ mod tests {
         assert!(changed.contains("格式"), "{changed}");
         assert_ne!(unauthorized, offline);
         assert_ne!(offline, changed);
+    }
+
+    #[test]
+    fn appended_cards_go_to_the_shortest_column() {
+        let mut heights = vec![0.0_f32; 4];
+        assert_eq!(super::shortest_column(&heights), 0, "ties go left");
+        heights[0] += 300.0;
+        assert_eq!(super::shortest_column(&heights), 1);
+        heights[1] += 300.0;
+        heights[2] += 100.0;
+        assert_eq!(super::shortest_column(&heights), 3);
+    }
+
+    /// Appending must produce the same distribution as laying the whole feed out
+    /// in one pass; otherwise "load more" would quietly drift away from the
+    /// balancer the grid tests assert on.
+    #[test]
+    fn incremental_placement_matches_a_single_pass() {
+        let heights: Vec<f32> = (0..40).map(|i| 100.0 + (i % 5) as f32 * 40.0).collect();
+        let mut running = vec![0.0_f32; 4];
+        for height in &heights {
+            let target = super::shortest_column(&running);
+            running[target] += *height;
+        }
+
+        let assignment = crate::layout::distribute(&heights, 4);
+        let mut one_pass = vec![0.0_f32; 4];
+        for (height, column) in heights.iter().zip(&assignment) {
+            one_pass[*column] += *height;
+        }
+        assert_eq!(running, one_pass);
     }
 
     #[test]
