@@ -132,6 +132,9 @@ struct App {
     account_avatar: Option<String>,
 
     // detail
+    /// The download queue's model, created once and patched in place. Replacing
+    /// it on every tick rebuilt every row five times a second.
+    download_rows: Rc<VecModel<DownloadRow>>,
     detail: Option<Illust>,
     /// Avatar URL the metadata panel is waiting for. Stored rather than recomputed:
     /// a resolved lookup lands in `author_avatars`, not in `illust.author.avatar`,
@@ -503,6 +506,10 @@ impl App {
             filename_template: template.clone(),
         });
 
+        // One row model for the life of the process: `push_downloads` patches it
+        // rather than swapping it.
+        let download_rows = Rc::new(VecModel::<DownloadRow>::default());
+
         let session = crate::session::load(&data_dir);
         let (client, mode) = match Client::new(ClientConfig::default(), session.clone()) {
             Ok(client) if session.is_authenticated() => (Some(client), Mode::Real),
@@ -526,6 +533,7 @@ impl App {
             ui.set_demo_mode(mode == Mode::Demo);
             ui.set_authenticated(session.is_authenticated());
             ui.set_session_user(session.user_name.clone().unwrap_or_default().into());
+            ui.set_download_rows(ModelRc::from(download_rows.clone()));
             ui.set_download_directory(download_dir.display().to_string().into());
             ui.set_download_template(template.clone().into());
             ui.set_template_input(template.into());
@@ -551,6 +559,7 @@ impl App {
             mode,
             session,
             downloads,
+            download_rows,
             data_dir,
             download_dir,
             page: Destination::Home,
@@ -1925,8 +1934,10 @@ impl App {
             .count() as i32;
         let done = rows.iter().filter(|row| row.state == 2).count() as i32;
         let failed = rows.iter().filter(|row| row.state == 3).count() as i32;
-        let model = Rc::new(VecModel::from(rows));
-        ui.set_download_rows(ModelRc::from(model));
+        // Patch in place. The old code built a brand-new `VecModel` every 500ms,
+        // which replaced every row element: the row under the pointer lost its
+        // hover state five times a second, and an idle queue still did that work.
+        sync_download_rows(&self.download_rows, rows);
         ui.set_downloads_active(active);
         ui.set_downloads_done(done);
         ui.set_downloads_failed(failed);
@@ -4775,6 +4786,45 @@ fn retry_url(pages: &[PageMeta], largest: &str, index: usize) -> Option<String> 
     }
 }
 
+/// Patch `model` so it holds `next`, touching only the rows that differ.
+///
+/// Returns how many rows were written, which is what the tests assert on and what
+/// used to be "all of them, five times a second". Fields are compared one by one
+/// rather than through `PartialEq` on a generated Slint struct, so adding a field
+/// to `DownloadRow` cannot silently make every row compare equal.
+fn sync_download_rows(model: &VecModel<DownloadRow>, next: Vec<DownloadRow>) -> usize {
+    let mut touched = 0;
+    while model.row_count() > next.len() {
+        model.remove(model.row_count() - 1);
+        touched += 1;
+    }
+    for (index, row) in next.into_iter().enumerate() {
+        match model.row_data(index) {
+            Some(current) if same_download_row(&current, &row) => {}
+            Some(_) => {
+                model.set_row_data(index, row);
+                touched += 1;
+            }
+            None => {
+                model.push(row);
+                touched += 1;
+            }
+        }
+    }
+    touched
+}
+
+fn same_download_row(a: &DownloadRow, b: &DownloadRow) -> bool {
+    a.id == b.id
+        && a.state == b.state
+        && a.progress == b.progress
+        && a.title == b.title
+        && a.author == b.author
+        && a.subtitle == b.subtitle
+        && a.message == b.message
+        && a.path == b.path
+}
+
 fn ranking_index(kind: RankingKind) -> i32 {
     RankingKind::ALL
         .iter()
@@ -4942,9 +4992,13 @@ fn now_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{describe_session_error, history_illust, retry_url, to_download_rows};
+    use super::{
+        describe_session_error, history_illust, retry_url, sync_download_rows, to_download_rows,
+    };
+    use crate::DownloadRow;
     use pixiv_download::{DownloadRequest, DownloadTask, TaskState};
     use pixiv_types::domain::PageMeta;
+    use slint::Model;
     use std::path::PathBuf;
 
     #[test]
@@ -4991,6 +5045,56 @@ mod tests {
         assert!(changed.contains("格式"), "{changed}");
         assert_ne!(unauthorized, offline);
         assert_ne!(offline, changed);
+    }
+
+    fn download_row(id: i32, progress: i32) -> DownloadRow {
+        DownloadRow {
+            id,
+            title: format!("t{id}").into(),
+            author: "a".into(),
+            subtitle: "".into(),
+            progress,
+            state: 1,
+            message: "".into(),
+            path: "".into(),
+        }
+    }
+
+    /// The queue is patched, not rebuilt: replacing the model five times a second
+    /// reset every row element, so a hovered cancel button lost its state while the
+    /// download it belonged to was still going.
+    #[test]
+    fn download_rows_are_patched_not_rebuilt() {
+        let model = slint::VecModel::from(vec![download_row(1, 10), download_row(2, 20)]);
+
+        // Nothing changed: nothing is written.
+        assert_eq!(
+            sync_download_rows(&model, vec![download_row(1, 10), download_row(2, 20)]),
+            0
+        );
+
+        // One progress tick: exactly one row is written.
+        assert_eq!(
+            sync_download_rows(&model, vec![download_row(1, 55), download_row(2, 20)]),
+            1
+        );
+        assert_eq!(model.row_data(0).unwrap().progress, 55);
+
+        // A new task lands at the head and pushes the rest down. That is the one
+        // case that legitimately rewrites the list, and the model survives it.
+        assert_eq!(
+            sync_download_rows(
+                &model,
+                vec![download_row(3, 0), download_row(1, 55), download_row(2, 20)]
+            ),
+            3
+        );
+        assert_eq!(model.row_count(), 3);
+        assert_eq!(model.row_data(0).unwrap().id, 3);
+
+        // Clearing finished rows shrinks the tail.
+        assert_eq!(sync_download_rows(&model, vec![]), 3);
+        assert_eq!(model.row_count(), 0);
     }
 
     fn page_meta(id: &str) -> PageMeta {
