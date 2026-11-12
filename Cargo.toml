@@ -80,10 +80,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "ansi"] }
 open.workspace = true
 directories.workspace = true
 urlencoding.workspace = true
-image = { version = "0.25", features = ["jpeg", "png", "gif", "webp"] }
+image.workspace = true
 
 [build-dependencies]
 slint-build = "1.18"
+
+# The development profile is what `cargo run` and the capture harness use. At the
+# default opt-level 0 the Slint software renderer is slow enough to look like a
+# bug, and the debug binary carried 601MB of debuginfo. Dependencies are optimised
+# (they are compiled once and rarely change); this crate keeps level 1 so a
+# backtrace still points at a line.
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 opt-level = 2
