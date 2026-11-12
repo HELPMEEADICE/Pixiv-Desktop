@@ -440,7 +440,7 @@ observed on the real service through the real Slint window.
 | 30 | Settings still works | **PASS** | signed-in card and cookie field present |
 | 31 | Narrow window | **PASS** | 1522x1076 physical: rail intact, three columns, no overlap |
 | 32 | No "加载失败" cards after the UA fix | **PASS** | 0 failures across home, discovery, ranking |
-| 33 | Offline suite | **PASS** | 255 tests |
+| 33 | Offline suite | **PASS** | 241 tests (256 with the live suite) |
 | 34 | Live suite | **PASS** | 15 tests against the real service |
 | 35 | `cargo fmt --all -- --check` | **PASS** | clean |
 | 36 | Clippy with `-D warnings` | **PASS** | `RUSTC_WORKSPACE_WRAPPER=clippy-driver cargo check --workspace --all-targets` |
