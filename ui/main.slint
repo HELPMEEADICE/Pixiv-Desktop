@@ -684,7 +684,8 @@ export component AppWindow inherits Window {
                                 ? (root.search-word == "" ? "搜索" : "搜索：" + root.search-word)
                             : root.page == Destination.Bookmarks ? "收藏"
                             : "浏览历史";
-                        subtitle: root.page == Destination.Discovery ? "热门标签与精选作品"
+                        subtitle: root.page == Destination.Discovery
+                            ? "Pixiv 推荐引擎与推荐画师，与排行榜无关"
                             : root.page == Destination.Ranking ? "Pixiv 官方榜单，可切换统计周期"
                             : root.page == Destination.Search ? "按关键词查找作品，回车提交"
                             : root.page == Destination.Bookmarks ? "你收藏的作品（需要登录）"

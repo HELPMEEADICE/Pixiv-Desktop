@@ -114,7 +114,7 @@ impl Default for ClientConfig {
 /// request -- verified: the same cookie and URL return 200 with a browser UA and
 /// 403 with a "PixivDesktop/..." one. The client identifies itself in the UI,
 /// not by sabotaging its own requests.
-pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)      AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+pub const DEFAULT_USER_AGENT: &str = pixiv_types::BROWSER_USER_AGENT;
 
 /// The Pixiv HTTP client.
 ///
@@ -256,9 +256,7 @@ impl Client {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::ACCEPT,
-            reqwest::header::HeaderValue::from_static(
-                "application/json, text/plain, */*",
-            ),
+            reqwest::header::HeaderValue::from_static("application/json, text/plain, */*"),
         );
         headers.insert(
             reqwest::header::ACCEPT_LANGUAGE,

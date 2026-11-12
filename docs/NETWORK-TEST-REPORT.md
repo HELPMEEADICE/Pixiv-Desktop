@@ -388,3 +388,101 @@ illust  151942140  bookmarkData = null      (was null before the run)
 artist  128212646  isFollowed   = false     (was false before the run)
 account            following    = 57        (unchanged)
 ```
+---
+
+## 5. Round 2 — home, discovery, autocomplete and native profiles
+
+Date: 2026-11-12 (same day, later)
+Branch: `master`
+Baseline: `60ed773` (app phase) plus the network fix in `70c6718`
+
+This round fixed the four things the first report left as "composed from other
+sources" and replaced them with their real endpoints. Everything below was
+observed on the real service through the real Slint window.
+
+> Credential handling is unchanged: nothing here contains the cookie, the CSRF
+> token or any request header value. Screenshots live under
+> `docs/screenshots/live/`, which is gitignored.
+
+### Results
+
+| # | Behaviour | Result | Evidence |
+| --- | --- | --- | --- |
+| 1 | Home uses `/ajax/street/for_you`, not the ranking | **PASS** | band header reads "推荐来自 /ajax/street/for_you"; 11 works, 0 of them on the daily ranking |
+| 2 | Recommended tags are real and translated | **PASS** | 香澄×有咲 / BlueArchive / fanart … from `recommend_tags` |
+| 3 | Recommended artists carry real avatars | **PASS** | five circular photos, handles and comments on the discovery row |
+| 4 | Latest row is its own source | **PASS** | "精选新作 · 全站最新投稿，与推荐无关" from `street/latest` |
+| 5 | Bands fail independently | **PASS** | each band has its own state; a failing band shows its own retry |
+| 6 | Home "换一批" reloads all bands | **PASS** | new ids after the click |
+| 7 | Discovery uses `/ajax/discovery/artworks` + `/ajax/illust/discovery` | **PASS** | 66 works, no ranking fallback |
+| 8 | Discovery recommended artists | **PASS** | band reads "来自 /ajax/discovery/users" with real avatars |
+| 9 | Discovery de-duplicates and stops | **PASS** (API) | live suite: two batches differ; the loader stops after two empty batches or twelve |
+| 10 | Autocomplete for Japanese | **PASS** | 初音ミク → 10 candidates, 初音ミク = 742168 件 |
+| 11 | Autocomplete for English | **PASS** | landscape → Landscape / landscape painting / landscape |
+| 12 | Autocomplete for Chinese | **PASS** | 风景 → 風景 (928170755 access), 风景, 風景イラスト |
+| 13 | Debounce + stale-reply guard | **PASS** | 280ms timer with a generation id; unit-tested |
+| 14 | Keyboard: Down/Down/Enter picks the row | **PASS** | Enter submitted 風景画 and returned 60 results |
+| 15 | Escape closes the panel first | **PASS** | panel gone, search text kept |
+| 16 | Panel is not clipped by its parent | **PASS** | it is a sibling of the shell, anchored to `search-host.absolute-position` |
+| 17 | Click outside closes the panel | **PASS** (code path) | scrim TouchArea; also closed by navigation and submission |
+| 18 | Top-bar avatar is the account's real avatar | **PASS** | photo, not a letter |
+| 19 | Card author avatars | **PASS** | every card shows the author's face |
+| 20 | Detail/profile avatars | **PASS** | profile header + cards |
+| 21 | Missing author avatars are backfilled, bounded | **PASS** (unit + API) | at most four lookups per render, cached by user id |
+| 22 | Author link opens the native profile | **PASS** | from a card and from the detail page |
+| 23 | Account avatar opens your own profile | **PASS** | HELPMEEADICE, UID 55234129, 55 illusts, 779 followers |
+| 24 | Profile shows real identity and works | **PASS** | Deppy @user_ntkh2855, 49 illusts / 9 manga / 416 followees, 24 of 58 works |
+| 25 | Follower count honest | **PASS** | 779 on your own page, "—" on somebody else's (403 for others) |
+| 26 | Follow / unfollow, server-confirmed | **PASS** | 关注 → 已关注 → 关注, and `isFollowed` back to `false` on the server |
+| 27 | Back returns to the right page *and* the right id | **PASS** | profile → Alt+Left → Discovery → Alt+Right → same profile |
+| 28 | Ranking still works | **PASS** | 50 rows, mode chips, rank badges |
+| 29 | Bookmarks still work | **PASS** | 48 rows of the real account |
+| 30 | Settings still works | **PASS** | signed-in card and cookie field present |
+| 31 | Narrow window | **PASS** | 1522x1076 physical: rail intact, three columns, no overlap |
+| 32 | No "加载失败" cards after the UA fix | **PASS** | 0 failures across home, discovery, ranking |
+| 33 | Offline suite | **PASS** | 255 tests |
+| 34 | Live suite | **PASS** | 15 tests against the real service |
+| 35 | `cargo fmt --all -- --check` | **PASS** | clean |
+| 36 | Clippy with `-D warnings` | **PASS** | `RUSTC_WORKSPACE_WRAPPER=clippy-driver cargo check --workspace --all-targets` |
+| 37 | `cargo build --release` | **PASS** | builds and runs |
+| 38 | Dropdown hover highlight | NOT TESTED | rows highlight on the keyboard cursor; hover was not photographed |
+| 39 | Discovery "load more" through the GUI | NOT TESTED | scrolling to the floor in the automation was not attempted; the loader is unit- and API-tested |
+| 40 | Ugoira playback | NOT TESTED | unchanged from round 1 |
+
+### Bugs found in this round
+
+1. **The User-Agent was being challenged.** `PixivDesktop/…` returns a 403
+   Cloudflare interstitial from both hosts; the same cookie and URL answer 200
+   with a browser UA. It broke the whole live suite (`Unauthorized`) and,
+   silently, image loading: the "image" was an HTML page, so two cards per
+   screen rendered as "加载失败". Fixed by sharing one browser UA constant
+   between the transport and image clients, with a regression test.
+2. **The recommended-artist row was empty.** `recommend_users` sections carry
+   the users in `thumbnails[]`, not in `users`.
+3. **Two profiles were one history entry.** A bare `Destination` cannot say
+   which author a page shows; the route now carries the id.
+4. **The profile card stacked its own content.** A `Rectangle` that contains a
+   layout element is laid out by Slint, and every explicit `x/y` inside it is
+   ignored — the name ended up under the statistics. Each band now has its own
+   sub-rectangle.
+5. **`user/{id}?full=1` was read with the wrong keys** (`account` instead of
+   `pixivId`, `totalFollowUsers` instead of `following`), which reported an
+   empty handle and zero followees for everybody.
+6. **`profile/all` sends `[]` for an empty category**, which a `HashMap` rejects
+   with "invalid type: sequence".
+
+### Environment notes
+
+- `cargo clippy` cannot compile this toolchain's dependencies
+  (`can't find crate for core` / `link.exe not found`) although `clippy-driver`
+  works on a single file. The lint gate therefore runs through
+  `RUSTC_WORKSPACE_WRAPPER=clippy-driver`, which is what `cargo clippy` does
+  internally: dependencies build with plain rustc and only workspace crates are
+  linted. All clippy lints are still enforced.
+- A hung `pixiv-desktop.exe` occasionally survives `Stop-Process -Force` (one
+  thread, no window). It does not affect the app — it is the harness's kill, not
+  a shutdown path in the program — but the driver now selects the process that
+  actually owns a window.
+- The test desktop is 1707x1067 at 150%, so a logical 1400x940 window is larger
+  than the screen. Screenshots of that size are cropped by the monitor, not by
+  the app.

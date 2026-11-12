@@ -76,8 +76,15 @@ export component ProfilePage inherits Rectangle {
         }
 
         // ---------------- identity card ----------------
+        //
+        // Layout note: this Rectangle holds *only* absolutely positioned
+        // children. A Rectangle that contains a layout element is itself laid
+        // out by Slint, and every explicit x/y inside it is then ignored -- that
+        // is what once stacked the name under the statistics. Each band that
+        // needs a layout therefore gets its own sub-rectangle whose single child
+        // is that layout.
         Rectangle {
-            height: 196px;
+            height: 208px;
             border-radius: Theme.radius-lg;
             background: Theme.layer;
             border-width: 1px;
@@ -87,11 +94,10 @@ export component ProfilePage inherits Rectangle {
             // Cover image, darkened so the text above it stays legible in both
             // themes. A profile without a cover keeps the plain card.
             if root.cover.width > 0 : Rectangle {
-                x: 0px;
-                y: 0px;
                 width: 100%;
-                height: 96px;
+                height: 92px;
                 clip: true;
+
                 Image {
                     source: root.cover;
                     image-fit: ImageFit.cover;
@@ -105,8 +111,7 @@ export component ProfilePage inherits Rectangle {
                 }
             }
 
-            // Back to where you came from: the navigation pane has a global
-            // back, but a profile opened from a work is a long way from home.
+            // Back to where you came from.
             IconButton {
                 icon: "back";
                 x: Theme.space-2;
@@ -117,128 +122,150 @@ export component ProfilePage inherits Rectangle {
 
             Avatar {
                 x: Theme.space-4;
-                y: 56px;
-                size: 84px;
+                y: 52px;
+                size: 88px;
                 ring: true;
                 source: root.avatar;
                 state: root.avatar-state;
                 fallback: root.user-name;
             }
 
-            VerticalLayout {
-                x: Theme.space-4 + 84px + Theme.space-4;
-                y: 74px;
-                width: max(0px, parent.width - self.x - 260px);
-                spacing: 2px;
+            info-block := Rectangle {
+                x: Theme.space-4 + 88px + Theme.space-4;
+                y: 56px;
+                width: max(0px, parent.width - self.x - 250px);
+                height: 46px;
+
+                VerticalLayout {
+                    spacing: 2px;
+                    alignment: start;
+
+                    HorizontalLayout {
+                        spacing: Theme.space-2;
+                        alignment: start;
+
+                        Text {
+                            text: root.user-name;
+                            color: Theme.text;
+                            font-size: Theme.font-page;
+                            font-weight: Type.semibold;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        if root.premium : Rectangle {
+                            width: premium-label.width + 12px;
+                            height: 18px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-fill;
+
+                            premium-label := Text {
+                                x: 6px;
+                                y: 0px;
+                                height: parent.height;
+                                text: "Premium";
+                                color: Theme.on-accent;
+                                font-size: Theme.font-caption;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: (root.user-account == "" ? "" : "@" + root.user-account)
+                            + (root.user-id == "" ? "" : "   UID " + root.user-id);
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-small;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            action-block := Rectangle {
+                x: parent.width - self.width - Theme.space-4;
+                y: 56px;
+                width: 210px;
+                height: 34px;
 
                 HorizontalLayout {
                     spacing: Theme.space-2;
-                    alignment: start;
-                    Text {
-                        text: root.user-name;
-                        color: Theme.text;
-                        font-size: Theme.font-page;
-                        font-weight: Type.semibold;
-                        overflow: elide;
-                        vertical-alignment: center;
+                    alignment: end;
+
+                    if !root.self : AppButton {
+                        label: root.followed ? "已关注" : "关注";
+                        icon: root.followed ? "check" : "follow";
+                        kind: root.followed ? ButtonKind.Secondary : ButtonKind.Primary;
+                        enabled: !root.busy;
+                        clicked => { root.toggle-follow(); }
                     }
-                    if root.premium : Rectangle {
-                        width: premium-label.width + 10px;
-                        height: 18px;
-                        border-radius: Theme.radius-sm;
-                        background: Theme.accent-fill;
-                        premium-label := Text {
-                            x: 5px;
-                            y: 0px;
-                            height: parent.height;
-                            text: "Pixiv Premium";
-                            color: Theme.on-accent;
-                            font-size: Theme.font-caption;
-                            vertical-alignment: center;
-                        }
+                    AppButton {
+                        label: "刷新";
+                        icon: "refresh";
+                        kind: ButtonKind.Secondary;
+                        enabled: !root.busy;
+                        clicked => { root.refresh(); }
                     }
-                }
-                Text {
-                    text: (root.user-account == "" ? "" : "@" + root.user-account)
-                        + (root.user-id == "" ? "" : "   UID " + root.user-id);
-                    color: Theme.text-tertiary;
-                    font-size: Theme.font-small;
-                    overflow: elide;
                 }
             }
 
-            HorizontalLayout {
-                x: parent.width - self.width - Theme.space-4;
-                y: 74px;
-                alignment: end;
-                spacing: Theme.space-2;
-
-                if !root.self : AppButton {
-                    label: root.followed ? "已关注" : "关注";
-                    icon: root.followed ? "check" : "follow";
-                    kind: root.followed ? ButtonKind.Secondary : ButtonKind.Primary;
-                    enabled: !root.busy;
-                    clicked => { root.toggle-follow(); }
-                }
-                AppButton {
-                    label: "刷新";
-                    icon: "refresh";
-                    kind: ButtonKind.Secondary;
-                    enabled: !root.busy;
-                    clicked => { root.refresh(); }
-                }
-            }
-
-            // Bio, then the figures. The card is a fixed height on purpose: a
-            // long bio must not push the grid around while the page loads.
+            // Bio: two lines, fixed height, so a long comment cannot push the
+            // grid around while the page loads.
             Text {
-                x: Theme.space-4 + 84px + Theme.space-4;
-                y: 124px;
+                x: Theme.space-4 + 88px + Theme.space-4;
+                y: 112px;
                 width: max(0px, parent.width - self.x - Theme.space-4);
-                height: 36px;
+                height: 34px;
                 text: root.user-comment == "" ? "这个用户还没有写简介。" : root.user-comment;
                 color: Theme.text-secondary;
                 font-size: Theme.font-small;
                 wrap: word-wrap;
                 overflow: elide;
-                max-height: 36px;
+                max-height: 34px;
             }
 
-            HorizontalLayout {
-                x: Theme.space-4 + 84px + Theme.space-4;
-                y: 164px;
+            stat-block := Rectangle {
+                x: Theme.space-4 + 88px + Theme.space-4;
+                y: 158px;
                 width: max(0px, parent.width - self.x - Theme.space-4);
-                spacing: Theme.space-4;
-                alignment: start;
+                height: 40px;
 
-                for stat in root.stats : HorizontalLayout {
+                VerticalLayout {
                     spacing: 4px;
-                    alignment: start;
-                    Text {
-                        text: stat.value;
-                        color: Theme.text;
-                        font-size: Theme.font-small;
-                        font-weight: Type.semibold;
+
+                    HorizontalLayout {
+                        spacing: Theme.space-4;
+                        alignment: start;
+
+                        for stat in root.stats : HorizontalLayout {
+                            spacing: 4px;
+                            alignment: start;
+                            Text {
+                                text: stat.value;
+                                color: Theme.text;
+                                font-size: Theme.font-small;
+                                font-weight: Type.semibold;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: stat.label;
+                                color: Theme.text-tertiary;
+                                font-size: Theme.font-caption;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
-                    Text {
-                        text: stat.label;
+
+                    if root.count-label != "" : Text {
+                        text: root.count-label;
                         color: Theme.text-tertiary;
                         font-size: Theme.font-caption;
+                        vertical-alignment: center;
                     }
                 }
             }
         }
 
         // ---------------- works ----------------
-        if root.state == 0 && root.count-label != "" : Text {
-            height: 22px;
-            text: root.count-label;
-            color: Theme.text-secondary;
-            font-size: Theme.font-small;
-            font-weight: Type.semibold;
-            vertical-alignment: center;
-        }
-
         if root.state == 0 : ArtworkGrid {
             columns: root.columns;
             card-width: root.card-width;

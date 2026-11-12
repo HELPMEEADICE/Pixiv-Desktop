@@ -69,12 +69,13 @@ use disk::DiskTier;
 use gate::PriorityGate;
 use lru::{MemoryTier, Variant};
 
-/// `User-Agent` sent with every image request; mirrors the transport crate.
-const USER_AGENT: &str = concat!(
-    "PixivDesktop/",
-    env!("CARGO_PKG_VERSION"),
-    " (Rust; desktop client)"
-);
+/// User-Agent sent with every image request.
+///
+/// Shares the transport crate's browser string: i.pximg.net is behind the same
+/// edge protection as www.pixiv.net, and a client identifying itself with a
+/// custom UA gets an HTML challenge page instead of a JPEG. Decoding that page
+/// fails, and the card that wanted the image renders as "加载失败".
+const USER_AGENT: &str = pixiv_types::BROWSER_USER_AGENT;
 
 /// Upper bound for one image download.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -625,6 +626,20 @@ pub fn cache_key(url: &str) -> String {
         let _ = write!(key, "{byte:02x}");
     }
     key
+}
+#[cfg(test)]
+mod ua_tests {
+    use super::USER_AGENT;
+
+    /// Regression guard: i.pximg.net is behind the same edge protection as
+    /// www.pixiv.net and answers a non-browser User-Agent with an HTML challenge
+    /// page, which fails to decode and renders every card as "加载失败".
+    #[test]
+    fn image_requests_identify_as_a_browser() {
+        assert_eq!(USER_AGENT, pixiv_types::BROWSER_USER_AGENT);
+        assert!(USER_AGENT.starts_with("Mozilla/5.0"));
+        assert!(!USER_AGENT.contains("PixivDesktop"));
+    }
 }
 
 #[cfg(test)]

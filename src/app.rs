@@ -2436,7 +2436,8 @@ impl App {
                         } else {
                             BAND_OK
                         };
-                        avatar_urls.extend(feed.works.iter().filter_map(|w| w.author.avatar.clone()));
+                        avatar_urls
+                            .extend(feed.works.iter().filter_map(|w| w.author.avatar.clone()));
                     }
                     Err(error) => {
                         let message = error.to_string();
@@ -2469,9 +2470,7 @@ impl App {
                         } else {
                             BAND_OK
                         };
-                        for user in &app.home.artists {
-                            avatar_urls.extend(user.avatar.clone());
-                        }
+                        avatar_urls.extend(App::user_image_urls(&app.home.artists));
                     }
                     Err(error) => {
                         app.home.artists_state = BAND_ERROR;
@@ -2488,9 +2487,8 @@ impl App {
                         } else {
                             BAND_OK
                         };
-                        avatar_urls.extend(
-                            latest.works.iter().filter_map(|w| w.author.avatar.clone()),
-                        );
+                        avatar_urls
+                            .extend(latest.works.iter().filter_map(|w| w.author.avatar.clone()));
                     }
                     Err(error) => {
                         app.home.latest_state = BAND_ERROR;
@@ -2639,13 +2637,11 @@ impl App {
             .collect();
         ui.set_home_latest(ModelRc::from(Rc::new(VecModel::from(latest))));
 
-        ui.set_home_latest_title(
-            if self.home.latest_title.trim().is_empty() {
-                "最新作品".into()
-            } else {
-                self.home.latest_title.clone().into()
-            },
-        );
+        ui.set_home_latest_title(if self.home.latest_title.trim().is_empty() {
+            "最新作品".into()
+        } else {
+            self.home.latest_title.clone().into()
+        });
         ui.set_home_feed_state(self.home.works_state);
         ui.set_home_latest_state(self.home.latest_state);
         ui.set_home_tags_state(self.home.tags_state);
@@ -2675,7 +2671,9 @@ impl App {
     /// Take one URL to a decoded image, so a card, a header and the top bar can
     /// share one download.
     fn start_avatar(&mut self, url: &str) -> bool {
-        if url.trim().is_empty() || self.avatars.contains_key(url) || self.avatar_loading.contains(url)
+        if url.trim().is_empty()
+            || self.avatars.contains_key(url)
+            || self.avatar_loading.contains(url)
         {
             return false;
         }
@@ -2741,7 +2739,12 @@ impl App {
             ui.set_account_avatar_state(BAND_OK);
         }
 
-        if self.home.artists.iter().any(|user| user.avatar.as_deref() == Some(url)) {
+        if self
+            .home
+            .artists
+            .iter()
+            .any(|user| user.avatar.as_deref() == Some(url))
+        {
             self.publish_home();
         }
         if self
@@ -2873,6 +2876,23 @@ impl App {
         item
     }
 
+    /// Every image one recommended-user card needs: their avatar and the cover
+    /// of the work used as a preview. Without this the artist row is drawn from
+    /// placeholders, which is exactly what "no avatar" looked like.
+    fn user_image_urls(users: &[RecommendUser]) -> Vec<String> {
+        let mut urls = Vec::new();
+        for user in users {
+            urls.extend(user.avatar.clone());
+            if let Some(preview) = user.previews.first() {
+                let cover = preview.urls.grid();
+                if !cover.is_empty() {
+                    urls.push(cover.to_string());
+                }
+            }
+        }
+        urls
+    }
+
     fn user_item(&self, user: &RecommendUser) -> RecommendUserItem {
         let avatar_url = user.avatar.clone().unwrap_or_default();
         let preview = user
@@ -2900,7 +2920,6 @@ impl App {
             },
         }
     }
-
 }
 
 impl App {
@@ -2984,11 +3003,8 @@ impl App {
             // handful, and the discovery route describes ten in full. Both are
             // the same engine, so asking for both fills a screen immediately and
             // still leaves ids to hydrate.
-            let (quick_client, pool_client, user_client) = (
-                client.clone(),
-                client.clone(),
-                client.clone(),
-            );
+            let (quick_client, pool_client, user_client) =
+                (client.clone(), client.clone(), client.clone());
             let (quick, pool, users) = tokio::join!(
                 quick_client.illust_discovery("all"),
                 pool_client.discovery_artworks("all", 60),
@@ -3053,6 +3069,11 @@ impl App {
                     return;
                 }
 
+                let mut urls: Vec<String> = works
+                    .iter()
+                    .filter_map(|illust| illust.author.avatar.clone())
+                    .collect();
+
                 if let Ok(users) = users {
                     app.discovery.users = users;
                     app.discovery.users_state = if app.discovery.users.is_empty() {
@@ -3060,6 +3081,9 @@ impl App {
                     } else {
                         BAND_OK
                     };
+                    // The artists' own faces and previews are not in the work
+                    // batch, so they are requested here explicitly.
+                    urls.extend(App::user_image_urls(&app.discovery.users));
                 } else if app.discovery.users.is_empty() {
                     app.discovery.users_state = BAND_ERROR;
                     app.discovery.users_message = "推荐画师载入失败".to_string();
@@ -3073,11 +3097,6 @@ impl App {
                 for id in &pending {
                     app.discovery.seen.insert(id.get());
                 }
-
-                let urls: Vec<String> = works
-                    .iter()
-                    .filter_map(|illust| illust.author.avatar.clone())
-                    .collect();
                 let added = pixiv_types::domain::append_unique(
                     &mut app.items,
                     works.into_iter().filter(|illust| !illust.id.is_zero()),
@@ -3137,10 +3156,7 @@ impl App {
         let (route, target, epoch, client, rt) = {
             let mut app = shared.borrow_mut();
             let route = app.route;
-            let target = route
-                .user_id()
-                .map(Id)
-                .or(app.session.user_id);
+            let target = route.user_id().map(Id).or(app.session.user_id);
             app.epoch += 1;
             app.epoch += 1;
             let epoch = app.epoch;
@@ -3176,13 +3192,7 @@ impl App {
             }
             app.remember_scroll(route, 0.0);
             app.refresh_chrome();
-            (
-                route,
-                target,
-                epoch,
-                app.client.clone(),
-                app.rt.clone(),
-            )
+            (route, target, epoch, app.client.clone(), app.rt.clone())
         };
 
         let Some(target) = target else {
@@ -3201,10 +3211,8 @@ impl App {
         };
 
         rt.spawn(async move {
-            let (profile, ids) = tokio::join!(
-                client.user_profile(target),
-                client.user_illust_ids(target)
-            );
+            let (profile, ids) =
+                tokio::join!(client.user_profile(target), client.user_illust_ids(target));
             let profile = match profile {
                 Ok(profile) => profile,
                 Err(error) => {
@@ -3350,7 +3358,13 @@ impl App {
                     .into(),
             },
         ];
-        if !profile.webpage.clone().unwrap_or_default().trim().is_empty() {
+        if !profile
+            .webpage
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
             stats.push(ProfileStatItem {
                 label: "主页".into(),
                 value: profile.webpage.clone().unwrap_or_default().into(),
@@ -3359,18 +3373,11 @@ impl App {
         ui.set_profile_stats(ModelRc::from(Rc::new(VecModel::from(stats))));
 
         let total = state.ids.len();
-        ui.set_profile_count_label(
-            if total == 0 {
-                "".into()
-            } else {
-                format!(
-                    "已显示 {} / {} 件作品",
-                    state.works.len().min(total),
-                    total
-                )
-                .into()
-            },
-        );
+        ui.set_profile_count_label(if total == 0 {
+            "".into()
+        } else {
+            format!("已显示 {} / {} 件作品", state.works.len().min(total), total).into()
+        });
         ui.set_profile_state(if state.works.is_empty() {
             self.profile_empty_state()
         } else {
@@ -3501,7 +3508,14 @@ impl App {
                         }
                         app.publish_profile();
                         if confirmed == wanted {
-                            app.notify(1, if confirmed { "已关注" } else { "已取消关注" });
+                            app.notify(
+                                1,
+                                if confirmed {
+                                    "已关注"
+                                } else {
+                                    "已取消关注"
+                                },
+                            );
                         } else {
                             app.notify(3, "关注状态未改变：服务器报告的状态与请求不一致");
                         }
@@ -3644,14 +3658,12 @@ impl App {
                                 // Local history is offered as a clearly separate
                                 // aid, never dressed up as a Pixiv suggestion.
                                 let history = app.store.search_history(5).unwrap_or_default();
-                                app.suggest.rows = pixiv_types::domain::history_suggestions(
-                                    &history, 5,
-                                );
+                                app.suggest.rows =
+                                    pixiv_types::domain::history_suggestions(&history, 5);
                                 app.suggest.active = -1;
                                 app.suggest.visible = true;
-                                app.suggest.note = format!(
-                                    "联想服务不可用（{error}），以上为本机搜索记录"
-                                );
+                                app.suggest.note =
+                                    format!("联想服务不可用（{error}），以上为本机搜索记录");
                             }
                         }
                         app.publish_suggestions();
@@ -3740,9 +3752,7 @@ fn install_callbacks(app: &Shared) {
             "open-external" => {
                 let target = {
                     let app = shared.borrow();
-                    app.profile
-                        .as_ref()
-                        .map(|state| state.user.get())
+                    app.profile.as_ref().map(|state| state.user.get())
                 };
                 if let Some(uid) = target {
                     let _ = open::that(format!("https://www.pixiv.net/users/{uid}"));

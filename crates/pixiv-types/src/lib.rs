@@ -35,3 +35,12 @@ pub const PIXIV_REFERER: &str = "https://www.pixiv.net/";
 
 /// Host serving illustrations. Requires [`PIXIV_REFERER`].
 pub const IMAGE_HOST: &str = "i.pximg.net";
+
+/// The User-Agent every pixiv.net and i.pximg.net request carries.
+///
+/// A stock desktop browser string on purpose. Both hosts sit behind the same
+/// bot-protection edge: a "PixivDesktop/..." UA is answered with a 403
+/// Cloudflare interstitial before Pixiv sees the request, which shows up as
+/// blank cards and a "session rejected" error on a perfectly good cookie.
+/// Verified: one URL, one cookie, 200 with a browser UA and 403 without.
+pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
