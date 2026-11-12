@@ -295,22 +295,33 @@ export component InfoPanel inherits Rectangle {
                     }
                 }
 
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 0px;
+                // The author link must not cover the follow button. It used to be
+                // a sibling declared *after* this layout, which in Slint puts it on
+                // top of the whole row: every click on 「关注」 was swallowed by the
+                // author touch area and the follow button never fired. Scoping the
+                // touch area to the name column keeps the whole row clickable for
+                // "open author" while giving the button its own hit region.
+                ta-author := TouchArea {
+                    mouse-cursor: pointer;
                     horizontal-stretch: 1;
-                    Text {
-                        text: root.author;
-                        color: Theme.text;
-                        font-size: Theme.font-body;
-                        font-weight: Type.medium;
-                        overflow: elide;
-                    }
-                    Text {
-                        text: "ID " + root.author-id;
-                        color: Theme.text-tertiary;
-                        font-size: Theme.font-caption;
-                        overflow: elide;
+                    clicked => { root.open-author(); }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 0px;
+                        Text {
+                            text: root.author;
+                            color: Theme.text;
+                            font-size: Theme.font-body;
+                            font-weight: Type.medium;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "ID " + root.author-id;
+                            color: Theme.text-tertiary;
+                            font-size: Theme.font-caption;
+                            overflow: elide;
+                        }
                     }
                 }
 
@@ -322,11 +333,6 @@ export component InfoPanel inherits Rectangle {
                     enabled: root.authenticated && !root.busy;
                     clicked => { root.follow(); }
                 }
-            }
-
-            ta-author := TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.open-author(); }
             }
         }
 
