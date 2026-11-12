@@ -218,12 +218,23 @@ fn build_profile(artist: &ArtistSeed, illusts: &[Illust], rng: &mut Rng) -> User
         avatar: Some(avatar_url(artist.id)),
         comment: format!("{DEMO_MARKER}{} のデモ用プロフィールです。", artist.name),
         followees: u64::from(rng.range(20, 900)),
-        followers: u64::from(rng.range(1_200, 90_000)),
+        // A demo profile has no server to ask, and the real follower count is
+        // only readable for the signed-in account, so it stays unknown here too.
+        followers: None,
         illust_count: illusts
             .iter()
             .filter(|illust| illust.author.id == artist.id)
             .count(),
+        manga_count: illusts
+            .iter()
+            .filter(|illust| {
+                illust.author.id == artist.id && illust.kind == pixiv_types::IllustKind::Manga
+            })
+            .count(),
         is_followed: false,
+        background: None,
+        is_premium: false,
+        webpage: None,
     }
 }
 

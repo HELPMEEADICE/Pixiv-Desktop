@@ -14,13 +14,17 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use pixiv_types::domain::{
-    Account, BookmarkRestrict, BookmarkState, Illust, PageMeta, RankingRow, SearchResult,
-    UgoiraMeta, UserProfile,
+    Account, BookmarkRestrict, BookmarkState, DiscoveryBatch, Illust, LatestFeed, PageMeta,
+    RankingRow, RecommendTag, RecommendUser, SearchResult, StreetFeed, Suggestion, UgoiraMeta,
+    UserProfile, merge_suggestions,
 };
 use pixiv_types::wire::{
-    BookmarkStateWire, IllustDetailWire, IllustPageWire, RankingResponseWire, SearchBodyWire,
-    SearchTagsWire, UgoiraMetaWire, UserBookmarksWire, UserDetailWire, UserProfileAllWire,
-    UserSelfWire,
+    BookmarkStateWire, CpsCandidateWire, CpsWire, DiscoveryArtworksWire, DiscoveryUserWire,
+    DiscoveryUsersWire, FollowerListWire, IllustDetailWire, IllustDiscoveryWire, IllustPageWire,
+    ProfileIllustsWire, RankingResponseWire, SearchBodyWire, SearchItemWire, SearchTagsWire,
+    StreetForYouWire, StreetLatestWire, StreetRecommendTagsWire, StreetSubWire, StreetTagWire,
+    SuggestByWordWire, SuggestCandidateWire, UgoiraMetaWire, UserBookmarksWire, UserDetailWire,
+    UserProfileAllWire, UserSelfWire,
 };
 use pixiv_types::{Id, PixivError};
 
@@ -355,6 +359,14 @@ pub(crate) fn ranking_rows(document: RankingResponseWire) -> Vec<RankingRow> {
 }
 
 /// `/ajax/user/{id}/profile/all`.
+/// /ajax/user/{id}/profile/all, as separate illustration and manga counts.
+///
+/// The two categories live in two dictionaries on the wire; merging them would
+/// report a combined total the profile card does not promise.
+pub(crate) fn parse_user_work_counts(raw: &str) -> Result<(usize, usize), PixivError> {
+    decode_body::<UserProfileAllWire>(raw).map(|body| (body.illusts.len(), body.manga.len()))
+}
+
 pub(crate) fn parse_user_illust_ids(raw: &str) -> Result<Vec<Id>, PixivError> {
     decode_body::<UserProfileAllWire>(raw).map(|body| illust_ids(&body))
 }
@@ -378,8 +390,10 @@ pub(crate) fn illust_ids(wire: &UserProfileAllWire) -> Vec<Id> {
 pub(crate) fn parse_user_profile(
     raw: &str,
     illust_count: usize,
+    manga_count: usize,
 ) -> Result<UserProfile, PixivError> {
-    decode_body::<UserDetailWire>(raw).map(|wire| UserProfile::from_wire(wire, illust_count))
+    decode_body::<UserDetailWire>(raw)
+        .map(|wire| UserProfile::from_wire(wire, illust_count, manga_count))
 }
 
 /// `/ajax/user/{id}/illusts/bookmarks`.
@@ -442,6 +456,272 @@ fn non_empty(text: &str) -> Option<String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Home street feed, discovery and suggestions
+// ---------------------------------------------------------------------------
+
+/// /ajax/street/for_you.
+pub(crate) fn parse_street_for_you(raw: &str) -> Result<StreetFeed, PixivError> {
+    decode_body::<StreetForYouWire>(raw).map(street_feed)
+}
+
+/// Fold a street body into the three collections the home page renders.
+///
+/// Sections are dispatched by their own kind rather than by position: the
+/// payload is ordered by Pixiv's ranking and that order changes, so indexing
+/// into it would silently start reading the wrong section.
+pub(crate) fn street_feed(w: StreetForYouWire) -> StreetFeed {
+    let mut feed = StreetFeed::default();
+    for section in w.contents {
+        match section.kind.as_str() {
+            "illust" | "manga" | "ugoira" => {
+                feed.works.extend(works_from(section.thumbnails));
+            }
+            // A collection is a group of works; its first member is the
+            // representative image, and the rest are already in the feed.
+            "collection" => {
+                feed.works
+                    .extend(works_from(section.thumbnails).into_iter().take(1));
+            }
+            "recommend_tags" => feed
+                .tags
+                .extend(section.tags.into_iter().map(recommend_tag)),
+            // The artists arrive in the thumbnails array, not in users: the key
+            // is reused for whatever that section is about. Reading only users
+            // is why the recommended-artist row came back empty, so both are
+            // read and the payload decides which one is populated.
+            "recommend_users" => {
+                feed.artists.extend(
+                    section
+                        .users
+                        .into_iter()
+                        .map(RecommendUser::from)
+                        .chain(users_from(section.thumbnails))
+                        .filter(|user| !user.id.is_zero()),
+                );
+            }
+            // Novels are not modelled; skipping them keeps the grid honest
+            // instead of rendering a novel as a broken illustration.
+            _ => {}
+        }
+    }
+    feed
+}
+
+/// Decode a street thumbnails array as works, dropping entries that cannot be
+/// drawn instead of failing the whole feed over one of them.
+fn works_from(items: Vec<Value>) -> Vec<Illust> {
+    items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value::<pixiv_types::wire::StreetThumbWire>(item).ok())
+        .filter(is_renderable)
+        .map(Illust::from_street)
+        .filter(|illust| !illust.id.is_zero())
+        .collect()
+}
+
+/// Decode a street thumbnails array as recommended users.
+fn users_from(items: Vec<Value>) -> Vec<RecommendUser> {
+    items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value::<DiscoveryUserWire>(item).ok())
+        .map(RecommendUser::from)
+        .filter(|user| !user.id.is_zero())
+        .collect()
+}
+
+/// Three things disqualify a street item, and each one would otherwise render as
+/// a permanently blank card: a novel (no illustration pages), a collection (its
+/// synthetic id does not fit an illustration id), and an item whose pages carry
+/// no URL at all.
+fn is_renderable(thumb: &pixiv_types::wire::StreetThumbWire) -> bool {
+    if thumb.kind == "novel" {
+        return false;
+    }
+    if !thumb.id.trim().parse::<u64>().is_ok_and(|id| id > 0) {
+        return false;
+    }
+    thumb
+        .pages
+        .iter()
+        .any(|page| page.urls.values().any(|url| !url.trim().is_empty()))
+}
+
+fn recommend_tag(w: StreetTagWire) -> RecommendTag {
+    let translated = w
+        .translated_name
+        .filter(|text| !text.trim().is_empty() && text.trim() != w.name);
+    RecommendTag {
+        name: w.name,
+        translated,
+        emphasized: w.is_emphasized,
+    }
+}
+
+/// /ajax/street/latest.
+pub(crate) fn parse_street_latest(raw: &str) -> Result<LatestFeed, PixivError> {
+    let wire = decode_body::<StreetLatestWire>(raw)?;
+    Ok(LatestFeed {
+        title: if wire.content.title.trim().is_empty() {
+            "最新作品".to_string()
+        } else {
+            wire.content.title
+        },
+        works: wire
+            .content
+            .thumbnails
+            .into_iter()
+            .filter(is_renderable)
+            .map(Illust::from_street)
+            .filter(|illust| !illust.id.is_zero())
+            .collect(),
+    })
+}
+
+/// /ajax/street/recommend_tags.
+pub(crate) fn parse_street_recommend_tags(raw: &str) -> Result<Vec<RecommendTag>, PixivError> {
+    decode_body::<StreetRecommendTagsWire>(raw).map(|wire| {
+        wire.content
+            .tags
+            .into_iter()
+            .map(recommend_tag)
+            .filter(|tag| !tag.name.trim().is_empty())
+            .collect()
+    })
+}
+
+/// /ajax/street/sub -- recommended artists.
+pub(crate) fn parse_street_sub(raw: &str) -> Result<Vec<RecommendUser>, PixivError> {
+    let wire = decode_body::<StreetSubWire>(raw)?;
+    Ok(wire
+        .contents
+        .into_iter()
+        .filter(|section| section.kind == "recommend_users")
+        .flat_map(|section| {
+            section
+                .users
+                .into_iter()
+                .map(RecommendUser::from)
+                .chain(users_from(section.thumbnails))
+        })
+        .filter(|user| !user.id.is_zero())
+        .collect())
+}
+
+/// /ajax/discovery/artworks.
+///
+/// Answers sixty recommended *ids* and enriches only the first handful, so the
+/// batch carries both: the works that can be drawn immediately and the ids that
+/// still need a detail call.
+pub(crate) fn parse_discovery_artworks(raw: &str) -> Result<DiscoveryBatch, PixivError> {
+    let wire = decode_body::<DiscoveryArtworksWire>(raw)?;
+    let mut batch = DiscoveryBatch {
+        works: wire
+            .thumbnails
+            .get("illust")
+            .map(|rows| rows.iter().cloned().map(Illust::from_search).collect())
+            .unwrap_or_default(),
+        users: wire
+            .users
+            .into_iter()
+            .map(RecommendUser::from)
+            .filter(|user| !user.id.is_zero())
+            .collect(),
+        ..DiscoveryBatch::default()
+    };
+    for candidate in wire.recommended_illusts {
+        if candidate.illust_id.is_zero() {
+            continue;
+        }
+        if batch
+            .works
+            .iter()
+            .any(|work| work.id == candidate.illust_id)
+            || batch.pending.contains(&candidate.illust_id)
+        {
+            continue;
+        }
+        batch.pending.push(candidate.illust_id);
+    }
+    Ok(batch)
+}
+
+/// /ajax/illust/discovery.
+pub(crate) fn parse_illust_discovery(raw: &str) -> Result<Vec<Illust>, PixivError> {
+    decode_body::<IllustDiscoveryWire>(raw).map(|wire| {
+        wire.illusts
+            .into_iter()
+            .map(Illust::from_search)
+            .filter(|illust| !illust.id.is_zero())
+            .collect()
+    })
+}
+
+/// /ajax/discovery/users.
+pub(crate) fn parse_discovery_users(raw: &str) -> Result<Vec<RecommendUser>, PixivError> {
+    decode_body::<DiscoveryUsersWire>(raw).map(|wire| {
+        wire.users
+            .into_iter()
+            .map(RecommendUser::from)
+            .filter(|user| !user.id.is_zero())
+            .collect()
+    })
+}
+
+/// /ajax/user/{id}/illusts?ids[]=... -- newest first.
+///
+/// The body is a map, so its key order is not the requested order; sorting by id
+/// descending reproduces Pixiv's own newest-first ordering.
+pub(crate) fn parse_user_illusts_batch(raw: &str) -> Result<Vec<Illust>, PixivError> {
+    let map = decode_body::<HashMap<String, SearchItemWire>>(raw)?;
+    Ok(newest_first(map))
+}
+
+/// /ajax/user/{id}/profile/illusts?ids[]=...
+pub(crate) fn parse_profile_illusts(raw: &str) -> Result<Vec<Illust>, PixivError> {
+    let wire = decode_body::<ProfileIllustsWire>(raw)?;
+    Ok(newest_first(wire.works))
+}
+
+fn newest_first(map: HashMap<String, SearchItemWire>) -> Vec<Illust> {
+    let mut rows: Vec<Illust> = map
+        .into_values()
+        .map(Illust::from_search)
+        .filter(|illust| !illust.id.is_zero())
+        .collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.id));
+    rows
+}
+
+/// /ajax/user/{id}/followers?limit=1 -- the total only.
+pub(crate) fn parse_follower_total(raw: &str) -> Result<u64, PixivError> {
+    decode_body::<FollowerListWire>(raw).map(|wire| wire.total.trim().parse::<u64>().unwrap_or(0))
+}
+
+/// /rpc/cps.php.
+pub(crate) fn parse_completion(raw: &str) -> Result<Vec<CpsCandidateWire>, PixivError> {
+    decode_plain::<CpsWire>(raw).map(|wire| wire.candidates)
+}
+
+/// /ajax/tags/suggest_by_word.
+pub(crate) fn parse_tag_suggestions(raw: &str) -> Result<Vec<SuggestCandidateWire>, PixivError> {
+    decode_body::<SuggestByWordWire>(raw).map(|wire| wire.candidates)
+}
+
+/// Merge both suggestion endpoints. Either side may be missing without losing
+/// the other, which is why they are combined here rather than in the UI.
+pub(crate) fn suggestions(
+    completion: Option<Vec<CpsCandidateWire>>,
+    tags: Option<Vec<SuggestCandidateWire>>,
+    limit: usize,
+) -> Vec<Suggestion> {
+    merge_suggestions(
+        completion.unwrap_or_default(),
+        tags.unwrap_or_default(),
+        limit,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -464,6 +744,217 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_string(), v.clone()))
             .collect()
+    }
+
+    // -- street feed, discovery and suggestions -----------------------------
+
+    /// A street section item, shaped exactly like /ajax/street/for_you.
+    fn street_thumb(id: &str) -> String {
+        format!(
+            r#"{{"type":"illust","pageCount":2,"pages":[{{"width":1200,"height":900,
+            "urls":{{"1200x1200_standard":"https://i.pximg.net/p{id}_master1200.jpg",
+            "540x540":"https://i.pximg.net/p{id}_540.jpg",
+            "360x360":"https://i.pximg.net/p{id}_360.jpg"}}}}],
+            "profileImageUrl":"https://i.pximg.net/u{id}_170.jpg",
+            "id":"{id}","title":"t{id}","description":"d",
+            "tags":[{{"name":"a","translatedName":"A","isEmphasized":false}}],
+            "xRestrict":0,"userId":"42","userName":"artist","pixivId":"handle",
+            "createDate":"2026-01-02 03:04:05","bookmarkable":true}}"#
+        )
+    }
+
+    #[test]
+    fn street_feed_keeps_the_author_avatar_and_orders_the_sections() {
+        let raw = format!(
+            r#"{{"error":false,"message":"","body":{{"contents":[
+                {{"kind":"illust","thumbnails":[{}]}},
+                {{"kind":"recommend_users","thumbnails":[],"users":[
+                    {{"userId":"7","userName":"rec","profileImageUrl":"https://i.pximg.net/a.jpg"}}]}},
+                {{"kind":"novel","thumbnails":[{{"id":"99","title":"n"}}]}}
+            ]}}}}"#,
+            street_thumb("11")
+        );
+        let feed = parse_street_for_you(&raw).expect("street feed parses");
+        assert_eq!(feed.works.len(), 1, "novels must not become illustrations");
+        let work = &feed.works[0];
+        assert_eq!(work.id, Id(11));
+        assert_eq!(work.page_count, 2);
+        assert_eq!(work.width, 1200);
+        assert_eq!(work.height, 900);
+        // The 1200 tier is the grid tier, not the 360 crop.
+        assert_eq!(work.urls.regular, "https://i.pximg.net/p11_master1200.jpg");
+        assert_eq!(work.urls.small, "https://i.pximg.net/p11_540.jpg");
+        // The avatar is the whole point of modelling this payload separately.
+        assert_eq!(
+            work.author.avatar.as_deref(),
+            Some("https://i.pximg.net/u11_170.jpg")
+        );
+        assert_eq!(work.author.account, "handle");
+        // Street tags arrive as objects with their own translation.
+        assert_eq!(work.tags[0].display(), "A");
+        assert_eq!(feed.artists.len(), 1);
+        assert_eq!(feed.artists[0].name, "rec");
+        assert_eq!(
+            feed.artists[0].avatar.as_deref(),
+            Some("https://i.pximg.net/a.jpg")
+        );
+    }
+
+    #[test]
+    fn street_feed_reports_recommended_tags_with_translations() {
+        let raw = r#"{"error":false,"message":"","body":{"contents":[
+            {"kind":"recommend_tags","thumbnails":[],"tags":[
+                {"name":"風景","translatedName":"风景","isEmphasized":true},
+                {"name":"fanart","translatedName":null}]}]}}"#;
+        let feed = parse_street_for_you(raw).expect("tags parse");
+        assert_eq!(feed.tags.len(), 2);
+        assert_eq!(feed.tags[0].name, "風景");
+        assert_eq!(feed.tags[0].display(), "风景");
+        assert!(feed.tags[0].emphasized);
+        // A null translation must not become the string "null".
+        assert_eq!(feed.tags[1].display(), "fanart");
+    }
+
+    #[test]
+    fn street_latest_keeps_its_own_title() {
+        let raw = format!(
+            r#"{{"error":false,"message":"","body":{{"content":
+                {{"kind":"carousel","title":"精选新作","seeAllUrl":"/x","thumbnails":[{}]}}}}}}"#,
+            street_thumb("5")
+        );
+        let latest = parse_street_latest(&raw).expect("latest parses");
+        assert_eq!(latest.title, "精选新作");
+        assert_eq!(latest.works.len(), 1);
+        assert_eq!(latest.works[0].id, Id(5));
+    }
+
+    #[test]
+    fn discovery_artworks_separates_ready_works_from_pending_ids() {
+        let raw = r#"{"error":false,"message":"","body":{
+                "recommendedIllusts":[
+                    {"illustId":"5","recommendMethods":["m"],"recommendScore":1.0},
+                    {"illustId":"6","recommendMethods":["m"],"recommendScore":1.0},
+                    {"illustId":"5","recommendMethods":["m"],"recommendScore":1.0}],
+                "thumbnails":{"illust":[
+                    {"id":"5","title":"ready","url":"https://i.pximg.net/5.jpg",
+                     "userId":"42","userName":"a","width":10,"height":10,"pageCount":1}]},
+                "users":[],
+                "tagTranslation":{}}}"#;
+        let batch = parse_discovery_artworks(raw).expect("batch parses");
+        assert_eq!(batch.works.len(), 1, "the pre-enriched work is renderable");
+        assert_eq!(batch.works[0].title, "ready");
+        // Id 5 was already described; only 6 still needs a detail call, and the
+        // duplicate 5 must not appear twice.
+        assert_eq!(batch.pending, vec![Id(6)]);
+    }
+
+    #[test]
+    fn discovery_users_fold_both_payload_families_into_one_shape() {
+        let raw = r#"{"error":false,"message":"","body":{"users":[
+            {"userId":"1","name":"A","pixivId":"a","image":"https://i.pximg.net/a50.jpg",
+             "imageBig":"https://i.pximg.net/a170.jpg","comment":"hi","isFollowed":true},
+            {"userId":"2","userName":"B","profileImageUrl":"https://i.pximg.net/b.jpg",
+             "userComment":"yo"}]}}"#;
+        let users = parse_discovery_users(raw).expect("users parse");
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].name, "A");
+        assert_eq!(
+            users[0].avatar.as_deref(),
+            Some("https://i.pximg.net/a170.jpg")
+        );
+        assert!(users[0].is_followed);
+        // The street-style names must not be dropped on the floor.
+        assert_eq!(users[1].name, "B");
+        assert_eq!(
+            users[1].avatar.as_deref(),
+            Some("https://i.pximg.net/b.jpg")
+        );
+        assert_eq!(users[1].comment, "yo");
+    }
+
+    #[test]
+    fn suggestions_join_the_official_order_with_real_counts() {
+        let completion = parse_completion(
+            r#"{"candidates":[
+                {"tag_name":"初音ミク","access_count":"2405392582","type":"prefix"},
+                {"tag_name":"風景","access_count":"928170755","tag_translation":"风景","type":"tag_translation"}]}"#,
+        )
+        .expect("completion parses");
+        let counts = parse_tag_suggestions(
+            r#"{"error":false,"message":"","body":{"candidates":[
+                {"tag_name":"初音ミク","illust_count":742154,"total_count":742154,
+                 "suggest_type":"front_matching"}]}}"#,
+        )
+        .expect("counts parse");
+        let merged = merge_suggestions(completion, counts, 8);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].tag, "初音ミク");
+        assert_eq!(merged[0].illust_count, Some(742_154));
+        assert_eq!(merged[0].popularity, Some(2_405_392_582));
+        // The translation is what the user should read, and it is not repeated
+        // as its own row.
+        assert_eq!(merged[1].display(), "风景");
+        assert_eq!(merged[1].illust_count, None);
+        for row in &merged {
+            assert_eq!(row.source, pixiv_types::domain::SuggestionSource::Pixiv);
+        }
+    }
+
+    #[test]
+    fn suggestions_survive_one_endpoint_failing() {
+        // Only the count endpoint answered: the list is still usable.
+        let merged = merge_suggestions(
+            Vec::new(),
+            vec![SuggestCandidateWire {
+                tag_name: "sky".to_string(),
+                illust_count: 12,
+                total_count: 12,
+                suggest_type: "front_matching".to_string(),
+            }],
+            8,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].tag, "sky");
+        assert_eq!(merged[0].illust_count, Some(12));
+    }
+
+    #[test]
+    fn local_history_is_marked_as_local() {
+        let rows =
+            pixiv_types::domain::history_suggestions(&["sky".to_string(), "  ".to_string()], 4);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].source,
+            pixiv_types::domain::SuggestionSource::LocalHistory
+        );
+    }
+
+    #[test]
+    fn batch_work_maps_come_back_newest_first() {
+        let raw = r#"{"error":false,"message":"","body":{
+            "11":{"id":"11","title":"a","url":"https://i.pximg.net/a.jpg","pageCount":1},
+            "13":{"id":"13","title":"c","url":"https://i.pximg.net/c.jpg","pageCount":1},
+            "12":{"id":"12","title":"b","url":"https://i.pximg.net/b.jpg","pageCount":1}}}"#;
+        let works = parse_user_illusts_batch(raw).expect("batch parses");
+        assert_eq!(
+            works.iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![Id(13), Id(12), Id(11)]
+        );
+    }
+
+    #[test]
+    fn empty_discovery_batch_is_an_empty_result_not_an_error() {
+        let raw = r#"{"error":false,"message":"","body":{"recommendedIllusts":[],
+            "thumbnails":{},"users":[],"tagTranslation":{}}}"#;
+        let batch = parse_discovery_artworks(raw).expect("empty batch parses");
+        assert!(batch.works.is_empty());
+        assert!(batch.pending.is_empty());
+    }
+
+    #[test]
+    fn a_flagged_street_body_is_reported_as_an_error() {
+        let raw = r#"{"error":true,"message":"不正确的请求。","body":[]}"#;
+        assert!(matches!(parse_street_for_you(raw), Err(PixivError::Api(_))));
     }
 
     // -- fixtures ----------------------------------------------------------
@@ -614,15 +1105,18 @@ mod tests {
     fn user_profile_combines_detail_with_the_id_count() {
         let raw = r#"{"error":false,"message":"","body":{"userId":"77","name":"artist",
             "image":"https://i.pximg.net/a.png","imageBig":"https://i.pximg.net/b.png",
-            "comment":"hi","account":"acc","totalFollowUsers":12,"totalMyPixivUsers":34,
+            "comment":"hi","pixivId":"acc","following":12,"mypixivCount":34,
             "isFollowed":true,"premium":false}}"#;
-        let profile = parse_user_profile(raw, 5).expect("profile parses");
+        let profile = parse_user_profile(raw, 5, 2).expect("profile parses");
         assert_eq!(profile.id, Id(77));
         assert_eq!(profile.name, "artist");
         assert_eq!(profile.account, "acc");
         assert_eq!(profile.illust_count, 5);
+        assert_eq!(profile.manga_count, 2);
         assert_eq!(profile.followees, 12);
-        assert_eq!(profile.followers, 34);
+        // The follower count is not in this payload at all; deriving it from
+        // mypixivCount would report a different number about a different thing.
+        assert_eq!(profile.followers, None);
         assert!(profile.is_followed);
         assert_eq!(profile.avatar.as_deref(), Some("https://i.pximg.net/b.png"));
     }

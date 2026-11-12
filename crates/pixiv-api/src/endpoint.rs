@@ -216,6 +216,124 @@ pub(crate) fn form_body(fields: &[(&str, String)]) -> String {
         .join("&")
 }
 
+// ---------------------------------------------------------------------------
+// Home street feed, discovery and suggestions
+// ---------------------------------------------------------------------------
+
+/// GET /ajax/street/for_you -- the personalised home feed.
+///
+/// This is the endpoint the web front page itself calls. It requires the
+/// session cookie: without it the route still answers 200 but with a generic
+/// list, which is why a signed-out client must not present the result as
+/// personalised.
+pub(crate) fn street_for_you() -> String {
+    format!("{WEB_HOST}/ajax/street/for_you?lang={LANG}")
+}
+
+/// GET /ajax/street/latest -- the newest works carousel.
+pub(crate) fn street_latest() -> String {
+    format!("{WEB_HOST}/ajax/street/latest?lang={LANG}")
+}
+
+/// GET /ajax/street/recommend_tags -- tags Pixiv recommends to this account.
+pub(crate) fn street_recommend_tags() -> String {
+    format!("{WEB_HOST}/ajax/street/recommend_tags?lang={LANG}")
+}
+
+/// GET /ajax/street/sub -- the follow-on row, which is where the recommended
+/// artists live.
+pub(crate) fn street_sub() -> String {
+    format!("{WEB_HOST}/ajax/street/sub?lang={LANG}")
+}
+
+/// GET /ajax/discovery/artworks.
+///
+/// The older notes recorded HTTP 400 for every parameter combination. The route
+/// is fine: it requires the same x-pixiv-next / x-user-id / Referer headers the
+/// site's own client sends, and mode is mandatory. With them it answers 200.
+pub(crate) fn discovery_artworks(mode: &str, limit: u32) -> String {
+    format!(
+        "{WEB_HOST}/ajax/discovery/artworks?mode={mode}&limit={}&lang={LANG}",
+        limit.max(1)
+    )
+}
+
+/// GET /ajax/illust/discovery -- a batch of fully described recommendations.
+///
+/// Not paginated: every call returns a fresh batch of ten, which is the
+/// increment the discovery page loads on.
+pub(crate) fn illust_discovery(mode: &str) -> String {
+    format!("{WEB_HOST}/ajax/illust/discovery?mode={mode}&lang={LANG}")
+}
+
+/// GET /ajax/discovery/users -- recommended artists.
+pub(crate) fn discovery_users(mode: &str) -> String {
+    format!("{WEB_HOST}/ajax/discovery/users?mode={mode}&lang={LANG}")
+}
+
+/// GET /rpc/cps.php -- the document the site's own search box requests.
+pub(crate) fn search_completion(word: &str) -> String {
+    format!(
+        "{WEB_HOST}/rpc/cps.php?keyword={}&lang={LANG}",
+        urlencoding::encode(word)
+    )
+}
+
+/// GET /ajax/tags/suggest_by_word -- prefix-matched tags with work counts.
+pub(crate) fn tag_suggestion(word: &str) -> String {
+    format!(
+        "{WEB_HOST}/ajax/tags/suggest_by_word?word={}&lang={LANG}",
+        urlencoding::encode(word)
+    )
+}
+
+/// Build the repeated ids[] query the batch endpoints expect.
+pub(crate) fn ids_query(ids: &[Id]) -> String {
+    ids.iter()
+        .map(|id| format!("ids%5B%5D={}", id.get()))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// GET /ajax/user/{id}/illusts?ids[]=... -- batch detail for a user's works.
+///
+/// Requires a session. Answers a map of id to work, so the caller keeps its own
+/// ordering rather than trusting the object's key order.
+pub(crate) fn user_illusts_batch(user: Id, ids: &[Id]) -> String {
+    format!(
+        "{WEB_HOST}/ajax/user/{}/illusts?{}&lang={LANG}",
+        user.get(),
+        ids_query(ids)
+    )
+}
+
+/// GET /ajax/user/{id}/profile/illusts?ids[]=...&work_category=...
+///
+/// Answers the same map as the route above and, unlike it, needs no session.
+pub(crate) fn user_profile_illusts(
+    user: Id,
+    ids: &[Id],
+    category: &str,
+    first_page: bool,
+) -> String {
+    format!(
+        "{WEB_HOST}/ajax/user/{}/profile/illusts?{}&work_category={category}&is_first_page={}&lang={LANG}",
+        user.get(),
+        ids_query(ids),
+        u8::from(first_page)
+    )
+}
+
+/// GET /ajax/user/{id}/followers -- only readable for the signed-in account.
+pub(crate) fn user_followers(user: Id, offset: u32, limit: u32, public: bool) -> String {
+    let rest = if public { "show" } else { "hide" };
+    format!(
+        "{WEB_HOST}/ajax/user/{}/followers?offset={offset}&limit={}&rest={rest}&lang={LANG}",
+        user.get(),
+        limit.max(1)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -33,8 +33,9 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 
 use pixiv_types::{
-    Account, BookmarkRestrict, BookmarkState, Id, Illust, PIXIV_REFERER, PageMeta, PixivError,
-    RankingKind, RankingRow, SearchQuery, SearchResult, UgoiraMeta, UserProfile,
+    Account, BookmarkRestrict, BookmarkState, DiscoveryBatch, Id, Illust, LatestFeed,
+    PIXIV_REFERER, PageMeta, PixivError, RankingKind, RankingRow, RecommendTag, RecommendUser,
+    SearchQuery, SearchResult, StreetFeed, Suggestion, UgoiraMeta, UserProfile,
 };
 
 mod endpoint;
@@ -314,13 +315,153 @@ impl Client {
         mapping::parse_user_illust_ids(&raw)
     }
 
-    /// `GET /ajax/user/{id}` combined with the profile id map.
+    /// GET /ajax/user/{id} combined with the profile id map.
+    ///
+    /// The detail payload cannot count works, and the id map cannot name the
+    /// artist, so both requests are needed to build one profile. The follower
+    /// count is a third request, and only the signed-in account may read its own,
+    /// so it is attached when it is readable instead of guessed at.
+    ///
+    /// The two calls run concurrently: they are independent, and doing them in
+    /// sequence doubled the time the profile card spent on a spinner.
     pub async fn user_profile(&self, user: Id) -> Result<UserProfile, PixivError> {
-        // The detail payload cannot count works, and the id map cannot name the
-        // artist, so both requests are needed to build one profile.
-        let ids = self.user_illust_ids(user).await?;
-        let raw = self.get_text(&endpoint::user_detail(user)).await?;
-        mapping::parse_user_profile(&raw, ids.len())
+        let profile_url = endpoint::user_profile_all(user);
+        let detail_url = endpoint::user_detail(user);
+        let (all, raw) = tokio::join!(self.get_text(&profile_url), self.get_text(&detail_url));
+        // The two counts come from the id map, which keeps illustrations and
+        // manga in separate dictionaries: a union would report one merged
+        // total, which is not what the profile card promises.
+        let (illust_count, manga_count) = mapping::parse_user_work_counts(&all?)?;
+        let mut profile = mapping::parse_user_profile(&raw?, illust_count, manga_count)?;
+        if self.session().user_id == Some(user) {
+            profile.followers = self.user_follower_count(user).await.unwrap_or(None);
+        }
+        Ok(profile)
+    }
+
+    /// GET /ajax/street/for_you -- the personalised home feed.
+    ///
+    /// Sending the session is what makes the answer personalised; the endpoint
+    /// still answers without one, so the caller decides whether a signed-out
+    /// result may be presented as a recommendation.
+    pub async fn home_feed(&self) -> Result<StreetFeed, PixivError> {
+        let raw = self.get_text(&endpoint::street_for_you()).await?;
+        mapping::parse_street_for_you(&raw)
+    }
+
+    /// GET /ajax/street/latest -- the newest works row.
+    pub async fn latest_works(&self) -> Result<LatestFeed, PixivError> {
+        let raw = self.get_text(&endpoint::street_latest()).await?;
+        mapping::parse_street_latest(&raw)
+    }
+
+    /// GET /ajax/street/recommend_tags.
+    pub async fn recommend_tags(&self) -> Result<Vec<RecommendTag>, PixivError> {
+        let raw = self.get_text(&endpoint::street_recommend_tags()).await?;
+        mapping::parse_street_recommend_tags(&raw)
+    }
+
+    /// GET /ajax/street/sub -- recommended artists.
+    pub async fn recommend_users(&self) -> Result<Vec<RecommendUser>, PixivError> {
+        let raw = self.get_text(&endpoint::street_sub()).await?;
+        mapping::parse_street_sub(&raw)
+    }
+
+    /// GET /ajax/discovery/artworks -- a batch of personalised recommendations.
+    ///
+    /// mode is all, safe or r18. The endpoint is not paginated: each call returns
+    /// a fresh ranked batch, and the client is responsible for de-duplicating
+    /// across calls.
+    pub async fn discovery_artworks(
+        &self,
+        mode: &str,
+        limit: u32,
+    ) -> Result<DiscoveryBatch, PixivError> {
+        let raw = self
+            .get_text(&endpoint::discovery_artworks(mode, limit))
+            .await?;
+        mapping::parse_discovery_artworks(&raw)
+    }
+
+    /// GET /ajax/illust/discovery -- ten fully described recommendations.
+    pub async fn illust_discovery(&self, mode: &str) -> Result<Vec<Illust>, PixivError> {
+        let raw = self.get_text(&endpoint::illust_discovery(mode)).await?;
+        mapping::parse_illust_discovery(&raw)
+    }
+
+    /// GET /ajax/discovery/users -- recommended artists.
+    pub async fn discovery_users(&self, mode: &str) -> Result<Vec<RecommendUser>, PixivError> {
+        let raw = self.get_text(&endpoint::discovery_users(mode)).await?;
+        mapping::parse_discovery_users(&raw)
+    }
+
+    /// Search suggestions, joined from the two endpoints the site itself uses.
+    ///
+    /// /rpc/cps.php supplies the official ordering and the translations;
+    /// /ajax/tags/suggest_by_word supplies the work counts. Losing either is not
+    /// fatal: whichever answered still produces a usable list.
+    pub async fn suggestions(
+        &self,
+        word: &str,
+        limit: usize,
+    ) -> Result<Vec<Suggestion>, PixivError> {
+        let word = word.trim();
+        if word.is_empty() {
+            return Ok(Vec::new());
+        }
+        let completion_url = endpoint::search_completion(word);
+        let tag_url = endpoint::tag_suggestion(word);
+        let (completion, tags) =
+            tokio::join!(self.get_text(&completion_url), self.get_text(&tag_url));
+        let completion = completion
+            .ok()
+            .and_then(|raw| mapping::parse_completion(&raw).ok());
+        let tags = tags
+            .ok()
+            .and_then(|raw| mapping::parse_tag_suggestions(&raw).ok());
+        if completion.is_none() && tags.is_none() {
+            return Err(PixivError::Network("联想服务暂时不可用".to_string()));
+        }
+        Ok(mapping::suggestions(completion, tags, limit))
+    }
+
+    /// GET /ajax/user/{id}/illusts?ids[]=... -- batch details.
+    ///
+    /// Falls back to the profile route when the session-gated one refuses, so a
+    /// signed-out client can still open a profile.
+    pub async fn user_works(&self, user: Id, ids: &[Id]) -> Result<Vec<Illust>, PixivError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.session().is_authenticated()
+            && let Ok(raw) = self
+                .get_text(&endpoint::user_illusts_batch(user, ids))
+                .await
+            && let Ok(works) = mapping::parse_user_illusts_batch(&raw)
+            && !works.is_empty()
+        {
+            return Ok(works);
+        }
+        let raw = self
+            .get_text(&endpoint::user_profile_illusts(
+                user,
+                ids,
+                "illustManga",
+                false,
+            ))
+            .await?;
+        mapping::parse_profile_illusts(&raw)
+    }
+
+    /// Follower count of the signed-in account, which is the only one readable.
+    pub async fn user_follower_count(&self, user: Id) -> Result<Option<u64>, PixivError> {
+        if self.session().user_id != Some(user) {
+            return Ok(None);
+        }
+        let raw = self
+            .get_text(&endpoint::user_followers(user, 0, 1, true))
+            .await?;
+        mapping::parse_follower_total(&raw).map(Some)
     }
 
     /// `GET /ajax/user/{id}/illusts/bookmarks` — requires a session.

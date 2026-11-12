@@ -53,6 +53,30 @@ pub mod flex {
         })
     }
 
+    /// Accept an object, and treat an empty array as the same empty map.
+    ///
+    /// /ajax/user/{id}/profile/all answers {"illusts":{},"manga":{}} for a
+    /// prolific artist but [] for a user with no works in a category, so a plain
+    /// HashMap rejects half the accounts with "invalid type: sequence".
+    pub fn map<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<std::collections::HashMap<String, Option<serde_json::Value>>, D::Error> {
+        let v = value(d)?;
+        match v {
+            serde_json::Value::Object(map) => Ok(map
+                .into_iter()
+                .map(|(key, value)| (key, Some(value)))
+                .collect()),
+            serde_json::Value::Array(items) if items.is_empty() => {
+                Ok(std::collections::HashMap::new())
+            }
+            serde_json::Value::Null => Ok(std::collections::HashMap::new()),
+            other => Err(de::Error::custom(format!(
+                "expected a map or an empty array, got {other}"
+            ))),
+        }
+    }
+
     /// Accept a string; yield `""` for objects, numbers, null and arrays.
     pub fn string<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
         let v = value(d)?;
@@ -443,12 +467,13 @@ pub struct RankingItemWire {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserProfileAllWire {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flex::map")]
     pub illusts: HashMap<String, Option<serde_json::Value>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flex::map")]
     pub manga: HashMap<String, Option<serde_json::Value>>,
+    /// An *array* on the live endpoint (usually empty), unlike illusts/manga.
     #[serde(default)]
-    pub novels: HashMap<String, Option<serde_json::Value>>,
+    pub novels: serde_json::Value,
     #[serde(default)]
     pub pickup: Vec<serde_json::Value>,
 }
@@ -464,22 +489,37 @@ pub struct UserDetailWire {
     pub user_id: Id,
     #[serde(default)]
     pub name: String,
+    /// Handle without the @. This key is pixivId on the live endpoint; reading
+    /// "account" instead silently yields an empty handle for every user.
+    #[serde(default)]
+    pub pixiv_id: String,
     #[serde(default)]
     pub image: String,
     #[serde(default)]
     pub image_big: String,
     #[serde(default)]
     pub comment: String,
+    /// Profile cover image. null when the user did not set one.
     #[serde(default)]
-    pub account: String,
+    pub background: Option<serde_json::Value>,
+    /// How many accounts this user follows. The wire key is "following"; the
+    /// follower count is not sent by this endpoint at all.
     #[serde(default)]
-    pub total_follow_users: i64,
+    pub following: i64,
     #[serde(default)]
-    pub total_my_pixiv_users: i64,
+    pub mypixiv_count: i64,
     #[serde(default)]
     pub is_followed: bool,
     #[serde(default)]
+    pub is_mypixiv: bool,
+    #[serde(default)]
+    pub is_blocking: bool,
+    #[serde(default)]
+    pub followed_back: bool,
+    #[serde(default)]
     pub premium: bool,
+    #[serde(default)]
+    pub webpage: Option<String>,
 }
 
 /// `/ajax/search/tags/{tag}` body.
@@ -517,4 +557,357 @@ pub struct UserBookmarksWire {
     pub works: Vec<SearchItemWire>,
     #[serde(default)]
     pub total: i64,
+}
+
+// ===========================================================================
+// Street feed (/ajax/street/*) -- the real home page
+// ===========================================================================
+//
+// The street endpoints do not share the shape of search/detail rows, and that
+// mismatch is why the home page used to fall back to the daily ranking:
+//
+// * the cover tiers live in pages[].urls under *pixel-dimension* keys
+//   ("1200x1200_standard", "540x540", "360x360") rather than in the named
+//   mini/thumb/small/regular/original fields;
+// * the author's avatar travels as profileImageUrl and the handle as pixivId,
+//   so nothing in the generic illust wire could carry them;
+// * a feed is a list of *sections*, not a list of works.
+
+/// One page of a street-feed work. Keys are pixel sizes, not tier names.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreetPageWire {
+    #[serde(default)]
+    pub width: i32,
+    #[serde(default)]
+    pub height: i32,
+    #[serde(default)]
+    pub urls: HashMap<String, String>,
+}
+
+impl StreetPageWire {
+    /// Best URL for the given preference order.
+    #[must_use]
+    pub fn pick(&self, order: &[&str]) -> String {
+        for key in order {
+            if let Some(url) = self.urls.get(*key)
+                && !url.trim().is_empty()
+            {
+                return url.clone();
+            }
+        }
+        // Unknown tier set: take the longest value, which is the largest variant
+        // in practice, rather than rendering a broken card.
+        self.urls
+            .values()
+            .max_by_key(|url| url.len())
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// A work inside a street-feed section.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreetThumbWire {
+    /// "illust" / "manga" / "ugoira" / "novel".
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub page_count: i32,
+    #[serde(default)]
+    pub pages: Vec<StreetPageWire>,
+    /// The author's avatar. Present on every street payload, which is what makes
+    /// a real avatar possible on the home and discovery pages.
+    #[serde(default)]
+    pub profile_image_url: String,
+    /// Kept as text: a "collection" section carries a synthetic id that does
+    /// not fit in a u64 (74493503404124799791), and a strict Id would reject the
+    /// whole feed over one card the grid cannot render anyway.
+    #[serde(default, deserialize_with = "flex::string")]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// Tag *objects* here, not the flat strings the search routes send, and each
+    /// one carries its own translation.
+    #[serde(default)]
+    pub tags: Vec<StreetTagWire>,
+    #[serde(default)]
+    pub restrict: i32,
+    #[serde(default)]
+    pub x_restrict: i32,
+    #[serde(default)]
+    pub user_id: Id,
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default)]
+    pub pixiv_id: String,
+    #[serde(default, deserialize_with = "flex::string")]
+    pub create_date: String,
+    #[serde(default)]
+    pub ai_type: i32,
+    #[serde(default)]
+    pub sl: i32,
+    #[serde(default)]
+    pub is_sensitive_for_masking: bool,
+    #[serde(default)]
+    pub bookmarkable: bool,
+}
+
+/// One section of /ajax/street/for_you or /ajax/street/sub.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreetContentWire {
+    /// "illust", "manga", "collection", "novel", "recommend_users", "contests".
+    #[serde(default)]
+    pub kind: String,
+    /// The type of this array depends on the section kind, which is why it stays
+    /// raw here: an illust section carries works, and a recommend_users section
+    /// carries *users* in this very same key. Decoding it eagerly would silently
+    /// drop the recommended artists.
+    #[serde(default)]
+    pub thumbnails: Vec<serde_json::Value>,
+    /// Present on recommend_users sections.
+    #[serde(default)]
+    pub users: Vec<DiscoveryUserWire>,
+    #[serde(default)]
+    pub tags: Vec<StreetTagWire>,
+}
+
+/// A personalised tag inside a recommend_tags section.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreetTagWire {
+    #[serde(default)]
+    pub name: String,
+    /// Localised name. null for tags Pixiv has no translation for.
+    #[serde(default)]
+    pub translated_name: Option<String>,
+    #[serde(default)]
+    pub is_emphasized: bool,
+}
+
+/// /ajax/street/for_you body.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreetForYouWire {
+    #[serde(default)]
+    pub contents: Vec<StreetContentWire>,
+}
+
+/// /ajax/street/latest body: a single titled carousel section.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreetLatestWire {
+    #[serde(default)]
+    pub content: StreetLatestSectionWire,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreetLatestSectionWire {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub see_all_url: String,
+    #[serde(default)]
+    pub thumbnails: Vec<StreetThumbWire>,
+}
+
+/// /ajax/street/recommend_tags body.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreetRecommendTagsWire {
+    #[serde(default)]
+    pub content: StreetRecommendTagsSectionWire,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreetRecommendTagsSectionWire {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub tags: Vec<StreetTagWire>,
+}
+
+/// /ajax/street/sub body -- the "further for you" row, which is where the
+/// recommended artists live.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StreetSubWire {
+    #[serde(default)]
+    pub contents: Vec<StreetContentWire>,
+}
+
+// ===========================================================================
+// Discovery
+// ===========================================================================
+
+/// /ajax/discovery/artworks body.
+///
+/// The endpoint answers 60 *ids* plus a small pre-enriched map, so the client
+/// has to decide how much detail to hydrate. It is not paginated: each call
+/// returns a fresh batch of recommendations.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryArtworksWire {
+    #[serde(default)]
+    pub recommended_illusts: Vec<RecommendedIllustWire>,
+    /// { "illust": [ ... ] } -- works Pixiv already enriched for the first
+    /// screen. Anything else has to be fetched by id.
+    #[serde(default)]
+    pub thumbnails: HashMap<String, Vec<SearchItemWire>>,
+    #[serde(default)]
+    pub users: Vec<DiscoveryUserWire>,
+    #[serde(default)]
+    pub tag_translation: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendedIllustWire {
+    #[serde(default)]
+    pub illust_id: Id,
+    #[serde(default)]
+    pub recommend_methods: Vec<String>,
+    #[serde(default)]
+    pub recommend_score: f64,
+}
+
+/// /ajax/illust/discovery body.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct IllustDiscoveryWire {
+    #[serde(default)]
+    pub illusts: Vec<SearchItemWire>,
+}
+
+/// /ajax/discovery/users and the recommend_users street section.
+///
+/// Both shapes are folded into one wire type because they carry the same
+/// identity under different field names: the discovery route sends name/image
+/// and the street section sends userName/profileImageUrl.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryUserWire {
+    #[serde(default)]
+    pub user_id: Id,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub pixiv_id: String,
+    #[serde(default)]
+    pub image: String,
+    #[serde(default)]
+    pub image_big: String,
+    #[serde(default)]
+    pub comment: String,
+    #[serde(default)]
+    pub is_followed: bool,
+    #[serde(default)]
+    pub is_blocking: bool,
+    #[serde(default)]
+    pub is_mypixiv: bool,
+    #[serde(default)]
+    pub premium: bool,
+    #[serde(default)]
+    pub partial: i32,
+    #[serde(default)]
+    pub followed_back: bool,
+    #[serde(default)]
+    pub background: Option<serde_json::Value>,
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default)]
+    pub user_comment: String,
+    #[serde(default)]
+    pub profile_image_url: String,
+    #[serde(default)]
+    pub profile_background_image_url: String,
+    #[serde(default)]
+    pub thumbnails: Vec<StreetThumbWire>,
+    #[serde(default)]
+    pub is_self: bool,
+    #[serde(default)]
+    pub illusts: Vec<SearchItemWire>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DiscoveryUsersWire {
+    #[serde(default)]
+    pub users: Vec<DiscoveryUserWire>,
+}
+
+// ===========================================================================
+// Search suggestions
+// ===========================================================================
+
+/// /ajax/tags/suggest_by_word body -- prefix-matched tags with work counts.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestByWordWire {
+    #[serde(default)]
+    pub candidates: Vec<SuggestCandidateWire>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SuggestCandidateWire {
+    #[serde(default)]
+    pub tag_name: String,
+    #[serde(default)]
+    pub illust_count: i64,
+    #[serde(default)]
+    pub total_count: i64,
+    /// front_matching, tag_translation, ...
+    #[serde(default)]
+    pub suggest_type: String,
+}
+
+/// /rpc/cps.php -- the document the site's own search box requests.
+///
+/// Not enveloped: the candidates array is the whole document.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CpsWire {
+    #[serde(default)]
+    pub candidates: Vec<CpsCandidateWire>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CpsCandidateWire {
+    #[serde(default)]
+    pub tag_name: String,
+    /// Sent as a string by the live endpoint.
+    #[serde(default, deserialize_with = "flex::string")]
+    pub access_count: String,
+    /// prefix or tag_translation.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub tag_translation: Option<String>,
+}
+
+// ===========================================================================
+// User works in bulk
+// ===========================================================================
+
+/// /ajax/user/{id}/illusts?ids[]=... -- a map of id to work, in the endpoint's
+/// own order. Requires a session.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UserIllustsBatchWire(pub HashMap<String, SearchItemWire>);
+
+/// /ajax/user/{id}/profile/illusts?ids[]=... body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileIllustsWire {
+    /// Map of id to work. A plain object, not an array.
+    #[serde(default)]
+    pub works: HashMap<String, SearchItemWire>,
+}
+/// /ajax/user/{id}/followers body -- only readable for the signed-in account.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FollowerListWire {
+    #[serde(default)]
+    pub users: Vec<DiscoveryUserWire>,
+    /// Sent as a string by the live endpoint.
+    #[serde(default, deserialize_with = "flex::string")]
+    pub total: String,
 }

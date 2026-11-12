@@ -511,6 +511,75 @@ impl Illust {
         out.is_masked = w.is_masked;
         out
     }
+
+    /// Build from a street-feed section item (the real home page).
+    ///
+    /// This is the only row kind that carries the author's avatar, so it is the
+    /// one that makes a real face possible on the home page. The cover tiers are
+    /// keyed by pixel size here, not by tier name, which is why the generic
+    /// mapping could never have worked for these payloads.
+    #[must_use]
+    pub fn from_street(w: wire::StreetThumbWire) -> Self {
+        // The street payload sends tag objects with their own translations, so
+        // the home cards can show localised tags without a second request.
+        let tags = w
+            .tags
+            .into_iter()
+            .filter(|tag| !tag.name.trim().is_empty())
+            .map(|tag| {
+                let translated = tag.translated_name.filter(|text| {
+                    let text = text.trim();
+                    !text.is_empty() && text != tag.name.trim()
+                });
+                Tag {
+                    name: tag.name,
+                    translated,
+                }
+            })
+            .collect();
+        let first = w.pages.first();
+        let (width, height) = first.map_or((0, 0), |page| (page.width, page.height));
+        let id = w.id.trim().parse::<u64>().map(Id).unwrap_or(Id(0));
+        let mut out = Self::base(
+            id,
+            w.title,
+            IllustKind::from_wire(match w.kind.as_str() {
+                "manga" => 1,
+                "ugoira" => 2,
+                _ => 0,
+            }),
+            w.page_count,
+            width,
+            height,
+            tags,
+        );
+        // "1200x1200_standard" is the master1200 tier, which is what a grid card
+        // wants; the 540 and 360 crops are the fallbacks.
+        let regular = first.map_or(String::new(), |p| {
+            p.pick(&["1200x1200_standard", "1200x1200", "540x540"])
+        });
+        let small = first.map_or(String::new(), |p| p.pick(&["540x540", "360x360"]));
+        let thumb = first.map_or(String::new(), |p| p.pick(&["360x360", "540x540"]));
+        out.urls = IllustUrls {
+            mini: thumb.clone(),
+            thumb,
+            small,
+            regular,
+            original: String::new(),
+        };
+        out.description = w.description;
+        out.author = Author {
+            id: w.user_id,
+            name: w.user_name,
+            account: w.pixiv_id,
+            avatar: non_empty(w.profile_image_url),
+        };
+        out.create_date = non_empty(w.create_date);
+        out.x_restrict = u8::try_from(w.x_restrict.max(0)).unwrap_or(0);
+        out.sl = u8::try_from(w.sl.max(0)).unwrap_or(0);
+        out.is_bookmarkable = w.bookmarkable;
+        out
+    }
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -835,39 +904,354 @@ impl SearchResult {
 }
 
 /// An artist profile.
+///
+/// Every field comes from /ajax/user/{id}?full=1 as the live payload actually
+/// names it. The previous mapping read totalFollowUsers and totalMyPixivUsers,
+/// neither of which the endpoint sends: the real keys are following (how many
+/// accounts this user follows) and mypixivCount, so the profile card reported
+/// zero followees for everybody.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UserProfile {
     pub id: UserId,
     pub name: String,
+    /// Handle without the @, from the payload's pixivId.
     pub account: String,
+    /// 170x170 avatar; falls back to the 50x50 one.
     pub avatar: Option<String>,
     pub comment: String,
+    /// How many accounts this user follows.
     pub followees: u64,
-    pub followers: u64,
+    /// How many accounts follow this user. Only the signed-in account may read
+    /// its own follower list, so this is None for everybody else.
+    pub followers: Option<u64>,
     /// Total illustrations, derived from the profile id map when available.
     pub illust_count: usize,
+    /// Manga count, from the same id map.
+    pub manga_count: usize,
     pub is_followed: bool,
+    /// Profile cover image, when the user set one.
+    pub background: Option<String>,
+    pub is_premium: bool,
+    /// Personal website, when the user published one.
+    pub webpage: Option<String>,
 }
 
 impl UserProfile {
     #[must_use]
-    pub fn from_wire(w: wire::UserDetailWire, illust_count: usize) -> Self {
+    pub fn from_wire(w: wire::UserDetailWire, illust_count: usize, manga_count: usize) -> Self {
         Self {
             id: w.user_id,
             name: w.name,
-            account: w.account,
-            avatar: Some(if w.image_big.is_empty() {
-                w.image
-            } else {
-                w.image_big
-            }),
+            account: w.pixiv_id,
+            avatar: [w.image_big, w.image]
+                .into_iter()
+                .find(|url| !url.trim().is_empty()),
             comment: w.comment,
-            followees: u64::try_from(w.total_follow_users.max(0)).unwrap_or(0),
-            followers: u64::try_from(w.total_my_pixiv_users.max(0)).unwrap_or(0),
+            followees: u64::try_from(w.following.max(0)).unwrap_or(0),
+            followers: None,
             illust_count,
+            manga_count,
             is_followed: w.is_followed,
+            background: w
+                .background
+                .filter(|value| value.as_str().is_some_and(|url| !url.trim().is_empty()))
+                .and_then(|value| value.as_str().map(str::to_string)),
+            is_premium: w.premium,
+            webpage: w.webpage.filter(|url| !url.trim().is_empty()),
         }
     }
+
+    /// Attach the follower count, which only the signed-in account can read.
+    #[must_use]
+    pub fn with_followers(mut self, followers: Option<u64>) -> Self {
+        self.followers = followers;
+        self
+    }
+}
+
+// ===========================================================================
+// Home feed, discovery and search suggestions
+// ===========================================================================
+
+/// Why a section exists, so the UI can label it honestly.
+///
+/// The home page used to render the daily ranking under the heading
+/// "为你推荐"; that is a lie a badge cannot fix. Every feed now carries the
+/// source it actually came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FeedSource {
+    /// /ajax/street/for_you -- personalised by Pixiv for the signed-in account.
+    #[default]
+    ForYou,
+    /// /ajax/street/latest -- the newest works, not personalised.
+    Latest,
+    /// /ajax/illust/discovery -- the recommendation engine's own batch feed.
+    Discovery,
+    /// /ajax/discovery/artworks -- personalised, hydrated from ids.
+    DiscoveryPersonalised,
+    /// /ranking.php -- the official ranking, kept separate on purpose.
+    Ranking,
+}
+
+impl FeedSource {
+    /// Short label for a section header.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ForYou => "为你推荐",
+            Self::Latest => "最新作品",
+            Self::Discovery => "发现",
+            Self::DiscoveryPersonalised => "为你推荐的作品",
+            Self::Ranking => "排行榜",
+        }
+    }
+
+    /// One line explaining where the works came from.
+    #[must_use]
+    pub const fn note(self) -> &'static str {
+        match self {
+            Self::ForYou => "Pixiv 按你的浏览与收藏生成",
+            Self::Latest => "Pixiv 全站最新投稿，与推荐无关",
+            Self::Discovery => "Pixiv 推荐引擎返回的批次，每次刷新都不同",
+            Self::DiscoveryPersonalised => "Pixiv 推荐引擎按你的收藏生成",
+            Self::Ranking => "Pixiv 官方榜单",
+        }
+    }
+}
+
+/// A tag Pixiv recommends to this account.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecommendTag {
+    pub name: String,
+    /// Localised name, when Pixiv has one.
+    pub translated: Option<String>,
+    /// Highlighted by Pixiv (usually because it is trending right now).
+    pub emphasized: bool,
+}
+
+impl RecommendTag {
+    /// Text to render.
+    #[must_use]
+    pub fn display(&self) -> &str {
+        self.translated.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// A user Pixiv recommends, with enough detail to render a card.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecommendUser {
+    pub id: UserId,
+    pub name: String,
+    pub account: String,
+    pub avatar: Option<String>,
+    /// Profile cover image, when the payload carried one.
+    pub background: Option<String>,
+    pub comment: String,
+    pub is_followed: bool,
+    pub is_premium: bool,
+    /// A few recent works, used as the card preview.
+    pub previews: Vec<Illust>,
+}
+
+impl From<wire::DiscoveryUserWire> for RecommendUser {
+    fn from(w: wire::DiscoveryUserWire) -> Self {
+        // Two payload families fill in different names for the same identity,
+        // so each field takes whichever one arrived.
+        let name = [w.name, w.user_name]
+            .into_iter()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or_default();
+        let comment = [w.comment, w.user_comment]
+            .into_iter()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or_default();
+        let avatar = [w.image_big, w.image, w.profile_image_url]
+            .into_iter()
+            .find(|s| !s.trim().is_empty());
+        let background = [w.profile_background_image_url]
+            .into_iter()
+            .find(|s| !s.trim().is_empty())
+            .or_else(|| {
+                w.background
+                    .as_ref()
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            });
+        Self {
+            id: w.user_id,
+            name,
+            account: w.pixiv_id,
+            avatar,
+            background,
+            comment,
+            is_followed: w.is_followed,
+            is_premium: w.premium,
+            previews: w
+                .thumbnails
+                .into_iter()
+                .map(Illust::from_street)
+                .chain(w.illusts.into_iter().map(Illust::from_search))
+                .collect(),
+        }
+    }
+}
+
+/// The home page, as Pixiv answered for it.
+///
+/// One struct per source, because each section loads independently: a failing
+/// recommendation endpoint must not blank the newest-works row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreetFeed {
+    /// Works from /ajax/street/for_you, in payload order.
+    pub works: Vec<Illust>,
+    /// Tags from /ajax/street/recommend_tags.
+    pub tags: Vec<RecommendTag>,
+    /// Artists from /ajax/street/sub.
+    pub artists: Vec<RecommendUser>,
+}
+
+/// The newest-works row from /ajax/street/latest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LatestFeed {
+    pub title: String,
+    pub works: Vec<Illust>,
+}
+
+/// One batch of recommendations from the discovery engine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoveryBatch {
+    /// Works with complete metadata, ready to render.
+    pub works: Vec<Illust>,
+    /// Ids the engine recommended but did not describe, in ranked order.
+    pub pending: Vec<IllustId>,
+    /// Artists that came with the batch.
+    pub users: Vec<RecommendUser>,
+    /// Tags the engine used, for the "because you like X" line.
+    pub tags: Vec<RecommendTag>,
+}
+
+/// Where a suggestion came from. The distinction is shown in the UI: local
+/// history is never presented as a Pixiv suggestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SuggestionSource {
+    /// /rpc/cps.php -- the document the official search box requests.
+    #[default]
+    Pixiv,
+    /// A local search this user performed before.
+    LocalHistory,
+}
+
+/// One row of the search-suggestion panel.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Suggestion {
+    /// Text inserted into the search box when chosen.
+    pub tag: String,
+    /// Localised form, when Pixiv sent one.
+    pub translated: Option<String>,
+    /// Works carrying this tag, when the endpoint reported a count.
+    pub illust_count: Option<u64>,
+    /// Relative popularity (access count), used only for ordering.
+    pub popularity: Option<u64>,
+    pub source: SuggestionSource,
+}
+
+impl Suggestion {
+    /// Text to render as the primary line.
+    #[must_use]
+    pub fn display(&self) -> &str {
+        self.translated.as_deref().unwrap_or(&self.tag)
+    }
+}
+
+/// Merge the two suggestion endpoints into one ordered list.
+///
+/// /rpc/cps.php is the list the site's own search box shows and it is the only
+/// source of translations, but it reports no work counts. /ajax/tags/suggest_by_word
+/// reports counts but is prefix-only. Consulting both and joining on the tag name
+/// gives the official ordering with real counts attached, instead of picking one
+/// and losing a visible piece of information.
+#[must_use]
+pub fn merge_suggestions(
+    cps: Vec<wire::CpsCandidateWire>,
+    counts: Vec<wire::SuggestCandidateWire>,
+    limit: usize,
+) -> Vec<Suggestion> {
+    fn number(text: &str) -> Option<u64> {
+        text.trim().parse::<u64>().ok()
+    }
+
+    let mut out: Vec<Suggestion> = Vec::new();
+    for candidate in cps {
+        let tag = candidate.tag_name.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if out.iter().any(|existing| existing.tag == tag) {
+            continue;
+        }
+        out.push(Suggestion {
+            tag: tag.to_string(),
+            translated: candidate
+                .tag_translation
+                .filter(|text| !text.trim().is_empty() && text.trim() != tag),
+            illust_count: None,
+            popularity: number(&candidate.access_count),
+            source: SuggestionSource::Pixiv,
+        });
+    }
+    for candidate in counts {
+        let tag = candidate.tag_name.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        let count = u64::try_from(candidate.illust_count.max(0)).unwrap_or(0);
+        match out.iter_mut().find(|existing| existing.tag == tag) {
+            Some(existing) => existing.illust_count = Some(count),
+            None => out.push(Suggestion {
+                tag: tag.to_string(),
+                translated: None,
+                illust_count: Some(count),
+                popularity: None,
+                source: SuggestionSource::Pixiv,
+            }),
+        }
+    }
+    out.truncate(limit);
+    out
+}
+
+/// Local search history rendered as suggestion rows, clearly marked as local.
+#[must_use]
+pub fn history_suggestions(words: &[String], limit: usize) -> Vec<Suggestion> {
+    words
+        .iter()
+        .filter(|word| !word.trim().is_empty())
+        .take(limit)
+        .map(|word| Suggestion {
+            tag: word.clone(),
+            translated: None,
+            illust_count: None,
+            popularity: None,
+            source: SuggestionSource::LocalHistory,
+        })
+        .collect()
+}
+
+/// Append a batch of works, dropping ids already present.
+///
+/// The discovery engine re-recommends what it has already shown, so appending
+/// blindly grows the list with duplicates and never reaches an end condition.
+/// Returns how many rows were actually added.
+pub fn append_unique(into: &mut Vec<Illust>, incoming: impl IntoIterator<Item = Illust>) -> usize {
+    let mut added = 0;
+    for illust in incoming {
+        if illust.id.is_zero() || into.iter().any(|existing| existing.id == illust.id) {
+            continue;
+        }
+        into.push(illust);
+        added += 1;
+    }
+    added
 }
 
 #[cfg(test)]

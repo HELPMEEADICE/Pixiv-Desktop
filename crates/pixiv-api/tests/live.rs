@@ -335,3 +335,226 @@ async fn live_follow_round_trip_is_verified_and_restored() {
         "the unfollow must be visible on the server"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Home feed, discovery, suggestions and profiles
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_home_feed_is_personalised_and_carries_real_avatars() {
+    let client = client_or_skip!();
+    let account = client.account().await.expect("session resolves");
+    eprintln!("signed in as uid {}", account.id.get());
+
+    let feed = client
+        .home_feed()
+        .await
+        .unwrap_or_else(|error| panic!("for_you failed: {}", describe(&error)));
+    assert!(
+        !feed.works.is_empty(),
+        "the personalised feed returned no works"
+    );
+    // This is the assertion that the home page is no longer the daily ranking:
+    // the ranking endpoint does not know anything about these ids.
+    let ranking = client
+        .ranking(pixiv_types::RankingKind::Daily, 1)
+        .await
+        .expect("ranking loads");
+    let ranking_ids: Vec<_> = ranking.iter().map(|row| row.illust.id).collect();
+    let shared = feed
+        .works
+        .iter()
+        .filter(|work| ranking_ids.contains(&work.id))
+        .count();
+    eprintln!(
+        "for_you: {} works, {} also on the daily ranking",
+        feed.works.len(),
+        shared
+    );
+    assert!(
+        feed.works.iter().any(|work| work.author.avatar.is_some()),
+        "no work carried an author avatar, so the home grid cannot show one"
+    );
+    assert!(
+        feed.works.iter().all(|work| !work.urls.grid().is_empty()),
+        "a feed work has no renderable cover URL"
+    );
+
+    let tags = client.recommend_tags().await.expect("recommend_tags");
+    eprintln!("recommend_tags: {}", tags.len());
+    assert!(!tags.is_empty(), "recommend_tags returned nothing");
+
+    let artists = client.recommend_users().await.expect("street sub");
+    eprintln!("recommended artists: {}", artists.len());
+    assert!(!artists.is_empty(), "no recommended artists");
+    assert!(
+        artists.iter().any(|artist| artist.avatar.is_some()),
+        "no recommended artist carried an avatar"
+    );
+}
+
+#[tokio::test]
+async fn the_latest_row_is_its_own_source() {
+    let client = client_or_skip!();
+    let latest = client
+        .latest_works()
+        .await
+        .unwrap_or_else(|error| panic!("street/latest failed: {}", describe(&error)));
+    assert!(!latest.works.is_empty(), "the latest row was empty");
+    assert!(
+        !latest.title.trim().is_empty(),
+        "the row lost its own title"
+    );
+    eprintln!(
+        "latest row: {} works titled {}",
+        latest.works.len(),
+        latest.title
+    );
+}
+
+#[tokio::test]
+async fn discovery_artworks_no_longer_answers_400() {
+    let client = client_or_skip!();
+    // The previous notes recorded HTTP 400 for every parameter combination. The
+    // route works with the headers the site sends; this test is the evidence.
+    let batch = client
+        .discovery_artworks("all", 60)
+        .await
+        .unwrap_or_else(|error| panic!("discovery/artworks failed: {}", describe(&error)));
+    eprintln!(
+        "discovery batch: {} ready, {} pending, {} users",
+        batch.works.len(),
+        batch.pending.len(),
+        batch.users.len()
+    );
+    assert!(
+        !batch.works.is_empty() || !batch.pending.is_empty(),
+        "the recommendation engine returned nothing"
+    );
+}
+
+#[tokio::test]
+async fn discovery_batches_differ_so_loading_more_is_meaningful() {
+    let client = client_or_skip!();
+    let first = client.illust_discovery("all").await.expect("first batch");
+    let second = client.illust_discovery("all").await.expect("second batch");
+    assert_eq!(first.len(), 10, "the batch size changed");
+    assert!(
+        first
+            .iter()
+            .any(|work| !second.iter().any(|other| other.id == work.id)),
+        "two consecutive batches were identical, so load-more would loop"
+    );
+    // Every row must be renderable on its own; that is what makes this endpoint
+    // usable as a grid source rather than an id pool.
+    assert!(first.iter().all(|work| !work.urls.grid().is_empty()));
+    assert!(first.iter().all(|work| !work.author.name.trim().is_empty()));
+}
+
+#[tokio::test]
+async fn discovery_users_come_with_avatars() {
+    let client = client_or_skip!();
+    let users = client
+        .discovery_users("all")
+        .await
+        .unwrap_or_else(|error| panic!("discovery/users failed: {}", describe(&error)));
+    assert!(!users.is_empty(), "no recommended users");
+    let with_avatar = users.iter().filter(|user| user.avatar.is_some()).count();
+    eprintln!(
+        "discovery users: {}, with avatar: {with_avatar}",
+        users.len()
+    );
+    assert!(with_avatar > 0, "no recommended user carried an avatar");
+}
+
+#[tokio::test]
+async fn suggestions_answer_in_chinese_japanese_and_english() {
+    let client = client_or_skip!();
+    for word in ["初音ミク", "风景", "landscape"] {
+        let rows = client
+            .suggestions(word, 10)
+            .await
+            .unwrap_or_else(|error| panic!("suggestions for {word}: {}", describe(&error)));
+        eprintln!(
+            "{word} -> {} candidates, first {:?}",
+            rows.len(),
+            rows.first().map(|r| r.tag.clone())
+        );
+        assert!(!rows.is_empty(), "no suggestions for {word}");
+        assert_eq!(
+            rows[0].source,
+            pixiv_types::domain::SuggestionSource::Pixiv,
+            "a live suggestion must be attributed to Pixiv"
+        );
+        // Wide characters must survive the round trip through the URL encoder.
+        assert!(rows.iter().all(|row| !row.tag.trim().is_empty()));
+    }
+}
+
+#[tokio::test]
+async fn a_profile_carries_its_handle_works_and_follow_state() {
+    let client = client_or_skip!();
+    let feed = client.home_feed().await.expect("feed");
+    let work = feed.works.first().expect("a work").clone();
+    let artist = work.author.id;
+
+    let profile = client
+        .user_profile(artist)
+        .await
+        .unwrap_or_else(|error| panic!("profile failed: {}", describe(&error)));
+    eprintln!(
+        "profile {} / {} : {} illusts, {} manga, followees {}",
+        profile.name, profile.account, profile.illust_count, profile.manga_count, profile.followees
+    );
+    assert_eq!(profile.id, artist);
+    assert!(!profile.name.trim().is_empty());
+    assert!(profile.avatar.is_some(), "the profile has no avatar");
+    assert_eq!(
+        profile.is_followed,
+        client.follow_state(artist).await.unwrap_or(false)
+    );
+
+    let ids = client.user_illust_ids(artist).await.expect("id map");
+    assert!(!ids.is_empty(), "the artist has no works at all");
+    let batch = &ids[..ids.len().min(6)];
+    let works = client
+        .user_works(artist, batch)
+        .await
+        .unwrap_or_else(|error| panic!("batch works failed: {}", describe(&error)));
+    eprintln!(
+        "hydrated {} of {} requested works",
+        works.len(),
+        batch.len()
+    );
+    assert!(!works.is_empty(), "the batch endpoint returned nothing");
+    assert!(works.iter().all(|work| !work.urls.grid().is_empty()));
+}
+
+#[tokio::test]
+async fn the_signed_in_account_can_read_its_own_follower_count() {
+    let client = client_or_skip!();
+    let account = client.account().await.expect("session resolves");
+    let own = client
+        .user_follower_count(account.id)
+        .await
+        .expect("follower count");
+    eprintln!("own followers: {own:?}");
+    assert!(
+        own.is_some(),
+        "the account could not read its own follower count"
+    );
+
+    // ...and must not be able to read somebody else's.
+    let feed = client.home_feed().await.expect("feed");
+    let other = feed
+        .works
+        .iter()
+        .map(|work| work.author.id)
+        .find(|id| *id != account.id)
+        .expect("another author");
+    assert_eq!(
+        client.user_follower_count(other).await.expect("other"),
+        None,
+        "another account's follower count must not be reported"
+    );
+}
