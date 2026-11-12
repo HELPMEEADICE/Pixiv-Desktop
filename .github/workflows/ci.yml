@@ -1,0 +1,61 @@
+# The gates, on a clean machine.
+#
+# This exists because every claim in the README was verified by hand on one
+# MSYS2 box: `cargo test --workspace # 232 tests` was written when the tree ran
+# 256, and the lint step could silently check nothing (see tools/gates.ps1). A
+# gate nobody re-runs is a comment.
+#
+# Windows, not Linux: the client binds shell32 / ole32 / crypt32 / advapi32
+# directly (tools, DPAPI, the system-theme registry read), so the only honest
+# target is the one it ships for.
+#
+# The live suite is inert unless PIXIV_LIVE_PHPSESSID is set, so this workflow
+# never touches pixiv.net and needs no secret.
+name: gates
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  gates:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # On a real MSVC toolchain clippy works, which is the one thing this
+      # machine cannot check; the wrapper in tools/gates.ps1 is the local
+      # substitute, not the standard.
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Keep the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixiv-desktop
+          path: target/release/pixiv-desktop.exe
+          if-no-files-found: error
