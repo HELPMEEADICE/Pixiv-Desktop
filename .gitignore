@@ -9,3 +9,5 @@ target/
 # it would produce a diff on every run without telling a reviewer anything.
 /docs/screenshots/readme/*.json
 target-rel/
+# Harness scratch output.
+/docs/*.log
