@@ -304,7 +304,7 @@ export component AppWindow inherits Window {
                             height: 28px;
                             y: (parent.height - self.height) / 2;
                             border-radius: Theme.radius-md;
-                            background: Theme.accent;
+                            background: Theme.accent-fill;
                             Text {
                                 text: "P";
                                 color: Theme.on-accent;
@@ -373,7 +373,7 @@ export component AppWindow inherits Window {
                             height: 28px;
                             y: (parent.height - self.height) / 2;
                             border-radius: Theme.radius-pill;
-                            background: root.authenticated ? Theme.accent : Theme.layer-alt;
+                            background: root.authenticated ? Theme.accent-fill : Theme.layer-alt;
                             border-width: root.authenticated ? 0px : 1px;
                             border-color: Theme.border-strong;
                             clip: true;
@@ -698,7 +698,7 @@ export component AppWindow inherits Window {
                                 tint: root.notice-kind == 3 ? Theme.danger
                                     : root.notice-kind == 2 ? Theme.warning
                                     : root.notice-kind == 1 ? Theme.success
-                                    : Theme.accent;
+                                    : Theme.accent-ink;
                             }
 
                             Text {

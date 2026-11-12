@@ -182,7 +182,8 @@ export component AppButton inherits Rectangle {
         border-width: (root.kind == ButtonKind.Secondary) ? 1px : 0px;
         border-color: ta.has-hover ? Theme.border-strong : Theme.border;
         background: (root.kind == ButtonKind.Primary)
-            ? (ta.pressed ? Theme.accent-pressed : (ta.has-hover ? Theme.accent-hover : Theme.accent))
+            ? (ta.pressed ? Theme.accent-fill-pressed
+                : (ta.has-hover ? Theme.accent-fill-hover : Theme.accent-fill))
             : (root.kind == ButtonKind.Danger)
                 ? (ta.pressed ? Theme.pressed : (ta.has-hover ? Theme.danger-subtle : transparent))
                 : (root.kind == ButtonKind.Subtle)
@@ -280,7 +281,7 @@ export component IconButton inherits Rectangle {
         glyph-size: Theme.icon-size;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
-        tint: root.active ? Theme.accent : root.tint;
+        tint: root.active ? Theme.accent-ink : root.tint;
     }
 
     ta := TouchArea {
@@ -328,7 +329,7 @@ export component TextField inherits Rectangle {
     min-width: 96px;
     border-radius: Theme.radius-sm;
     border-width: 1px;
-    border-color: input.has-focus ? Theme.accent
+    border-color: input.has-focus ? Theme.accent-fill
         : (hover.has-hover ? Theme.border-strong : Theme.border);
     background: input.has-focus ? Theme.layer : Theme.layer-alt;
     opacity: root.enabled ? 1.0 : 0.5;
@@ -343,7 +344,7 @@ export component TextField inherits Rectangle {
     if input.has-focus : Rectangle {
         y: root.height - 2px;
         height: 2px;
-        background: Theme.accent;
+        background: Theme.accent-fill;
         border-radius: Theme.radius-sm;
     }
 
@@ -359,7 +360,7 @@ export component TextField inherits Rectangle {
         glyph-size: Theme.icon-size;
         x: Theme.space-2;
         y: (root.height - self.height) / 2;
-        tint: input.has-focus ? Theme.accent : Theme.text-secondary;
+        tint: input.has-focus ? Theme.accent-fill : Theme.text-secondary;
     }
 
     input := TextInput {
@@ -417,7 +418,8 @@ export component ToggleSwitch inherits Rectangle {
     border-width: root.checked ? 0px : 1px;
     border-color: ta.has-hover ? Theme.text-secondary : Theme.border-strong;
     background: root.checked
-        ? (ta.pressed ? Theme.accent-pressed : (ta.has-hover ? Theme.accent-hover : Theme.accent))
+        ? (ta.pressed ? Theme.accent-fill-pressed
+            : (ta.has-hover ? Theme.accent-fill-hover : Theme.accent-fill))
         : (ta.has-hover ? Theme.layer-sunken : transparent);
     opacity: root.enabled ? 1.0 : 0.42;
 
@@ -506,7 +508,7 @@ export component SegmentedControl inherits Rectangle {
 export component Badge inherits Rectangle {
     in property <string> label: "";
     in property <color> fill: Theme.accent-subtle;
-    in property <color> ink: Theme.accent;
+    in property <color> ink: Theme.accent-ink;
 
     height: 18px;
     // Explicit width rather than the default "fill the parent": a badge is also
@@ -564,7 +566,7 @@ export component NavItem inherits Rectangle {
         width: 3px;
         height: 16px;
         border-radius: Theme.radius-pill;
-        background: Theme.accent;
+        background: Theme.accent-fill;
     }
 
     IconPresenter {
@@ -572,7 +574,7 @@ export component NavItem inherits Rectangle {
         glyph-size: Theme.icon-size;
         x: root.compact ? (root.width - self.width) / 2 : root.inset;
         y: (root.height - self.height) / 2;
-        tint: root.selected ? Theme.accent : Theme.text-secondary;
+        tint: root.selected ? Theme.accent-ink : Theme.text-secondary;
     }
 
     if !root.compact : Text {
@@ -581,7 +583,7 @@ export component NavItem inherits Rectangle {
         width: max(0px, root.width - self.x - (root.badge > 0 ? 44px : Theme.space-2));
         height: root.height;
         text: root.label;
-        color: root.selected ? Theme.accent : Theme.text;
+        color: root.selected ? Theme.accent-ink : Theme.text;
         font-size: Theme.font-body;
         font-weight: root.selected ? Type.semibold : Type.regular;
         vertical-alignment: center;
@@ -616,7 +618,7 @@ export component TagChip inherits Rectangle {
     height: 26px;
     border-radius: Theme.radius-pill;
     border-width: 1px;
-    border-color: root.active ? Theme.accent : Theme.border;
+    border-color: root.active ? Theme.accent-fill : Theme.border;
     background: root.active
         ? Theme.accent-subtle
         : (ta.has-hover ? Theme.layer-alt : Theme.layer);
@@ -627,7 +629,7 @@ export component TagChip inherits Rectangle {
         alignment: center;
         Text {
             text: root.label;
-            color: root.active ? Theme.accent : Theme.text-secondary;
+            color: root.active ? Theme.accent-ink : Theme.text-secondary;
             font-size: Theme.font-small;
             vertical-alignment: center;
             overflow: elide;
@@ -744,7 +746,7 @@ export component InfoBar inherits Rectangle {
             tint: (root.kind == InfoKind.Error) ? Theme.danger
                 : (root.kind == InfoKind.Warning) ? Theme.warning
                 : (root.kind == InfoKind.Success) ? Theme.success
-                : Theme.accent;
+                : Theme.accent-ink;
         }
 
         VerticalLayout {
@@ -798,7 +800,7 @@ export component ProgressBar inherits Rectangle {
             : parent.width * Math.max(0.0, Math.min(1.0, root.progress));
         height: parent.height;
         border-radius: Theme.radius-pill;
-        background: Theme.accent;
+        background: Theme.accent-fill;
         visible: root.indeterminate || root.progress > 0.0;
     }
 }
@@ -1005,7 +1007,7 @@ component BookmarkPill inherits Rectangle {
         y: (root.height - self.height) / 2;
         // Filled-in is impossible with a stroke-only path set, so "marked" is
         // signalled by colour alone: no layout shift, no glyph swap.
-        tint: root.marked ? Theme.accent : #2b2b2b;
+        tint: root.marked ? Theme.accent-fill : #2b2b2b;
     }
 
     ta := TouchArea {
@@ -1128,7 +1130,7 @@ export component IllustCard inherits Rectangle {
                 width: rank-label.width + 10px;
                 height: 20px;
                 border-radius: Theme.radius-sm;
-                background: root.item.rank <= 3 ? Theme.accent : #a6000000;
+                background: root.item.rank <= 3 ? Theme.accent-fill : #a6000000;
 
                 rank-label := Text {
                     x: 5px;
@@ -1240,7 +1242,7 @@ export component SettingsCard inherits Rectangle {
                 name: root.icon;
                 slot: Theme.icon-size-lg;
                 glyph-size: Theme.icon-size-lg;
-                tint: Theme.accent;
+                tint: Theme.accent-fill;
             }
 
             title-block := VerticalLayout {

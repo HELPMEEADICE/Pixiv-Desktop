@@ -213,6 +213,234 @@ mod tests {
         );
     }
 
+    /// Rule: text/background pairs that the layout actually puts together must
+    /// clear WCAG AA contrast (4.5:1 for body text, 3:1 for large text and glyphs).
+    ///
+    /// The theme is the only place colours are defined, so it is also the only place
+    /// contrast can be checked without rendering. This walks the real pairs the
+    /// components use; a palette edit that makes a hint unreadable in dark mode fails
+    /// here instead of shipping.
+    #[test]
+    fn theme_text_pairs_clear_wcag_aa() {
+        let source = read(&ui_dir().join("theme.slint"));
+
+        // `out property <color> name: dark ? #x : #y;` -> (dark, light) per name.
+        let mut palette: std::collections::BTreeMap<String, (String, String)> =
+            std::collections::BTreeMap::new();
+        for line in source.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            let Some(rest) = code.trim().strip_prefix("out property <color> ") else {
+                continue;
+            };
+            let Some((name, expr)) = rest.split_once(':') else {
+                continue;
+            };
+            let expr = expr.trim().trim_end_matches(';');
+            match expr.strip_prefix("dark ?") {
+                Some(branches) => {
+                    let Some((dark, light)) = branches.split_once(':') else {
+                        continue;
+                    };
+                    palette.insert(
+                        name.trim().to_string(),
+                        (
+                            dark.trim().to_string(),
+                            light.trim().trim_end_matches(';').trim().to_string(),
+                        ),
+                    );
+                }
+                // A colour that is the same in both themes (e.g. `on-accent`) is
+                // still part of the palette and still has to clear contrast.
+                None => {
+                    palette.insert(
+                        name.trim().to_string(),
+                        (expr.to_string(), expr.to_string()),
+                    );
+                }
+            }
+        }
+        assert!(
+            palette.len() > 20,
+            "theme palette looks empty ({} entries)",
+            palette.len()
+        );
+
+        // (foreground, background, minimum ratio, description)
+        // 4.5 = WCAG AA body text; 3.0 = large text and non-text UI.
+        let pairs = [
+            ("text", "canvas", 4.5, "body text on the page floor"),
+            ("text", "layer", 4.5, "body text on a card"),
+            ("text", "chrome", 4.5, "body text in the top bar / rail"),
+            (
+                "text-secondary",
+                "canvas",
+                4.5,
+                "secondary text on the page floor",
+            ),
+            ("text-secondary", "layer", 4.5, "secondary text on a card"),
+            (
+                "text-tertiary",
+                "canvas",
+                4.5,
+                "hint text on the page floor",
+            ),
+            ("text-tertiary", "layer", 4.5, "hint text on a card"),
+            (
+                "text-tertiary",
+                "layer-alt",
+                4.5,
+                "hint text on an input / sunken row",
+            ),
+            // Filled controls: the *fill* token, not the decoration accent.
+            ("on-accent", "accent-fill", 4.5, "label on a primary button"),
+            // Text and glyphs on the accent wash (nav selection, chips, badges).
+            (
+                "accent-ink",
+                "accent-subtle",
+                4.5,
+                "accent text on the selection wash",
+            ),
+            ("danger", "danger-subtle", 3.0, "error text in an InfoBar"),
+            (
+                "success",
+                "success-subtle",
+                3.0,
+                "success text in an InfoBar",
+            ),
+            (
+                "warning",
+                "warning-subtle",
+                3.0,
+                "warning text in an InfoBar",
+            ),
+            ("tip-ink", "tip-surface", 4.5, "tooltip text"),
+        ];
+
+        // `accent` itself is deliberately absent: it is the exact Pixiv brand blue
+        // (#0096fa), which measures 2.81:1 on the page floor - fine as a large
+        // decorative fill, not fine as a glyph or text. `accent_is_decoration_only`
+        // below enforces that no UI file reaches for it, so there is nothing to
+        // assert here; `accent-fill` and `accent-ink` are what carry content.
+
+        let mut failures = Vec::new();
+        for theme_dark in [false, true] {
+            for (fg, bg, minimum, what) in pairs {
+                let (Some(fg), Some(bg)) = (palette.get(fg), palette.get(bg)) else {
+                    failures.push(format!("missing palette entry for {what}"));
+                    continue;
+                };
+                let fg_value = if theme_dark {
+                    fg.0.as_str()
+                } else {
+                    fg.1.as_str()
+                };
+                let bg_value = if theme_dark {
+                    bg.0.as_str()
+                } else {
+                    bg.1.as_str()
+                };
+                let (Some(fg_rgb), Some(bg_rgb)) = (parse_colour(fg_value), parse_colour(bg_value))
+                else {
+                    failures.push(format!(
+                        "unparsable colour in {what}: {fg_value} / {bg_value}"
+                    ));
+                    continue;
+                };
+                let ratio = contrast_ratio(fg_rgb, bg_rgb);
+                if ratio < minimum {
+                    failures.push(format!(
+                        "{what} ({fg_value} on {bg_value}) is {ratio:.2}:1, below {minimum}:1"
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "theme contrast failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Parse `#rgb`, `#rrggbb` or `#aarrggbb` Slint colour literals to (r, g, b).
+    fn parse_colour(literal: &str) -> Option<(f64, f64, f64)> {
+        let hex = literal.trim().strip_prefix('#')?;
+        let digits: Vec<u8> = hex
+            .chars()
+            .map(|c| c.to_digit(16).map(|v| v as u8))
+            .collect::<Option<Vec<u8>>>()?;
+        let (r, g, b) = match digits.len() {
+            3 => (digits[0] * 17, digits[1] * 17, digits[2] * 17),
+            6 | 8 => {
+                // 8 digits carry a leading alpha, which contrast ignores.
+                let base = if digits.len() == 8 { 2 } else { 0 };
+                (
+                    digits[base] * 16 + digits[base + 1],
+                    digits[base + 2] * 16 + digits[base + 3],
+                    digits[base + 4] * 16 + digits[base + 5],
+                )
+            }
+            _ => return None,
+        };
+        Some((r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0))
+    }
+
+    /// WCAG 2.1 relative luminance and contrast ratio.
+    fn contrast_ratio(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+        fn luminance((r, g, b): (f64, f64, f64)) -> f64 {
+            fn channel(value: f64) -> f64 {
+                if value <= 0.039_28 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Rule: `Theme.accent` is decoration only; content uses fill/ink variants.
+    ///
+    /// The Pixiv brand blue is #0096fa, which is 2.81:1 on the page floor and
+    /// 3.11:1 on a card - below the 4.5:1 WCAG AA bar for text and below even the
+    /// 3:1 bar for meaningful glyphs. Keeping the exact brand colour is a design
+    /// requirement, so the fix is separation of roles: `accent` may only be a large
+    /// decorative fill (the wordmark tile), `accent-fill` backgrounds anything with
+    /// text or glyphs on it, and `accent-ink` is the legible variant for the accent
+    /// wash. That is enforceable as absence: no UI file may name `Theme.accent`.
+    #[test]
+    fn accent_is_decoration_only() {
+        let mut offenders = Vec::new();
+        for path in page_files() {
+            if path.file_name().and_then(|n| n.to_str()) == Some("theme.slint") {
+                continue;
+            }
+            let source = read(&path);
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                for (at, _) in code.match_indices("Theme.accent") {
+                    let rest = &code[at + "Theme.accent".len()..];
+                    let boundary = rest
+                        .chars()
+                        .next()
+                        .map(|c| !c.is_ascii_lowercase() && c != '-')
+                        .unwrap_or(true);
+                    if boundary {
+                        offenders.push(format!("{}:{}: {}", name, index + 1, code.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "use Theme.accent-fill for surfaces and Theme.accent-ink for text; Theme.accent is decoration only:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// Collect the double-quoted strings at the top level of an expression.
     ///
     /// Stops at the terminating `;` so a ternary's branches are all included but

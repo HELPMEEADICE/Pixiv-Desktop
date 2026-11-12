@@ -36,17 +36,32 @@ export global Theme {
         mode == ThemeMode.Dark || (mode == ThemeMode.System && system-dark);
 
     // ---- brand ---------------------------------------------------------
-    // Pixiv's signature blue. Kept exact in light mode; lifted in dark mode so
-    // it still clears the 4.5:1 contrast bar against the darker canvas.
+    // Pixiv's signature blue, used for *decoration*: glyphs on neutral
+    // surfaces, selection indicators, progress fills. Measured contrast is in
+    // the doc comment of `accent-fill` below, because using this one as a fill
+    // behind text is what made primary buttons unreadable.
     out property <color> accent: dark ? #4cb0f5 : #0096fa;
     out property <color> accent-hover: dark ? #63bcf7 : #12a2ff;
     out property <color> accent-pressed: dark ? #3d96d0 : #0081db;
     // ~10% accent wash for selection, chips and informational banners.
     out property <color> accent-subtle: dark ? #1d3b4f : #e6f4ff;
     out property <color> accent-subtle-hover: dark ? #24475f : #d6ecff;
-    out property <color> on-accent: #ffffff;
-    // Legible accent for text drawn on the accent-subtle wash.
-    out property <color> accent-ink: dark ? #8ecdf7 : #0a6fb5;
+
+    // Filled surfaces (primary button, checked toggle) and the ink on them.
+    //
+    // `accent` cannot be used as a background for white text: #0096fa measures
+    // 3.11:1 against white, under the 4.5:1 WCAG AA bar, and the lifted dark
+    // variant is worse on the light side (2.38:1). WinUI solves this by keeping
+    // the accent as decoration and giving the filled control its own shade, so
+    // `accent-fill` is the darker light-mode blue (5.07:1 with white) and, in
+    // dark mode, a light blue that carries *dark* ink (8.01:1).
+    out property <color> accent-fill: dark ? #4cb0f5 : #0071c2;
+    out property <color> accent-fill-hover: dark ? #63bcf7 : #0069b4;
+    out property <color> accent-fill-pressed: dark ? #3d96d0 : #005a99;
+    out property <color> on-accent: dark ? #101010 : #ffffff;
+    // Legible accent for text and glyphs drawn on the accent-subtle wash;
+    // `accent` itself only reaches 2.78:1 there and is a decoration colour.
+    out property <color> accent-ink: dark ? #a8d8fa : #0a6fb5;
 
     // ---- surfaces ------------------------------------------------------
     // `canvas` is the page floor (Win11 #f3f3f3 / #202020); `layer` is a card;
@@ -68,7 +83,10 @@ export global Theme {
     // ---- text ----------------------------------------------------------
     out property <color> text: dark ? #ffffff : #1a1a1a;
     out property <color> text-secondary: dark ? #c5c5c5 : #5d5d5d;
-    out property <color> text-tertiary: dark ? #9a9a9a : #8a8a8a;
+    // Hint text. #8a8a8a measured only 3.25:1 on `layer-alt`, so the light value
+    // is darker than the WinUI default; the dark value carries more headroom
+    // than the light one because dark surfaces compress the usable range.
+    out property <color> text-tertiary: dark ? #a8a8a8 : #6e6e6e;
     out property <color> text-disabled: dark ? #5c5c5c : #b3b3b3;
 
     // ---- semantic state ------------------------------------------------

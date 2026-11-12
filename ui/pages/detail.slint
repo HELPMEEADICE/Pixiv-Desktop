@@ -288,7 +288,7 @@ export component InfoPanel inherits Rectangle {
                     background: Theme.accent-subtle;
                     Text {
                         text: "画";
-                        color: Theme.accent;
+                        color: Theme.accent-ink;
                         font-size: Theme.font-small;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -694,7 +694,7 @@ export component DetailPage inherits Rectangle {
                         height: 48px;
                         border-radius: Theme.radius-sm;
                         border-width: (i == root.current-page) ? 2px : 1px;
-                        border-color: (i == root.current-page) ? Theme.accent : Theme.border;
+                        border-color: (i == root.current-page) ? Theme.accent-fill : Theme.border;
                         background: Theme.layer-alt;
                         clip: true;
 

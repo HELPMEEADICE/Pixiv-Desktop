@@ -145,6 +145,12 @@ try {
         logicalH    = [math]::Round($h / $scale, 2)
         clientX     = $ox
         clientY     = $oy
+        # Virtual screen bounds: a capture region that extends past them comes back
+        # with black bands, which is a host limitation rather than a layout problem.
+        screenLeft  = [System.Windows.Forms.SystemInformation]::VirtualScreen.Left
+        screenTop   = [System.Windows.Forms.SystemInformation]::VirtualScreen.Top
+        screenW     = [System.Windows.Forms.SystemInformation]::VirtualScreen.Width
+        screenH     = [System.Windows.Forms.SystemInformation]::VirtualScreen.Height
         capturedAt  = (Get-Date).ToString("o")
     }
     $metaPath = [System.IO.Path]::ChangeExtension($Out, ".json")
