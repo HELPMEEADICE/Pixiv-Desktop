@@ -1030,7 +1030,15 @@ impl App {
         // opened artwork was recorded in SQLite.
         if page == Destination::History {
             let mut app = shared.borrow_mut();
-            let entries = app.store.view_history(60).unwrap_or_default();
+            // A forced-demo run is self-contained: it must not read the local
+            // store, or a screenshot baseline would carry the signed-in user's own
+            // browsing history. Measured: the round-five baseline for this page
+            // held nine real works and their titles until this line existed.
+            let entries = if forced_demo() {
+                Vec::new()
+            } else {
+                app.store.view_history(60).unwrap_or_default()
+            };
             let items: Vec<Illust> = entries
                 .iter()
                 // Rows written by earlier builds in demo mode carry `demo://`
