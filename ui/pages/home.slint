@@ -195,8 +195,15 @@ export component HomePage inherits Rectangle {
                 }
             }
 
+            // Two bands: 26px of chip and, below it, the 14px horizontal
+            // scrollbar the ScrollView draws. 34px was one band for both: the
+            // chips ended at y=208 and the scrollbar thumb started at y=209, so
+            // the bar sat on the chip baseline (measured on the 720px window,
+            // where twelve demo tags overflow the viewport and the bar is
+            // actually drawn). 44px keeps the chip row where it was and gives the
+            // bar its own band with 8px of clearance at hover height.
             if root.tags-state == 0 : Rectangle {
-                height: 34px;
+                height: 44px;
                 clip: true;
 
                 ScrollView {

@@ -533,6 +533,20 @@ export component DetailPage inherits Rectangle {
 
     VerticalLayout {
         // ---- toolbar ----
+        //
+        // This row's width is the page's width anchor, not decoration. The page
+        // area is one element shared by six pages and it is sized from its
+        // resolved content, so a page whose widest child is narrow is only as
+        // wide as that child: measured before the fix, the error state's widest
+        // child was `StateView`'s 420px block plus padding = 452px, so the
+        // toolbar stopped 348px short of the page's right edge and the state
+        // block sat 170px left of the page centre. Stating the width on the body
+        // layout itself does not work (`width: 100%`, `width: root.width` and
+        // `width: 700px` all resolved back to the preferred 452px — measured);
+        // stating it on a child that relays it into the layout's preferred width
+        // does. `available-width` is the content box the shell computed
+        // (window minus the navigation pane, from `src/app.rs`), so this row and
+        // every row under it are exactly as wide as the page.
         Rectangle {
             height: 44px;
             background: Theme.canvas;
@@ -598,12 +612,25 @@ export component DetailPage inherits Rectangle {
             }
         }
 
-        if root.state == 3 : StateView {
-            kind: StateKind.Error;
-            title: "无法载入作品";
-            description: root.message;
-            action-label: "重试";
-            retry => { root.retry(); }
+        // Centred, not stretched. `StateView` starts its 420px description at the
+        // beginning of its content box, so a stretched block centres the heading
+        // over a left-shifted description; the paired stretch spacers centre the
+        // block itself, which keeps heading, description and button on one axis at
+        // the page centre.
+        if root.state == 3 : HorizontalLayout {
+            width: 100%;
+
+            Rectangle { horizontal-stretch: 1; }
+
+            StateView {
+                kind: StateKind.Error;
+                title: "无法载入作品";
+                description: root.message;
+                action-label: "重试";
+                retry => { root.retry(); }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
         }
 
         if root.state == 0 && root.pages.length > 0 && root.wide : HorizontalLayout {

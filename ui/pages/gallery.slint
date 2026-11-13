@@ -178,8 +178,19 @@ export component GalleryPage inherits Rectangle {
         // A dedicated horizontal scroller: chips must never be clipped by the
         // body width, and a wrapping row is not expressible in Slint's layout
         // model without a Rust-side line breaker.
+        //
+        // The strip is two bands, not one: 4px + 26px of chip along the top and
+        // the 14px horizontal scrollbar the ScrollView draws along the bottom. At
+        // 40px the bar's band started at y=26 of the strip, i.e. inside the chip
+        // row, and its thumb sat on the chip baseline. 48px puts the bar in a band
+        // of its own — chips 4..30, bar 34..48, thumb top at 42 — so it can
+        // neither be painted over the chips nor be pressed through them. The
+        // identical strip on the home page carries the same fix and was measured
+        // there (see `home.slint`): chip bottom 208, thumb top 219 after, 209
+        // before. The bar keeps its `as-needed` policy: it is the only way to
+        // reach the chips past the viewport, so it must not be turned off.
         if root.tags.length > 0 : Rectangle {
-            height: 40px;
+            height: 48px;
             clip: true;
 
             ScrollView {
@@ -319,12 +330,27 @@ export component GalleryPage inherits Rectangle {
                         horizontal-alignment: center;
                     }
 
-                    HorizontalLayout {
+                    // Four chips to a line, wrapped. `search_history(8)` returns
+                    // exactly eight of them, and eight chips on one line are wider
+                    // than the body at 720 and 800 logical px: measured with a
+                    // realistic history, the last chip's right edge was at x=742.7
+                    // in a 720px window (46.7px past the body's right edge) and at
+                    // x=818.7 in an 800px one. A
+                    // horizontal scroller here would hide the chips that exist to
+                    // be clicked, and Slint cannot measure text to break the line
+                    // at the real chip widths, so the line length is fixed: four
+                    // keeps the widest line inside the body at the 720px minimum
+                    // window while the lines stay centred, which is this block's
+                    // visual language.
+                    VerticalLayout {
                         spacing: Theme.space-2;
-                        alignment: center;
-                        for word in root.recent-searches : TagChip {
-                            label: word;
-                            clicked => { root.pick-search(word); }
+                        for r in Math.ceil(root.recent-searches.length / 4) : HorizontalLayout {
+                            spacing: Theme.space-2;
+                            alignment: center;
+                            for c in Math.min(4, root.recent-searches.length - r * 4) : TagChip {
+                                label: root.recent-searches[r * 4 + c];
+                                clicked => { root.pick-search(root.recent-searches[r * 4 + c]); }
+                            }
                         }
                     }
                 }

@@ -686,8 +686,21 @@ export component AppWindow inherits Window {
                 }
 
                 // ---- page router ----
+                //
+                // The host states its own width. A layout child that only says
+                // `horizontal-stretch: 1` is still sized from its preferred width
+                // when its children bind to it — the pages all bind
+                // `width: parent.width`, which is a cycle, and Slint resolves that
+                // cycle by handing the host the content's preferred width. The
+                // symptom was a page only as wide as its widest child: the detail
+                // page's error state stopped 348 px short of the right edge and
+                // centred its message 170 px left of the page centre (measured).
+                // Stating the width breaks the cycle at the source, so a page with
+                // narrow content is still full width and no page needs a per-page
+                // anchor to compensate.
                 Rectangle {
                     horizontal-stretch: 1;
+                    width: root.width - (root.rail-compact ? Theme.rail-width-compact : Theme.rail-width);
                     background: Theme.canvas;
                     clip: true;
 
