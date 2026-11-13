@@ -1375,6 +1375,22 @@ export component IllustCard inherits Rectangle {
     width: root.column-width;
     height: root.cover-height + Theme.card-caption-height;
 
+    // Keyboard focus lives *under* the click target. Slint hit-tests in reverse
+    // declaration order, so a FocusScope declared after a TouchArea is the topmost
+    // input element and swallows the first press to take focus — the card then
+    // needs two clicks to open. Every other primitive here (AppButton, IconButton,
+    // NavItem, TagChip) is already ordered this way; the rule in `uiaudit` keeps
+    // it that way.
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") {
+                root.open();
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+    }
+
     // Open-on-click, underneath every interactive child.
     ta := TouchArea {
         mouse-cursor: pointer;
@@ -1570,16 +1586,6 @@ export component IllustCard inherits Rectangle {
         border-color: Theme.focus-ring;
         background: transparent;
     }
-
-    key_focus := FocusScope {
-        key-pressed(e) => {
-            if (e.text == "\n" || e.text == " ") {
-                root.open();
-                return EventResult.accept;
-            }
-            EventResult.reject
-        }
-    }
 }
 
 // ======================================================================
@@ -1771,6 +1777,17 @@ export component UserCard inherits Rectangle {
     border-color: Theme.border;
     clip: true;
 
+    // Under the click target, for the reason given on IllustCard above.
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") {
+                root.open();
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+    }
+
     // Open-on-click first, so the follow button declared later wins.
     hover := TouchArea {
         mouse-cursor: pointer;
@@ -1838,15 +1855,5 @@ export component UserCard inherits Rectangle {
         border-width: 2px;
         border-color: Theme.focus-ring;
         background: transparent;
-    }
-
-    key_focus := FocusScope {
-        key-pressed(e) => {
-            if (e.text == "\n" || e.text == " ") {
-                root.open();
-                return EventResult.accept;
-            }
-            EventResult.reject
-        }
     }
 }

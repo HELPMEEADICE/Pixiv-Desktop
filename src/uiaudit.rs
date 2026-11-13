@@ -715,15 +715,9 @@ mod tests {
         let mut offenders = Vec::new();
         let mut seen = 0;
         for (index, line) in source.lines().enumerate() {
-            let code = line.split("//").next().unwrap_or("");
-            let Some(at) = code.find("component ") else {
+            let Some(ident) = declared_component(line) else {
                 continue;
             };
-            let rest = &code[at + "component ".len()..];
-            let ident: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
             if !INTERACTIVE.contains(&ident.as_str()) {
                 continue;
             }
@@ -747,19 +741,99 @@ mod tests {
         );
     }
 
-    /// The body of the component declared on `start`, from its `component X`
-    /// line to the brace that closes it.
+    /// Rule: a `FocusScope` is declared before the component's `TouchArea`.
+    ///
+    /// Slint hit-tests in reverse declaration order, so the *last* declared input
+    /// element receives the press. The rule encodes what every working primitive
+    /// in `components.slint` already did — scope first, touch area after — and it
+    /// exists because the two cards did not: their focus scope was appended next
+    /// to the focus ring at the bottom of the component, so that the ring would
+    /// paint over the cover, and the scope ended up on top of the card's own
+    /// click target. The cost was a dead click: the first press on a card was
+    /// swallowed to move keyboard focus, and only the second opened the artwork.
+    /// Measured by clicking the UIA ListItem's centre twice with
+    /// `tools/drive.ps1`; the first click changed nothing and the second opened
+    /// the detail page.
+    ///
+    /// Keyboard support must never be paid for with a click, and the ordering is
+    /// invisible in review — hence a test rather than a comment.
+    #[test]
+    fn focus_scopes_sit_under_the_touch_area() {
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            let source = read(&path);
+            let lines: Vec<&str> = source.lines().collect();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for (index, line) in lines.iter().enumerate() {
+                let Some(component) = declared_component(line) else {
+                    continue;
+                };
+                let mut first_scope = None;
+                let mut first_touch = None;
+                for line_index in component_range(&source, index) {
+                    let text = lines.get(line_index).copied().unwrap_or("");
+                    let code = text.split("//").next().unwrap_or("");
+                    if first_scope.is_none() && code.contains("FocusScope") {
+                        first_scope = Some(line_index + 1);
+                    }
+                    if first_touch.is_none() && code.contains("TouchArea") {
+                        first_touch = Some(line_index + 1);
+                    }
+                }
+                let (Some(scope), Some(touch)) = (first_scope, first_touch) else {
+                    continue;
+                };
+                checked += 1;
+                if scope > touch {
+                    offenders.push(format!(
+                        "{name}:{}: {component}: FocusScope at line {scope} is declared after \
+                         TouchArea at line {touch}",
+                        index + 1
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked >= 6,
+            "expected several components to have both a FocusScope and a TouchArea, found \
+             {checked}; did the component scan stop working?"
+        );
+        assert!(
+            offenders.is_empty(),
+            "declare the FocusScope before the TouchArea: Slint hit-tests in reverse \
+             declaration order, so a scope declared last swallows the first click in order \
+             to take focus: \n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The component name declared on this line, if it declares one.
+    fn declared_component(line: &str) -> Option<String> {
+        let code = line.split("//").next().unwrap_or("");
+        let at = code.find("component ")?;
+        let rest = &code[at + "component ".len()..];
+        let ident: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if ident.is_empty() { None } else { Some(ident) }
+    }
+
+    /// The lines of the component declared on `start`: `start..end`, where `end`
+    /// is the line after the brace that closes it.
     ///
     /// Quoted literals are skipped while counting braces: a key handler is
     /// written `e.text == "\\u{F700}"`, and a string that carries its own brace
     /// must not unbalance the scan.
-    fn component_body(source: &str, start: usize) -> String {
+    fn component_range(source: &str, start: usize) -> std::ops::Range<usize> {
         let mut depth = 0usize;
-        let mut out = String::new();
+        let mut end = start + 1;
         for (index, text) in source.lines().enumerate() {
             if index < start {
                 continue;
             }
+            end = index + 1;
             let mut quoted = false;
             let mut escaped = false;
             let mut comment = false;
@@ -786,10 +860,22 @@ mod tests {
                     depth = depth.saturating_sub(1);
                 }
             }
-            out.push_str(text.split("//").next().unwrap_or(""));
-            out.push('\n');
             if index > start && depth == 0 {
                 break;
+            }
+        }
+        start..end
+    }
+
+    /// The body of the component declared on `start`, comments stripped, from its
+    /// `component X` line to the brace that closes it.
+    fn component_body(source: &str, start: usize) -> String {
+        let range = component_range(source, start);
+        let mut out = String::new();
+        for (index, text) in source.lines().enumerate() {
+            if range.contains(&index) {
+                out.push_str(text.split("//").next().unwrap_or(""));
+                out.push('\n');
             }
         }
         out
