@@ -359,8 +359,33 @@ struct RawImage {
 
 impl RawImage {
     fn to_slint(&self) -> slint::Image {
-        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(self.width, self.height);
-        let expected = (self.width as usize) * (self.height as usize) * 4;
+        // The buffer is the only source of truth for how many pixels exist. A
+        // declared size that disagrees with it used to be copied with
+        // min(expected, len), which silently drew garbage: a buffer one row
+        // short left the last row black, and one row long sheared every row
+        // after the first. Neither is a picture and neither reported anything,
+        // so the invariant is checked here and the size is *derived* from the
+        // data instead of trusted.
+        debug_assert_eq!(
+            self.rgba.len(),
+            (self.width as usize) * (self.height as usize) * 4,
+            "cover buffer must be exactly width*height*4 bytes"
+        );
+        let width = self.width.max(1);
+        let mut height = self.height.max(1);
+        let stride = width as usize * 4;
+        let available = self.rgba.len() / stride;
+        if (height as usize) > available {
+            tracing::warn!(
+                width,
+                height,
+                bytes = self.rgba.len(),
+                "cover buffer is shorter than its declared size; drawing whole rows only"
+            );
+            height = available.max(1) as u32;
+        }
+        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+        let expected = (width as usize) * (height as usize) * 4;
         let bytes = buffer.make_mut_bytes();
         let len = expected.min(self.rgba.len());
         bytes[..len].copy_from_slice(&self.rgba[..len]);

@@ -811,6 +811,83 @@ mod tests {
         assert!(Arc::ptr_eq(&wider.rgba, &source.rgba));
     }
 
+    /// A cover that has been decoded and width-capped must not gain a vertical
+    /// step of its own. The tear this guards was a hard column *inside* a cover,
+    /// which is what a mis-sized buffer or a two-pass scale leaves behind.
+    ///
+    /// The fixture is a synthetic 1200x800 gradient round-tripped through JPEG
+    /// and fit_to_width, so the check runs the real decode path instead of a
+    /// hand-built buffer. Neighbouring columns of a gradient differ by one or two
+    /// luma units, so a column whose difference holds for most of the height
+    /// cannot be the picture: it would be the seam.
+    #[test]
+    fn fit_to_width_leaves_no_vertical_step() {
+        let (width, height) = (1200u32, 800u32);
+        // JPEG has no alpha channel, so the fixture is RGB and the alpha the
+        // decoder adds back is what a real cover carries too.
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let ramp_x = (x * 200 / width) as u8;
+                let ramp_y = (y * 55 / height) as u8;
+                rgb.extend_from_slice(&[ramp_x, ramp_y, 128]);
+            }
+        }
+
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 90)
+            .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
+            .expect("the fixture must encode");
+        let decoded = image::load_from_memory(&encoded)
+            .expect("the fixture must decode")
+            .to_rgba8();
+        let source = DecodedImage {
+            width: decoded.width(),
+            height: decoded.height(),
+            rgba: Arc::from(decoded.into_raw()),
+        };
+
+        let scaled = fit_to_width(&source, 352);
+        assert_eq!(scaled.width, 352);
+        assert_eq!(
+            scaled.byte_size(),
+            (scaled.width as usize) * (scaled.height as usize) * 4
+        );
+        // Aspect ratio preserved to within a pixel.
+        let want = (f64::from(source.height) * 352.0 / f64::from(source.width)).round();
+        assert!((f64::from(scaled.height) - want).abs() <= 1.0);
+
+        // No column may be a step away from its left neighbour for most of the
+        // cover: nothing in a gradient does that, a seam does.
+        let stride = scaled.width as usize * 4;
+        let luma = |x: usize, y: usize| -> i32 {
+            let at = y * stride + x * 4;
+            (i32::from(scaled.rgba[at]) * 77
+                + i32::from(scaled.rgba[at + 1]) * 150
+                + i32::from(scaled.rgba[at + 2]) * 29)
+                >> 8
+        };
+        let rows = scaled.height as usize;
+        let mut worst = 0;
+        let mut worst_x = 0;
+        for x in 1..scaled.width as usize {
+            let mut strong = 0;
+            for y in 0..rows {
+                if (luma(x, y) - luma(x - 1, y)).abs() > 12 {
+                    strong += 1;
+                }
+            }
+            if strong > worst {
+                worst = strong;
+                worst_x = x;
+            }
+        }
+        assert!(
+            worst * 20 < rows * 19,
+            "column {worst_x} steps away from its neighbour on {worst}/{rows} rows"
+        );
+    }
+
     #[test]
     fn fit_to_width_guards_zero() {
         let source = DecodedImage {
