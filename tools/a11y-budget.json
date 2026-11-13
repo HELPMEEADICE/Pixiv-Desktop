@@ -1,0 +1,53 @@
+{
+  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. Written by tools/verify-a11y.ps1 -Update; the numbers are measured, not chosen. invokable = elements with an InvokePattern, distinctTab = distinct stops a real Tab walk reached.",
+  "default": {
+    "minInvokable": 1,
+    "minFocusable": 2,
+    "minTabStops": 3,
+    "roles": [
+      "Button"
+    ]
+  },
+  "pages": {
+    "home": {
+      "minInvokable": 0,
+      "minFocusable": 1,
+      "minTabStops": 2
+    },
+    "discovery": {
+      "minInvokable": 0,
+      "minFocusable": 1,
+      "minTabStops": 2
+    },
+    "ranking": {
+      "minInvokable": 0,
+      "minFocusable": 1,
+      "minTabStops": 2
+    },
+    "search": {
+      "minInvokable": 0,
+      "minFocusable": 1,
+      "minTabStops": 2
+    },
+    "bookmarks": {
+      "minInvokable": 0,
+      "minFocusable": 1,
+      "minTabStops": 2
+    },
+    "history": {
+      "minInvokable": 0,
+      "minFocusable": 1,
+      "minTabStops": 2
+    },
+    "downloads": {
+      "minInvokable": 0,
+      "minFocusable": 1,
+      "minTabStops": 2
+    },
+    "settings": {
+      "minInvokable": 0,
+      "minFocusable": 2,
+      "minTabStops": 2
+    }
+  }
+}

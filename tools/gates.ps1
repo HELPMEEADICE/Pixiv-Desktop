@@ -24,11 +24,18 @@
 #   pwsh -File tools/gates.ps1                 # fmt, test, lint, release build
 #   pwsh -File tools/gates.ps1 -SkipBuild      # the fast loop
 #   pwsh -File tools/gates.ps1 -Lint Clippy    # force the toolchain clippy
+#   pwsh -File tools/gates.ps1 -Ui             # also run the measured UI gates
+#
+# -Ui is opt-in because it needs an interactive desktop: it launches the app,
+# reads the UI Automation tree, presses real Tab keys and captures the screen. On
+# a CI runner without a session it cannot work, and a gate that fails for a reason
+# unrelated to the change is worse than a gate that is not run there.
 param(
     [ValidateSet("Auto", "Driver", "Clippy", "Off")]
     [string]$Lint = "Auto",
     [switch]$SkipBuild,
     [switch]$SkipTest,
+    [switch]$Ui,
     [switch]$Quiet
 )
 
@@ -101,7 +108,26 @@ if (-not $failed -and $Lint -ne "Off") {
     }
 }
 
-# ---- 4. the shipped artefact. Last, because it is by far the slowest. ----
+# ---- 4. the measured UI gates. Opt-in: see the header. ----
+if (-not $failed -and $Ui) {
+    # The two harnesses drive target/debug, which the release gate above does not
+    # produce, so build it here rather than assuming it is current.
+    Invoke-Gate "cargo build (debug, for the capture harness)" {
+        cargo build 2>&1 | Select-Object -Last 2 | Out-Host
+    } | Out-Null
+    if (-not $failed) {
+        Invoke-Gate "tools/verify-a11y.ps1" {
+            pwsh -File tools/verify-a11y.ps1 2>&1 | Out-Host
+        } | Out-Null
+    }
+    if (-not $failed) {
+        Invoke-Gate "tools/verify-visual.ps1" {
+            pwsh -File tools/verify-visual.ps1 2>&1 | Select-Object -Last 30 | Out-Host
+        } | Out-Null
+    }
+}
+
+# ---- 5. the shipped artefact. Last, because it is by far the slowest. ----
 if (-not $failed -and -not $SkipBuild) {
     Invoke-Gate "cargo build --release" {
         cargo build --release 2>&1 | Select-Object -Last 3 | Out-Host

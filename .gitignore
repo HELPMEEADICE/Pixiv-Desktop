@@ -8,6 +8,12 @@ target/
 # The sidecar JSON carries a capture timestamp and the host's screen bounds, so
 # it would produce a diff on every run without telling a reviewer anything.
 /docs/screenshots/readme/*.json
+# Pixel-regression baselines ARE tracked, unlike the ad-hoc captures above: they
+# are the artefact tools/verify-visual.ps1 diffs against, so a gate with no
+# baseline on disk could only ever pass on the machine that captured it. They are
+# forced-demo captures (PIXIV_DESKTOP_DEMO=1), so they hold no personal data, and
+# their sidecars are written by the gate itself (no timestamp).
+!/docs/screenshots/baseline/
 target-rel/
 # Harness scratch output.
 /docs/*.log*

@@ -252,6 +252,11 @@ fn describe_session_error(error: &PixivError) -> String {
 /// demo mode with an explanation when it is not.
 ///
 /// A *network* failure is deliberately not treated as a dead session — being
+/// True when the capture harness asked for the demo data source.
+fn forced_demo() -> bool {
+    std::env::var_os("PIXIV_DESKTOP_DEMO").is_some()
+}
+
 /// offline should not log the user out.
 fn verify_stored_session(app: &Shared) {
     let (client, stored, data_dir, rt) = {
@@ -430,7 +435,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // One honest line about the state the app is in, deferred until the event loop
     // is up so the auto-dismiss timer is actually scheduled. It also doubles as the
     // visual proof that the shell-level notification bar works.
-    {
+    // Skipped in forced-demo captures: a notice that fades on a timer is the one
+    // thing on the shell whose presence depends on when the screenshot is taken.
+    if !forced_demo() {
         let shared = app.clone();
         let hello = slint::Timer::default();
         hello.start(
@@ -522,7 +529,16 @@ impl App {
         // rather than swapping it.
         let download_rows = Rc::new(VecModel::<DownloadRow>::default());
 
-        let session = crate::session::load(&data_dir);
+        // `PIXIV_DESKTOP_DEMO=1` forces the demo data source, for the capture
+        // harness. Two properties are needed and both fall out of ignoring the
+        // stored session: a screenshot baseline must never contain the signed-in
+        // user's own feed, and it must not change between two runs on one tree.
+        // Everything below already has a demo path, so nothing else has to know.
+        let session = if forced_demo() {
+            Session::default()
+        } else {
+            crate::session::load(&data_dir)
+        };
         let (client, mode) = match Client::new(ClientConfig::default(), session.clone()) {
             Ok(client) if session.is_authenticated() => (Some(client), Mode::Real),
             Ok(client) => (Some(client), Mode::Demo),
