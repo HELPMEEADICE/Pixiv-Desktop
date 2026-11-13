@@ -17,7 +17,11 @@
 #   pwsh -File tools/verify-visual.ps1 -Pages home,settings -Themes light
 #   pwsh -File tools/verify-visual.ps1 -SkipCapture     # diff what is on disk
 param(
-    [string[]]$Pages = @("home", "discovery", "ranking", "search", "bookmarks", "history", "downloads", "settings"),
+    # "detail" and "detail-error" are not destinations the shell can be started
+    # on: they are the home page plus a deep link, one to a demo work that loads
+    # and one to an id the demo catalogue does not have, which is the only
+    # deterministic way to reach the error state the page renders.
+    [string[]]$Pages = @("home", "discovery", "ranking", "search", "bookmarks", "history", "downloads", "settings", "detail", "detail-error"),
     [string[]]$Themes = @("light", "dark"),
     [string]$Size = "1024x768",
     [int]$Tolerance = 6,
@@ -129,8 +133,11 @@ foreach ($theme in $Themes) {
     foreach ($page in $Pages) {
         $name = "{0}-{1}" -f $page, $theme
         $png = Join-Path $currentDir "$name.png"
-        $shotArgs = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $page, "-Mode", "size", "-Size", $Size, "-Out", $png, "-Exe", $Exe)
+        $startPage = if ($page -like "detail*") { "home" } else { $page }
+        $shotArgs = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $startPage, "-Mode", "size", "-Size", $Size, "-Out", $png, "-Exe", $Exe)
         if ($theme -eq "dark") { $shotArgs += "-Dark" }
+        if ($page -eq "detail") { $shotArgs += @("-Illust", "700000003") }
+        if ($page -eq "detail-error") { $shotArgs += @("-Illust", "999999999") }
 
         if (-not $SkipCapture) {
             & pwsh @shotArgs | Out-Null

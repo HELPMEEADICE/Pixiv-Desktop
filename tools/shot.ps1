@@ -47,6 +47,7 @@ public class Shot {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 }
 '@
 [void][Shot]::SetProcessDPIAware()
@@ -90,6 +91,12 @@ try {
         [void][Shot]::SetWindowPos($hwnd, [IntPtr]::Zero, 20, 20, $wantW + $frameW, $wantH + $frameH, 0x0004)
     }
     [void][Shot]::SetForegroundWindow($hwnd)
+    # The pointer is part of the capture. A pointer resting over the masonry puts a
+    # #00000012 hover scrim on one card, which is a 18/255 difference on that card
+    # and nothing anywhere else — measured, after a probe left the cursor over the
+    # grid and two capture runs disagreed by exactly that. Park it in the corner
+    # the window is not using before the frame is copied.
+    [void][Shot]::SetCursorPos(4, 4)
     Start-Sleep -Milliseconds 2500
 
     $cr = New-Object Shot+RECT; [void][Shot]::GetClientRect($hwnd, [ref]$cr)
