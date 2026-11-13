@@ -104,7 +104,7 @@ function Measure-Page {
 
         $tab = @()
         if (-not $SkipTab) {
-            [void][Drive32]::SetForegroundWindow($proc.MainWindowHandle)
+            [void](Focus-AppWindow -ProcessName "pixiv-desktop")
             Start-Sleep -Milliseconds 200
             # A Tab key goes to whatever window is in front, which is not
             # necessarily the one under test: a stray keystroke lands in the
@@ -158,7 +158,13 @@ function Read-Budget {
 function Get-Need {
     param($Page)
     $b = Read-Budget
-    if ($null -eq $b) { return $null }
+    # A gate that cannot read its budget must fail loudly. It used to return $null
+    # here, and because PowerShell compares against $null without complaining, every
+    # "measured < required" test was false and the gate passed on everything —
+    # including a page that had lost two thirds of its controls. The cause was one
+    # letter: `$budget = Read-Budget` and the `$Budget` path parameter are the same
+    # variable to PowerShell, so the document replaced the path it was read from.
+    if ($null -eq $b) { throw "accessibility budget '$Budget' could not be read" }
     $need = [ordered]@{}
     foreach ($key in @("minInvokable", "minFocusable", "minTabStops", "roles")) {
         $value = $null
@@ -188,8 +194,8 @@ if ($Update) {
     exit 0
 }
 
-$budget = Read-Budget
-if ($null -eq $budget) {
+$budgetDoc = Read-Budget
+if ($null -eq $budgetDoc) {
     Write-Host ""
     Write-Host "no budget at $Budget - run with -Update once to pin today's numbers" -ForegroundColor Yellow
     exit 0

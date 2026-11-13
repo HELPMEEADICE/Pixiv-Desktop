@@ -35,8 +35,8 @@
       "minTabStops": 10
     },
     "history": {
-      "minInvokable": 21,
-      "minFocusable": 32,
+      "minInvokable": 12,
+      "minFocusable": 14,
       "minTabStops": 10
     },
     "downloads": {

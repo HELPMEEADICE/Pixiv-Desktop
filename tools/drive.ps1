@@ -37,6 +37,8 @@ public class Drive32 {
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, int d, IntPtr e);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool on);
 }
 '@
 }
@@ -90,7 +92,18 @@ function Focus-AppWindow {
     param([string]$ProcessName = 'pixiv-desktop')
     $h = Find-AppWindow -ProcessName $ProcessName
     if ($h -eq [IntPtr]::Zero) { throw "$ProcessName window not found" }
-    [void][Drive32]::SetForegroundWindow($h)
+    # `SetForegroundWindow` alone is refused when the calling process is not the
+    # foreground one - Windows' foreground lock, and the reason a first version of
+    # the Tab walk typed into the terminal instead of the app. Attaching the input
+    # queues first is the documented way through it.
+    $foreground = [Drive32]::GetForegroundWindow()
+    if ($foreground -ne $h) {
+        $fgThread = [Drive32]::GetWindowThreadProcessId($foreground, [IntPtr]::Zero)
+        $appThread = [Drive32]::GetWindowThreadProcessId($h, [IntPtr]::Zero)
+        [void][Drive32]::AttachThreadInput($fgThread, $appThread, $true)
+        [void][Drive32]::SetForegroundWindow($h)
+        [void][Drive32]::AttachThreadInput($fgThread, $appThread, $false)
+    }
     Start-Sleep -Milliseconds 250
     return $h
 }
