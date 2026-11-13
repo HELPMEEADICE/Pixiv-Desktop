@@ -500,6 +500,187 @@ prove it with pixels, then make it impossible.
 
 ---
 
+## 12. Round five: what the pointer and the screen reader see
+
+Rounds one to four measured geometry. This round measured two things that never
+appeared in a screenshot — whether a control exists as a *control*, and whether
+the pixels a capture shows are the pixels the code intends — and it produced one
+correction to itself.
+
+### 12a. Nothing in the window was reachable without a mouse
+
+Two independent measurements, both from the running app:
+
+| Probe | Result |
+| --- | --- |
+| UI Automation tree (8 pages, 1024x768) | 64 nodes: **47 Text, 16 Image, 1 Edit**; `keyboardFocusable = 1` (the search box); elements answering `InvokePattern`: **0** |
+| `grep -c accessible-` over `ui/` | **0** |
+
+So the app was a picture of a window: a screen reader read a wall of text with
+nothing to operate, and Tab reached the search field and then cycled.
+
+**Fix.** Semantics are declared *inside* the components, so the 50+ call sites did
+not move: `accessible-role` (a constant, which Slint requires), `accessible-label`
+taken from the text the control already draws (`IconButton` falls back to its tip,
+then its glyph name), `accessible-action-default` forwarding `clicked`, plus
+`accessible-checked` on the switch and the bookmark pill. Cards became
+`list-item` nodes named "title · author" — one operable item instead of a dozen
+unordered Text nodes. Keyboard: `FocusScope` + the 2px `Theme.focus-ring` ring that
+`AppButton` already had, on `IconButton`, `NavItem`, `TagChip` and both card types;
+Up/Down walks the rail and wraps. An entry cannot know its neighbours (it is one
+component instantiated eight times), so it reports the delta to the window, which
+is where the order is declared. Slint 1.18 has no modulo operator and no locals in
+a function body, hence the two-comparison wrap.
+
+**After**, per page: invokable 16–34, focusable 18–44, **10 distinct Tab stops**,
+and the tree carries `Button` / `ListItem` / `CheckBox` / `Group`. Tab out of the
+command bar goes back → forward → search → theme → 首页 → 发现 → 排行榜 → 搜索 →
+收藏 → 浏览历史.
+
+`tools/verify-a11y.ps1` is the gate; `tools/a11y-budget.json` is what it asserts,
+and the numbers in it were written by `-Update` from a measurement, not chosen.
+
+### 12b. The accessibility pass made a card need two clicks
+
+Found in review by clicking, not by reading: a single click on a card focused it
+and did nothing; the second click opened the work.
+
+Slint hit-tests in **reverse declaration order**. `IllustCard` and `UserCard` had
+their `FocusScope` declared last, so it was the topmost input element and swallowed
+the first press to take focus. Every other primitive already declared the scope
+*before* its `TouchArea`, which is why only the two cards regressed.
+
+Both scopes moved above their touch area; the ring stays last so it still paints
+over the cover. `uiaudit` gained `focus_scopes_sit_under_the_touch_area`, and it was
+proved by putting the order back: it names the component and both line numbers.
+
+### 12c. A page was as wide as its widest child
+
+The shell's page host said only `horizontal-stretch: 1`, while every page binds
+`width: parent.width` — a cycle that Slint resolves by handing the host the
+*content's preferred width*. A page with wide content looked correct by luck.
+
+Measured on the detail page's error state (1024x768, logical px): the page area is
+872 wide, the state block 452 (its widest child is `StateView`'s 420px description
+plus padding), the block's centre **170 left of the page centre**, and the toolbar's
+last button **348 short of the right edge**.
+
+The host now states `root.width - rail`. After: toolbar right edge 8 from the page
+edge and the state block centred within 8. `StateView` is also centred by a pair of
+stretch spacers rather than stretched, because its description starts at the
+beginning of its box and a stretched block centres the heading over a left-shifted
+body.
+
+The same class showed up on the history page once the host was honest — its empty
+state had been left-pinned too, and it is the reason the history baseline moved
+35% in §12f.
+
+**Residue, recorded rather than rounded away:** the block's centre is within ~8
+logical px of the page centre, not 0. Three independent measurements (UIA rects,
+pixel scan, and a re-measure after dropping a per-page width anchor) agree on 8,
+so it is a real offset, small enough to accept and honest enough to write down.
+
+### 12d. Two horizontal scrollbars sat on the chips they scrolled
+
+Both tag strips put a 26px chip row and the scrollbar a `ScrollView` draws into one
+fixed height. On the 720px window: chips ended at y=208, the bar's thumb started at
+y=209 — one pixel of clearance, so the bar sat on the chip baseline. `home` 34 → 44
+and `gallery` 40 → 48 give the bar its own band (thumb now starts 11.3 below the
+chips). The `as-needed` policy stays, because the bar is the only way to reach the
+chips past the viewport: verified by scrolling, the last chip moves 46px into view.
+
+### 12e. Eight recent searches did not fit on one line
+
+`search_history` returns at most eight, and the row was one centred
+`HorizontalLayout` with no wrap, so it overflowed *both* edges: at 720 the last
+chip's right edge was 22.7 past the window and 46.7 past the content box. Four per
+line over two lines, still centred: the widest line ends 136 inside the right edge
+at 720 and 176 at 800. Slint cannot measure text to break a line at real chip
+widths, so the line length is fixed rather than measured.
+
+### 12f. The torn cover was in the artwork, not in the renderer
+
+Round five opened with what looked like the most serious defect of the set: a hard
+vertical band inside cover cards, the same artwork at two scales, byte-identical
+across two runs, at 800 and at 1024. Four hypotheses were tested and three were
+killed by measurement:
+
+| Hypothesis | Result |
+| --- | --- |
+| Stale frame / missing repaint | `request_redraw` every second and no trace produced the same PNG hash — **excluded** |
+| Bitmap length disagreed with its declared size | all 50 covers exactly `w*h*4` — **excluded** (the hole was closed anyway, see below) |
+| Decode width vs draw box mismatch | real (see §12i) but 1.05–1.08× magnification cannot put two scales side by side — **excluded** |
+| `ImageFit.cover` cropping | recomputing cover from the source and diffing per column showed nothing anomalous — **excluded** |
+
+The band is **inside the master JPEG** that Pixiv serves: `_p0_master1200.jpg` and
+the `c/480x960` variant both carry it, a fresh download is byte-identical to the
+cached copy, and two independent decoders agree. It is a 50% halftone overlay, i.e.
+picture content. Our render is faithful: against a cover recomputation of the
+source the mean |difference| over the card is 13.9 of 255, and the band's own
+columns are the *closest* (7.7–10.5).
+
+**The lesson is the useful part.** A pixel rule cannot tell a rendering defect from
+a picture: the luma-step detector found **0** hits on that band (the overlay barely
+changes luma) and a texture-step detector found it but also fired on eleven
+legitimate bands in the same capture. What settled it was comparing our output
+*against the source*, which is now the documented method for any future "the app
+draws it wrong" claim.
+
+Two things did come out of the investigation and shipped:
+
+* `RawImage::to_slint` no longer trusts its declared size. A buffer one row short
+  left the last row unpainted, one row long sheared every row after the first, and
+  `min(expected, len)` reported neither. The height is now derived from the data
+  when they disagree, with a warning.
+* `fit_to_width_leaves_no_vertical_step` round-trips a synthetic gradient through
+  JPEG and `fit_to_width` and fails if any column steps away from its neighbour for
+  most of the height — the real decode path, not a hand-built buffer.
+
+### 12g. `PIXIV_DESKTOP_DEMO=1` is the reason a baseline can be committed
+
+The pixel gate captures in forced demo mode so a baseline is deterministic and
+holds no personal data. That was not true for one page: history is answered from
+the local SQLite view history rather than from a data source, so the first
+baseline carried nine real works with their titles and authors. A forced-demo run
+now returns an empty history; the store is not read, not cleared.
+
+### 12h. What the new gates can and cannot decide
+
+* `tools/verify-visual.ps1` — 20 captures against tracked baselines, per-pixel
+  tolerance 6 with a 1px antialias neighbourhood, 0.02% of pixels allowed to
+  differ. A capture at a different scale reports **skipped**, not failed, because a
+  150% baseline cannot judge a 100% render. It also cannot see hover: the pointer
+  is part of the capture, and a pointer resting over the grid produced a
+  `#00000012` scrim on one card — 18/255 on that card and nothing elsewhere, which
+  is exactly the shape of a false positive. `shot.ps1` now parks the pointer at
+  (4,4) before copying the frame.
+* `tools/verify-a11y.ps1` — counts semantics, not wording: it can prove a control
+  has a role, a name and an action, and that Tab reaches ten distinct stops; it
+  cannot judge whether a label *reads* well. Its Tab walk refuses to synthesise a
+  keystroke unless the app is the foreground window, so a stray Tab cannot land in
+  the terminal that started it.
+* `src/uiaudit.rs` — 13 source rules, three added here
+  (`every_interactive_component_declares_a_role`,
+  `focus_scopes_sit_under_the_touch_area`, and a scanner self-check that a rule
+  cannot run past the closing brace of the component it is checking).
+
+### 12i. Still not verified here, and the next round's first item
+
+* **Covers are decoded smaller than they are drawn.** Traced at 1024: covers are
+  requested at `target = 320` (from a pre-layout card width of ~202) and drawn in a
+  333px box at 150% — every cover is magnified 1.05–1.32× and looks soft. The fix
+  needs `ImageCache::pick` (in `pixiv-image`) and a re-request policy when the
+  column width settles, so it is a round of its own rather than a line.
+* **The 5125-line `src/app.rs`** (`install_callbacks` alone is 782 lines) is still
+  one file. Moving it is mechanical but wide, and it was deliberately left for
+  after the fixes above so a bisect on behaviour stays possible.
+* DPI 100/125/200% on a real display; a real screen reader (NVDA/Narrator) reading
+  the tree this round produced; Linux and macOS input paths for `tools/drive.ps1`.
+* A populated download queue in a capture: the state mapping is unit tested and the
+  rows are patched, but demo mode writes no files, so no baseline shows real rows.
+
+---
+
 ## Appendix: round-one limits (kept for the record)
 
 ### Not verified in round one

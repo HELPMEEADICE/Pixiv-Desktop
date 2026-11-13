@@ -30,12 +30,18 @@ display, cropped to the client area so a pixel can be mapped to a logical
 coordinate. The curated set above is tracked; everything else stays local (see
 `.gitignore`).
 
-Icon alignment and colour contrast are **measured, not reviewed**:
+Icon alignment, colour contrast, the pixels themselves and what assistive
+technology can reach are **measured, not reviewed**:
 `tools/verify-icons.ps1` finds glyph ink centres in a real capture and fails if any
-of them drifts from its row, and `cargo test` checks WCAG contrast ratios, the
-"no raw glyph outside the icon containers" rule, the `#RRGGBBAA` byte order of
-translucent colours, and that no `key-pressed` handler compares against a key
-*name*. All of it is described in [`docs/UI-NOTES.md`](docs/UI-NOTES.md) § 7–9.
+of them drifts from its row; `tools/verify-visual.ps1` diffs 20 forced-demo
+captures against tracked baselines; `tools/verify-a11y.ps1` reads the UI
+Automation tree (roles, names, invokable patterns) and walks ten Tab stops with
+real keystrokes; and `cargo test` checks WCAG contrast ratios, the "no raw glyph
+outside the icon containers" rule, the `#RRGGBBAA` byte order of translucent
+colours, that every interactive component declares a role, that a focus scope sits
+under the click target, and that no `key-pressed` handler compares against a key
+*name*. All of it is described in [`docs/UI-NOTES.md`](docs/UI-NOTES.md) § 7–9
+and § 12.
 
 The engineering record for the layout work — root causes, fixes and what could
 not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
@@ -164,7 +170,24 @@ pwsh -File tools/verify-layout.ps1        # 24 checks: 8 pages x 3 sizes
 
 # icon alignment, measured from pixels rather than from the Slint source
 pwsh -File tools/verify-icons.ps1         # add -Size 800x600 / -Dark
+
+# pixel regression: 20 captures (8 pages x light/dark, plus the detail page in
+# both its content and its error state) diffed against tracked baselines. The
+# script forces PIXIV_DESKTOP_DEMO=1, which is what makes a baseline both
+# deterministic and free of the signed-in user's own feed. Re-baseline with
+# -Update after a deliberate visual change, and read the diff before committing.
+pwsh -File tools/verify-visual.ps1
+
+# accessibility: reads the UI Automation tree the way a screen reader does
+# (roles, names, invokable patterns) and then walks ten Tab stops with real
+# keystrokes, asserting the numbers pinned in tools/a11y-budget.json.
+pwsh -File tools/verify-a11y.ps1          # -Report to measure without failing
 ```
+
+Hover and keyboard interaction are synthesised, not assumed: `tools/drive.ps1`
+sends real pointer moves, clicks, wheel notches and keystrokes
+(`SetCursorPos` + `mouse_event` + `SendKeys`), and dot-sourcing it gives the
+whole set as functions. `-Tip` remains only because it is deterministic.
 
 `shot.ps1` restores the window before resizing (a resize delivered to a
 never-restored window is dropped by the backend) and copies the screen rather than
@@ -177,9 +200,14 @@ about layout.
 # every gate, in order, with per-gate timing - this is the list
 pwsh -File tools/gates.ps1
 
+# ...and the two measured UI gates as well. They are opt-in because they launch
+# the app, read its accessibility tree and copy the screen, which a CI runner
+# without an interactive desktop cannot do.
+pwsh -File tools/gates.ps1 -Ui
+
 # or one at a time
 cargo fmt --all -- --check
-cargo test --workspace                       # 265 tests; 10 are design rules
+cargo test --workspace                       # 269 tests, 13 of them source rules
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)

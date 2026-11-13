@@ -105,6 +105,15 @@ function Measure-Page {
         $tab = @()
         if (-not $SkipTab) {
             [void][Drive32]::SetForegroundWindow($proc.MainWindowHandle)
+            Start-Sleep -Milliseconds 200
+            # A Tab key goes to whatever window is in front, which is not
+            # necessarily the one under test: a stray keystroke lands in the
+            # terminal that started this script. Measure the foreground window
+            # first and refuse to type into anything else.
+            $foreground = [Drive32]::GetForegroundWindow()
+            if ($foreground -ne $proc.MainWindowHandle) {
+                throw ("refusing to synthesise Tab: foreground window {0} is not the app ({1})" -f $foreground, $proc.MainWindowHandle)
+            }
             for ($i = 0; $i -lt $TabSteps; $i++) {
                 Send-TabKey -Count 1
                 $f = Get-FocusedInfo
