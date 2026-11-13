@@ -10,44 +10,44 @@
   },
   "pages": {
     "home": {
-      "minInvokable": 0,
-      "minFocusable": 1,
-      "minTabStops": 2
+      "minInvokable": 34,
+      "minFocusable": 44,
+      "minTabStops": 10
     },
     "discovery": {
-      "minInvokable": 0,
-      "minFocusable": 1,
-      "minTabStops": 2
+      "minInvokable": 24,
+      "minFocusable": 35,
+      "minTabStops": 10
     },
     "ranking": {
-      "minInvokable": 0,
-      "minFocusable": 1,
-      "minTabStops": 2
+      "minInvokable": 31,
+      "minFocusable": 43,
+      "minTabStops": 10
     },
     "search": {
-      "minInvokable": 0,
-      "minFocusable": 1,
-      "minTabStops": 2
+      "minInvokable": 19,
+      "minFocusable": 21,
+      "minTabStops": 10
     },
     "bookmarks": {
-      "minInvokable": 0,
-      "minFocusable": 1,
-      "minTabStops": 2
+      "minInvokable": 20,
+      "minFocusable": 30,
+      "minTabStops": 10
     },
     "history": {
-      "minInvokable": 0,
-      "minFocusable": 1,
-      "minTabStops": 2
+      "minInvokable": 21,
+      "minFocusable": 32,
+      "minTabStops": 10
     },
     "downloads": {
-      "minInvokable": 0,
-      "minFocusable": 1,
-      "minTabStops": 2
+      "minInvokable": 16,
+      "minFocusable": 18,
+      "minTabStops": 10
     },
     "settings": {
-      "minInvokable": 0,
-      "minFocusable": 2,
-      "minTabStops": 2
+      "minInvokable": 16,
+      "minFocusable": 20,
+      "minTabStops": 10
     }
   }
 }

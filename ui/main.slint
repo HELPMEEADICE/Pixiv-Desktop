@@ -367,6 +367,33 @@ export component AppWindow inherits Window {
         root.width-changed(root.width);
     }
 
+    // Keyboard navigation of the rail. A `NavItem` cannot know its neighbours — it
+    // is one shared component instantiated eight times — so Up/Down inside an
+    // entry reports the delta here, where the rail's order is actually declared.
+    // The wrap is two comparisons, not `%`: Slint has no modulo operator
+    // (`Math.mod` is float-only) and a function body has no local variables, so an
+    // index arithmetic one-liner is the only shape that compiles.
+    public function move-nav-focus(from: int, delta: int) {
+        root.focus-nav-step(from + delta);
+    }
+
+    public function focus-nav-step(index: int) {
+        if (index < 0) { nav-settings.take-focus(); }
+        else if (index > 7) { nav-home.take-focus(); }
+        else { root.focus-nav-item(index); }
+    }
+
+    public function focus-nav-item(index: int) {
+        if (index == 0) { nav-home.take-focus(); }
+        else if (index == 1) { nav-discovery.take-focus(); }
+        else if (index == 2) { nav-ranking.take-focus(); }
+        else if (index == 3) { nav-search.take-focus(); }
+        else if (index == 4) { nav-bookmarks.take-focus(); }
+        else if (index == 5) { nav-history.take-focus(); }
+        else if (index == 6) { nav-downloads.take-focus(); }
+        else { nav-settings.take-focus(); }
+    }
+
     init => {
         shortcuts.focus();
     }
@@ -593,50 +620,58 @@ export component AppWindow inherits Window {
                         padding-right: Theme.space-2;
                         spacing: 2px;
 
-                        NavItem {
+                        nav-home := NavItem {
                             icon: "home"; label: "首页"; compact: root.rail-compact;
                             selected: root.page == Destination.Home;
                             clicked => { root.navigate(Destination.Home); }
+                            move-focus(d) => { root.move-nav-focus(0, d); }
                         }
-                        NavItem {
+                        nav-discovery := NavItem {
                             icon: "discover"; label: "发现"; compact: root.rail-compact;
                             selected: root.page == Destination.Discovery;
                             clicked => { root.navigate(Destination.Discovery); }
+                            move-focus(d) => { root.move-nav-focus(1, d); }
                         }
-                        NavItem {
+                        nav-ranking := NavItem {
                             icon: "ranking"; label: "排行榜"; compact: root.rail-compact;
                             selected: root.page == Destination.Ranking;
                             clicked => { root.navigate(Destination.Ranking); }
+                            move-focus(d) => { root.move-nav-focus(2, d); }
                         }
-                        NavItem {
+                        nav-search := NavItem {
                             icon: "search"; label: "搜索"; compact: root.rail-compact;
                             selected: root.page == Destination.Search;
                             clicked => { root.navigate(Destination.Search); }
+                            move-focus(d) => { root.move-nav-focus(3, d); }
                         }
-                        NavItem {
+                        nav-bookmarks := NavItem {
                             icon: "star"; label: "收藏"; compact: root.rail-compact;
                             selected: root.page == Destination.Bookmarks;
                             clicked => { root.navigate(Destination.Bookmarks); }
+                            move-focus(d) => { root.move-nav-focus(4, d); }
                         }
-                        NavItem {
+                        nav-history := NavItem {
                             icon: "history"; label: "浏览历史"; compact: root.rail-compact;
                             selected: root.page == Destination.History;
                             clicked => { root.navigate(Destination.History); }
+                            move-focus(d) => { root.move-nav-focus(5, d); }
                         }
-                        NavItem {
+                        nav-downloads := NavItem {
                             icon: "downloads"; label: "下载管理"; compact: root.rail-compact;
                             selected: root.page == Destination.Downloads;
                             badge: root.downloads-active;
                             clicked => { root.navigate(Destination.Downloads); }
+                            move-focus(d) => { root.move-nav-focus(6, d); }
                         }
 
                         Rectangle { vertical-stretch: 1; }
 
                         Divider { }
-                        NavItem {
+                        nav-settings := NavItem {
                             icon: "settings"; label: "设置"; compact: root.rail-compact;
                             selected: root.page == Destination.Settings;
                             clicked => { root.navigate(Destination.Settings); }
+                            move-focus(d) => { root.move-nav-focus(7, d); }
                         }
                         // Hidden while the host has auto-compacted the pane: at that
                         // size the toggle cannot change anything, and a control that

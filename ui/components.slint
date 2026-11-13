@@ -188,6 +188,17 @@ export component AppButton inherits Rectangle {
     in property <length> row-height: 0px;
     callback clicked();
 
+    // ---- accessibility ----
+    // Slint publishes an element to UI Automation only if it has an
+    // `accessible-role`, and that role has to be a compile-time constant. The name
+    // and the action do not: the label is the same expression the button already
+    // draws, so every existing call site gains a named, invokable node without
+    // changing a line of its own.
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+
     out property <length> button-height:
         root.visual-height > 0px ? root.visual-height
             : (root.compact ? Theme.control-height-sm : Theme.control-height);
@@ -285,6 +296,14 @@ export component IconButton inherits Rectangle {
     in property <TipPlacement> tip-placement: TipPlacement.Above;
     callback clicked();
 
+    // The tip is the button's name: an icon-only control has no text of its own,
+    // and its tooltip is the only wording it has. Falling back to the glyph name
+    // keeps a tip-less button from being completely anonymous.
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.tip != "" ? root.tip : root.icon;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+
     width: root.size;
     height: root.row-height > 0px ? root.row-height : root.size;
     background: transparent;
@@ -307,6 +326,29 @@ export component IconButton inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         tint: root.active ? Theme.accent-ink : root.tint;
+    }
+
+    // Keyboard: same ring, same 2px stroke and same Theme.focus-ring as AppButton,
+    // drawn on the button's visual square rather than the element, so a command-bar
+    // button that claims a 48px row still shows a 32px square ring.
+    if key_focus.has-focus : Rectangle {
+        y: (root.height - root.size) / 2;
+        width: root.size;
+        height: root.size;
+        border-radius: Theme.radius-sm;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        background: transparent;
+    }
+
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (root.enabled && (e.text == "\n" || e.text == " ")) {
+                root.clicked();
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
     }
 
     ta := TouchArea {
@@ -361,6 +403,16 @@ export component TextField inherits Rectangle {
     /// the caret, and the panel would never see them.
     callback navigate-keys(string);
 
+    // `TextInput` sets its own role on the inner item, but that node is unnamed:
+    // the element has no `text` until the user types. The field's name is its
+    // placeholder, which is the only wording a search box ever carries.
+    accessible-role: AccessibleRole.text-input;
+    accessible-label: root.placeholder;
+    accessible-placeholder-text: root.placeholder;
+    accessible-value: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.focus-input(); }
+
     /// Focus the inner input. Slint has no declarative focus hook, so callers
     /// invoke this from a callback (e.g. the Ctrl+F shortcut).
     public function focus-input() { input.focus(); }
@@ -409,6 +461,10 @@ export component TextField inherits Rectangle {
         width: max(0px, root.width - root.text-x - root.trailing-extent);
         height: root.height - 4px;
         enabled: root.enabled;
+        // This element is the one that actually takes keyboard focus, so it is the
+        // one UI Automation reports as focused; without a name it reads as an
+        // anonymous "Edit" even though the field around it is labelled.
+        accessible-label: root.placeholder;
         color: Theme.text;
         font-size: Theme.font-body;
         vertical-alignment: center;
@@ -457,7 +513,19 @@ export component TextField inherits Rectangle {
 export component ToggleSwitch inherits Rectangle {
     in-out property <bool> checked: false;
     in property <bool> enabled: true;
+    /// Name for assistive technology; the switch draws no label of its own.
+    in property <string> label: "";
     callback toggled(bool);
+
+    accessible-role: AccessibleRole.switch;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        root.checked = !root.checked;
+        root.toggled(root.checked);
+    }
 
     width: 40px;
     height: 20px;
@@ -500,7 +568,16 @@ export component SegmentedControl inherits Rectangle {
     in property <[string]> items: [];
     in-out property <int> current: 0;
     in property <bool> enabled: true;
+    /// Name for assistive technology. The current choice is published as the
+    /// group's value, so a screen reader hears "排序方式, 最新" rather than three
+    /// anonymous rectangles.
+    in property <string> label: "";
     callback selected(int);
+
+    accessible-role: AccessibleRole.radio-group;
+    accessible-label: root.label;
+    accessible-value: root.items.length > 0 ? root.items[root.current] : "";
+    accessible-enabled: root.enabled;
 
     height: Theme.control-height;
     width: row.preferred-width;
@@ -598,6 +675,19 @@ export component NavItem inherits Rectangle {
     in property <bool> compact: false;
     in property <int> badge: 0;
     callback clicked();
+    /// Up/Down inside the rail. One item cannot know its neighbours — it is a
+    /// shared component instantiated eight times — so it hands the delta back to
+    /// the window, which is the only place the order is declared.
+    callback move-focus(int);
+
+    /// Move keyboard focus onto this entry. A FocusScope's focus is not
+    /// addressable from outside its component any other way, and this is what
+    /// lets Up/Down hand off to the neighbouring entry.
+    public function take-focus() { key_focus.focus(); }
+
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
 
     out property <length> inset: root.compact ? 0px : Theme.space-3;
 
@@ -643,6 +733,27 @@ export component NavItem inherits Rectangle {
         y: (root.height - self.height) / 2;
     }
 
+    if key_focus.has-focus : Rectangle {
+        border-radius: Theme.radius-sm;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        background: transparent;
+    }
+
+    // Up/Down move along the rail, Enter/Space activate. The arrows are key
+    // *character codes*, not names: U+F700 is Up and U+F701 is Down.
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\u{F700}") { root.move-focus(-1); return EventResult.accept; }
+            if (e.text == "\u{F701}") { root.move-focus(1); return EventResult.accept; }
+            if (e.text == "\n" || e.text == " ") {
+                root.clicked();
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+    }
+
     ta := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
@@ -670,6 +781,10 @@ export component TagChip inherits Rectangle {
     in property <bool> active: false;
     callback clicked();
 
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+
     height: 26px;
     border-radius: Theme.radius-pill;
     border-width: 1px;
@@ -693,6 +808,23 @@ export component TagChip inherits Rectangle {
             // elided the labels ("…"), which also meant the strip had nothing to
             // scroll. Incompressible text gives the row its real width.
             min-width: self.preferred-width;
+        }
+    }
+
+    if key_focus.has-focus : Rectangle {
+        border-radius: Theme.radius-sm;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        background: transparent;
+    }
+
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") {
+                root.clicked();
+                return EventResult.accept;
+            }
+            EventResult.reject
         }
     }
 
@@ -1161,6 +1293,14 @@ component BookmarkPill inherits Rectangle {
     in property <bool> marked: false;
     callback clicked();
 
+    // A toggle, so the state travels with the name: the pill's own tooltip
+    // already says "取消收藏" when marked, and `checked` carries the rest.
+    accessible-role: AccessibleRole.checkbox;
+    accessible-label: root.marked ? "取消收藏" : "收藏";
+    accessible-checkable: true;
+    accessible-checked: root.marked;
+    accessible-action-default => { root.clicked(); }
+
     width: 28px;
     height: 28px;
     border-radius: Theme.radius-pill;
@@ -1215,6 +1355,15 @@ export component IllustCard inherits Rectangle {
     callback open();
     callback open-author();
     callback toggle-bookmark();
+
+    // A card is one list item whose name is the caption it already draws, so a
+    // screen reader reads "标题 · 作者" and can open it, instead of walking a
+    // dozen unrelated Text nodes with no ordering and no action between them.
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: root.show-author && root.item.author != ""
+        ? root.item.title + " · " + root.item.author
+        : root.item.title;
+    accessible-action-default => { root.open(); }
 
     // Clamp to a sane band: a 1:6 banner and a 6:1 panorama both stay usable.
     out property <float> clamped-aspect:
@@ -1412,6 +1561,25 @@ export component IllustCard inherits Rectangle {
             }
         }
     }
+
+    // Declared last so the ring is not painted over by the cover: a card that can
+    // be opened is a keyboard stop too, and a stop with no ring is invisible.
+    if key_focus.has-focus : Rectangle {
+        border-radius: Theme.radius-sm;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        background: transparent;
+    }
+
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") {
+                root.open();
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+    }
 }
 
 // ======================================================================
@@ -1589,6 +1757,12 @@ export component UserCard inherits Rectangle {
     callback open();
     callback toggle-follow();
 
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: root.item.account != ""
+        ? root.item.name + " · @" + root.item.account
+        : root.item.name;
+    accessible-action-default => { root.open(); }
+
     width: root.card-width;
     height: 132px;
     border-radius: Theme.radius-lg;
@@ -1656,6 +1830,23 @@ export component UserCard inherits Rectangle {
             wrap: word-wrap;
             max-height: 32px;
             overflow: elide;
+        }
+    }
+
+    if key_focus.has-focus : Rectangle {
+        border-radius: Theme.radius-sm;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        background: transparent;
+    }
+
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") {
+                root.open();
+                return EventResult.accept;
+            }
+            EventResult.reject
         }
     }
 }

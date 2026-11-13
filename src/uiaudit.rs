@@ -683,6 +683,147 @@ mod tests {
         );
     }
 
+    /// Rule: every interactive primitive declares an accessibility role.
+    ///
+    /// Measured before this rule existed: the UIA tree of all eight pages held
+    /// invokable=0 and focusable=1 — the whole application was, to a screen
+    /// reader, a wall of Text and Image nodes with one editable field in it and
+    /// nothing that could be pressed. Nothing in the build noticed, because a
+    /// widget without `accessible-role` compiles to exactly the same pixels as a
+    /// widget with one. The role is the cheapest possible thing to require and
+    /// the hardest to remember, so it is a build error from here on.
+    ///
+    /// The check is structural rather than numerical on purpose: it does not care
+    /// which role, only that the component declares one. A role that is wrong is
+    /// a review question; a role that is absent is a regression nobody sees.
+    #[test]
+    fn every_interactive_component_declares_a_role() {
+        const INTERACTIVE: [&str; 10] = [
+            "AppButton",
+            "IconButton",
+            "NavItem",
+            "TagChip",
+            "TextField",
+            "ToggleSwitch",
+            "SegmentedControl",
+            "IllustCard",
+            "UserCard",
+            "BookmarkPill",
+        ];
+        let path = ui_dir().join("components.slint");
+        let source = read(&path);
+        let mut offenders = Vec::new();
+        let mut seen = 0;
+        for (index, line) in source.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            let Some(at) = code.find("component ") else {
+                continue;
+            };
+            let rest = &code[at + "component ".len()..];
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !INTERACTIVE.contains(&ident.as_str()) {
+                continue;
+            }
+            seen += 1;
+            if !component_body(&source, index).contains("accessible-role:") {
+                offenders.push(format!("components.slint:{}: {ident}", index + 1));
+            }
+        }
+        assert_eq!(
+            seen,
+            INTERACTIVE.len(),
+            "expected to find all {} interactive components in components.slint; a rename \
+             that drops one out of this list also drops its role check",
+            INTERACTIVE.len()
+        );
+        assert!(
+            offenders.is_empty(),
+            "these components take clicks but expose no accessible-role, so a screen reader \
+             never sees them: \n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The body of the component declared on `start`, from its `component X`
+    /// line to the brace that closes it.
+    ///
+    /// Quoted literals are skipped while counting braces: a key handler is
+    /// written `e.text == "\\u{F700}"`, and a string that carries its own brace
+    /// must not unbalance the scan.
+    fn component_body(source: &str, start: usize) -> String {
+        let mut depth = 0usize;
+        let mut out = String::new();
+        for (index, text) in source.lines().enumerate() {
+            if index < start {
+                continue;
+            }
+            let mut quoted = false;
+            let mut escaped = false;
+            let mut comment = false;
+            let mut chars = text.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if comment {
+                    break;
+                }
+                if quoted {
+                    if escaped {
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == '"' {
+                        quoted = false;
+                    }
+                } else if ch == '"' {
+                    quoted = true;
+                } else if ch == '/' && chars.peek() == Some(&'/') {
+                    comment = true;
+                } else if ch == '{' {
+                    depth += 1;
+                } else if ch == '}' {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+            out.push_str(text.split("//").next().unwrap_or(""));
+            out.push('\n');
+            if index > start && depth == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// The body scan must stop at its own closing brace, and must not be fooled by
+    /// a brace inside a string literal.
+    ///
+    /// Worth a test of its own: if `component_body` ran to the end of the file it
+    /// would still find `accessible-role:` — in the *next* component — and the
+    /// rule above would pass on a component that declares nothing.
+    #[test]
+    fn component_body_stops_at_its_own_closing_brace() {
+        let source = "export component A inherits Rectangle {\n    key: \"}\\u{F700}\";\n}\n\
+                      export component B inherits Rectangle {\n    accessible-role: AccessibleRole.button;\n}\n";
+        let a = component_body(source, 0);
+        assert!(
+            a.contains("component A"),
+            "the declaration line is included"
+        );
+        assert!(
+            !a.contains("component B"),
+            "the scan overran into the next component"
+        );
+        assert!(
+            !a.contains("accessible-role"),
+            "A declares no role and must look like it"
+        );
+        assert!(
+            component_body(source, 3).contains("accessible-role:"),
+            "B's own body is found"
+        );
+    }
+
     /// Collect the double-quoted strings at the top level of an expression.
     ///
     /// Stops at the terminating `;` so a ternary's branches are all included but
