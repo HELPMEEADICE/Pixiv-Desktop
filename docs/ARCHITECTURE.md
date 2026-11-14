@@ -15,7 +15,8 @@ pixiv-desktop (bin + Slint UI)          ← ui/, src/
 └── pixiv-types     wire + domain contracts (no I/O, no UI)
 ```
 
-Dependencies point one way. `pixiv-types` depends on nothing but `serde`; the UI
+Dependencies point one way. `pixiv-types` depends on `serde`, `serde_json` and
+`thiserror` and on no other crate; the UI
 depends on everything; no library crate depends on the UI.
 
 The reason for six crates rather than one module tree is testability and
@@ -161,12 +162,14 @@ The contract now:
   `width-changed` event. Nothing polls, and nothing derives layout from its own
   width (that is a binding loop Slint reports as such).
 
-Density follows Pixiv, not a touch UI: 4/8/12/16 spacing scale, 13 px body text,
-8 px card radius, 1 px borders.
+Density follows Pixiv, not a touch UI. The numbers are the tokens in `ui/theme.slint`:
+14 px body text on an 11/12/14/14/16/20/24 ramp, a seven-step 4…32 spacing scale,
+4 px control radius, 8 px card radius, 1 px borders.
 
 ### 6.2 Rust-side controllers
 
-`src/app.rs` is the only file that touches Slint, and it delegates the parts that
+`src/app/mod.rs` — with `feed/` and `callbacks/` beside it — is the only module that
+touches Slint, and it delegates the parts that
 can be tested without a window:
 
 | Module | Owns |
@@ -177,7 +180,7 @@ can be tested without a window:
 | `src/route.rs` | back/forward history |
 | `src/session.rs` | DPAPI-sealed session file |
 | `src/picker.rs` | Win32 folder chooser |
-| `src/app.rs` | state, background work, model plumbing, epoch guards |
+| `src/app/mod.rs` | state, background work, model plumbing, epoch guards |
 
 
 ## 7. Demo Mode
@@ -190,8 +193,8 @@ It is kept honest by construction:
 - Every title carries a `[DEMO]` marker and the shell shows a persistent banner.
 - Artwork is generated procedurally at runtime — no third-party imagery is
   bundled, so there is no licensing question.
-- Demo Mode is a separate `Arc<dyn DataSource>` implementation; it never parses
-  or imitates a Pixiv response.
+- Demo Mode is the `Mode::Demo` arm of every loader plus `crates/pixiv-demo`, which
+  generates artwork procedurally; it never parses or imitates a Pixiv response.
 
 ## 8. Error handling and limits
 
@@ -204,8 +207,8 @@ It is kept honest by construction:
 
 ## 9. Known limits
 
-Recorded honestly rather than papered over — see `README.md` § Known limitations
-for the user-facing version. In short: bookmark/follow POST shapes are
-implemented from observed request formats but could not be confirmed against a
-live authenticated session; comment, novel-chapter and `discovery` endpoints did
-not expose a usable shape and are not modelled; ugoira export writes GIF only.
+Recorded honestly rather than papered over — see `README.md` § *Honest limits* for
+the user-facing version. In short: comment and related-work endpoints exposed no
+usable shape and are not modelled; the novel reader is a structured placeholder;
+bookmark/follow mutations are verified against a live account
+(`docs/NETWORK-TEST-REPORT.md` row 8); ugoira export writes GIF only.

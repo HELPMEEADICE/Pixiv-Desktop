@@ -2,8 +2,9 @@
 
 Pixiv publishes no API documentation for third-party clients. Everything below
 was established by observing the live site on the date of development, and is
-recorded so the next person does not have to rediscover it. **Every claim here
-was verified with a request**, and the responses were saved under `fixtures/`.
+recorded so the next person does not have to rediscover it. **Every claim here was
+verified with a request**; the seven rows that a struct parses are also backed by a saved
+response under `fixtures/`, and the rest are recorded from the probe that proved them.
 
 ## Authentication reality
 

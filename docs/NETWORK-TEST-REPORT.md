@@ -93,7 +93,7 @@ be exercised here · **NOT TESTED** not exercised in this round.
 | 2 | Real account UID resolved | PASS | id 55234129, app adopted it (`app.session.user_id`) |
 | 3 | Real user name resolved | PASS | "HELPMEEADICE"; top bar and settings card show it |
 | 4 | Real avatar fetched | PASS | avatar rendered in the top bar from `i.pximg.net` |
-| 5 | Profile information | PASS | handle, followers/followees via `/ajax/user/extra` |
+| 5 | Profile information | PASS | handle, followees and work counts from `/ajax/user/{id}/profile/all`; the follower total is a separate `/ajax/user/{id}/followers?limit=1` request (`docs/API-NOTES.md` §3) |
 | 6 | UI updates on sign-in | PASS | status bar "已登录", card "已登录：HELPMEEADICE", demo badge removed |
 | 7 | Demo mode switches to real data | PASS | feed switched from demo catalogue to live ranking |
 | 7a | Real data switches back to demo and out again | PASS | settings toggle → "演示模式" badge on; toggle back → badge off, 50 live items |

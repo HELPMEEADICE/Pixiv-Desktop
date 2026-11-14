@@ -514,7 +514,7 @@ Two independent measurements, both from the running app:
 | Probe | Result |
 | --- | --- |
 | UI Automation tree (8 pages, 1024x768) | 64 nodes: **47 Text, 16 Image, 1 Edit**; `keyboardFocusable = 1` (the search box); elements answering `InvokePattern`: **0** |
-| `grep -c accessible-` over `ui/` | **0** |
+| `grep -c accessible-` over `ui/` | **0**, measured before round five — 43 today |
 
 So the app was a picture of a window: a screen reader read a wall of text with
 nothing to operate, and Tab reached the search field and then cycled.

@@ -68,9 +68,10 @@ not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
 | Download queue: bounded concurrency, filename templates, cancel / retry, duplicate detection, atomic writes | **Implemented** |
 | Ugoira decode + timing + GIF export | **Implemented** (library + tests; see limits) |
 | Session login via system browser + `PHPSESSID` | **Implemented** |
-| Bookmark / follow mutations | **Implemented, unverified against a live session** |
+| Bookmark / follow mutations | **Implemented** and verified against a live account — see [`docs/NETWORK-TEST-REPORT.md`](docs/NETWORK-TEST-REPORT.md) row 8 |
 | Novel reader | **Placeholder** (structured page, opens the official page) |
-| Comments, "related works", `/ajax/discovery/artworks` | **Not available** — no usable endpoint shape found |
+| Comments, "related works" | **Not available** — no usable endpoint shape found |
+| `/ajax/discovery/artworks` (the For-you and recommended-artist bands) | **Implemented** — verified 200 for every mode (see [`docs/API-NOTES.md`](docs/API-NOTES.md)) |
 
 ### Honest limits
 
@@ -99,13 +100,14 @@ worse than one that says what it does not know.
    `target/lint` so it always has artifacts to produce; a deliberate
    `bool_comparison` probe was used to prove it reports lints. CI runs plain
    `cargo clippy -D warnings` on an MSVC toolchain instead.
-3. **Bookmark and follow POSTs are implemented from observed request shapes but could
-   not be confirmed end-to-end**, because no credential was available to verify a success
-   response. They never fake success: an error surfaces as an error, and a bookmark can
-   only change state after the server confirms it.
-4. **`/ajax/discovery/artworks`, related works and comments returned no usable shape**
-   (400/404 for every parameter combination tried). Discovery is therefore composed from
-   ranking + search + tag metadata rather than guessed. See `docs/API-NOTES.md`.
+3. **Bookmark and follow POSTs were confirmed end-to-end against a live account** — add,
+   delete, follow and unfollow all mutate the real account, recorded in
+   `docs/NETWORK-TEST-REPORT.md` row 8. They still never fake success: an error surfaces as
+   an error, and a bookmark only changes state after the server confirms it.
+4. **Related works and comments returned no usable shape** (400/404 for every parameter
+   combination tried) and are not modelled. `/ajax/discovery/artworks` does answer 200 and
+   carries the For-you band; the discovery page completes it with ranking + search + tag
+   metadata rather than guessing. See `docs/API-NOTES.md`.
 5. **Native folder picker — implemented** (`SHBrowseForFolderW`, the resizable shell
    dialog). The chosen directory is persisted and applies to the next task immediately;
    `DownloadManager::set_directory()` exists, so no restart is needed.
