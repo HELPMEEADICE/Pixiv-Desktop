@@ -20,6 +20,14 @@
 # artifacts to produce and therefore always actually lints. A deliberate
 # bool_comparison probe proved the wrapper reports real lints.
 #
+# What lets it fail: RUSTFLAGS='-D warnings', set inside the same try/finally that
+# carries the wrapper and the target directory. Without it the step could only ever
+# report, never reject: a lint printed a warning line and cargo still exited 0. The
+# second half is the log: --message-format short emits "src/x.rs:12:5: warning: ...",
+# so a filter of ^(warning|error) matched the summary line only and dropped every
+# per-item lint. The step now keeps the whole log and shows the first 200 lines,
+# which is bounded without being lossy.
+#
 # Why a path gate runs before anything is compiled: F8. A directory literally
 # named %SystemDrive% sat in this repository root, holding seven files under
 # %SystemDrive%\ProgramData\Microsoft\Windows\Caches\ - a path some tool wrote
@@ -182,26 +190,46 @@ if (-not $failed -and $Lint -ne "Off") {
     if ($mode -eq "Driver") {
         $previous = $env:RUSTC_WORKSPACE_WRAPPER
         $previousTarget = $env:CARGO_TARGET_DIR
+        $previousFlags = $env:RUSTFLAGS
         $env:RUSTC_WORKSPACE_WRAPPER = $driver
         # A separate target dir is what makes this step lint instead of
         # re-print "Finished" over cached artifacts.
         $env:CARGO_TARGET_DIR = "target\lint"
+        # Promoting warnings to errors is what lets this step fail. RUSTFLAGS is
+        # restored with the other two: a -D warnings left behind in this shell would
+        # turn the release build below - and any later build - into a denial on any
+        # warning, so the restore is in the same finally, not after it.
+        $env:RUSTFLAGS = "-D warnings"
         try {
             Invoke-Gate "cargo check (clippy-driver)" {
-                cargo check --workspace --all-targets --message-format short 2>&1 |
-                    Select-String -Pattern "^(warning|error)" |
-                    ForEach-Object { $_.Line } | Out-Host
+                # No pattern filter: see the header. The log is bounded by line count
+                # instead, and the exit code is put back by hand because the last
+                # statement in this block is the one the gate measures.
+                $log = @(cargo check --workspace --all-targets --message-format short 2>&1 | ForEach-Object { "$_" })
+                $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
+                $log | Select-Object -First 200 | Out-Host
+                if ($log.Count -gt 200) { Write-Host ("  ... {0} more line(s) suppressed" -f ($log.Count - 200)) }
+                $linted = @($log | Where-Object { $_ -match ": (warning|error)" }).Count
+                Write-Host ("  {0} log line(s), {1} per-item warning/error line(s)" -f $log.Count, $linted)
+                $global:LASTEXITCODE = $code
             } | Out-Null
-        } finally {
+        }
+        finally {
             $env:RUSTC_WORKSPACE_WRAPPER = $previous
             $env:CARGO_TARGET_DIR = $previousTarget
+            $env:RUSTFLAGS = $previousFlags
         }
     }
     else {
         Invoke-Gate "cargo clippy -D warnings" {
-            cargo clippy --workspace --all-targets --message-format short -- -D warnings 2>&1 |
-                Select-String -Pattern "^(warning|error)" |
-                ForEach-Object { $_.Line } | Out-Host
+            # Same rule as the Driver branch: -D warnings on the command line, and the
+            # whole log bounded by line count rather than by a filter that only ever
+            # matched the summary.
+            $log = @(cargo clippy --workspace --all-targets --message-format short -- -D warnings 2>&1 | ForEach-Object { "$_" })
+            $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
+            $log | Select-Object -First 200 | Out-Host
+            if ($log.Count -gt 200) { Write-Host ("  ... {0} more line(s) suppressed" -f ($log.Count - 200)) }
+            $global:LASTEXITCODE = $code
         } | Out-Null
     }
 }

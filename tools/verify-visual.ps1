@@ -8,8 +8,24 @@
 #
 # Baselines are captured in forced demo mode (PIXIV_DESKTOP_DEMO=1) so they are
 # deterministic and contain no personal data: procedural artwork, no session, no
-# timer-driven notice. A capture on a different DPI reports *skipped*, not failed,
-# because a 150% baseline cannot judge a 100% render.
+# timer-driven notice. A capture on a different DPI cannot be judged, because a
+# 150% baseline says nothing about a 100% render - it is reported as skipped.
+#
+# A skipped comparison is not a pass. A run in which every capture was skipped
+# compared nothing, so it exits 77 ("this host cannot run this gate", the code
+# tools/gates.ps1 already reads as SKIP) and says how many were skipped; a run
+# that compared some captures and skipped others exits 0 only with the skipped
+# count printed as "not judged".
+#
+# What the diff can and cannot decide: it compares pixels, nothing else. The
+# comparison absorbs a one-pixel displacement on purpose (sub-pixel antialiasing
+# moves with no layout change at all), which also means a capture shifted
+# wholesale by one pixel scores 0% through it - and UI-NOTES 12d was a defect of
+# exactly one pixel of clearance. So an otherwise-clean capture is asked a second
+# question: does displacing the baseline by one pixel in x or y explain the
+# capture better than no displacement? If it does, the verdict is SHIFT and the
+# gate fails, because a render that only lines up when the reference is moved is
+# a moved render, not a matching one.
 #
 # Usage:
 #   pwsh -File tools/verify-visual.ps1                  # capture, diff, assert
@@ -101,6 +117,55 @@ public class PixDiff
         }
     }
 
+    // The strict counter the shift test needs. Compare() above absorbs a one-pixel
+    // displacement on purpose, which is also why a capture shifted wholesale by one
+    // pixel scores over = 0 through it: every displaced pixel finds a neighbour
+    // within tolerance. Nothing is absorbed here - pixel (x, y) of A is measured
+    // against (x + dx, y + dy) of B and nowhere else - so a caller can ask whether
+    // moving the baseline explains the capture better than not moving it. Returns
+    // "over|max", with over a pixel count rather than a percentage so that shift
+    // candidates are compared against each other without rounding.
+    public static string CompareShift(string pathA, string pathB, int tolerance, int dx, int dy)
+    {
+        using (var ia = new Bitmap(pathA))
+        using (var ib = new Bitmap(pathB))
+        {
+            if (ia.Width != ib.Width || ia.Height != ib.Height)
+                return string.Format("size {0}x{1} vs {2}x{3}|0", ia.Width, ia.Height, ib.Width, ib.Height);
+
+            var rect = new Rectangle(0, 0, ia.Width, ia.Height);
+            var da = ia.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            var db = ib.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            int stride = da.Stride;
+            var ba = new byte[stride * ia.Height];
+            var bb = new byte[stride * ia.Height];
+            Marshal.Copy(da.Scan0, ba, 0, ba.Length);
+            Marshal.Copy(db.Scan0, bb, 0, bb.Length);
+            ia.UnlockBits(da);
+            ib.UnlockBits(db);
+
+            long over = 0;
+            int max = 0;
+            for (int y = 0; y < ia.Height; y++)
+            {
+                int ny = y + dy;
+                if (ny < 0 || ny >= ib.Height) continue;    // the dropped edge row is one pixel wide
+                int rowB = ny * stride;
+                for (int x = 0; x < ia.Width; x++)
+                {
+                    int nx = x + dx;
+                    if (nx < 0 || nx >= ib.Width) continue;
+                    int i = y * stride + x * 4;
+                    int j = rowB + nx * 4;
+                    int d = Math.Max(Math.Abs(ba[i] - bb[j]), Math.Max(Math.Abs(ba[i + 1] - bb[j + 1]), Math.Abs(ba[i + 2] - bb[j + 2])));
+                    if (d > max) max = d;
+                    if (d > tolerance) over++;
+                }
+            }
+            return string.Format("{0}|{1}", over, max);
+        }
+    }
+
     static bool NeighbourWithin(byte[] a, byte[] b, int stride, int w, int h, int x, int y, int tol)
     {
         int j = y * stride + x * 4;
@@ -117,6 +182,39 @@ public class PixDiff
     }
 }
 '@
+}
+
+# Pixel count that differs between the baseline and the capture when the baseline is
+# displaced by (Dx, Dy). A shape mismatch cannot reach this: the caller only asks
+# after Compare() returned a percentage.
+function Get-ShiftOver {
+    param([string]$Base, [string]$Live, [int]$Dx, [int]$Dy, [int]$Tolerance)
+    $line = [PixDiff]::CompareShift($Base, $Live, $Tolerance, $Dx, $Dy)
+    if ($line -like "size*") { return [int]::MaxValue }
+    return [int]$line.Split("|")[0]
+}
+
+# The one-pixel question, asked only of a capture that already matched: if moving
+# the baseline by a pixel recovers more than the diff budget this gate tolerates
+# anyway, the capture is displaced rather than different. The margin is that budget
+# expressed in pixels, so antialiasing noise - measured at 0-225 pixels per capture
+# at 1536x1152 on this host - cannot trigger a SHIFT, while a wholesale one-pixel
+# move recovers tens of thousands.
+function Test-Shifted {
+    param([string]$Base, [string]$Live, [int]$Tolerance, [double]$BudgetPercent)
+    $image = [System.Drawing.Image]::FromFile($Base)
+    $pixels = [double]$image.Width * $image.Height
+    $image.Dispose()
+    $margin = [math]::Max(1, [int][math]::Ceiling($pixels * $BudgetPercent / 100.0))
+    $still = Get-ShiftOver -Base $Base -Live $Live -Dx 0 -Dy 0 -Tolerance $Tolerance
+    $best = $still
+    $bestDx = 0
+    $bestDy = 0
+    foreach ($delta in @(@(-1, 0), @(1, 0), @(0, -1), @(0, 1))) {
+        $moved = Get-ShiftOver -Base $Base -Live $Live -Dx $delta[0] -Dy $delta[1] -Tolerance $Tolerance
+        if ($moved -lt $best) { $best = $moved; $bestDx = $delta[0]; $bestDy = $delta[1] }
+    }
+    return [pscustomobject]@{ Shifted = (($still - $best) -gt $margin); Recovered = $still - $best; Still = $still; Dx = $bestDx; Dy = $bestDy }
 }
 
 $Pages = @($Pages | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -184,24 +282,59 @@ foreach ($theme in $Themes) {
             continue
         }
         $verdict = if ($over -le $MaxDiffPercent) { "OK" } else { "DIFF" }
-        $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = $over; Max = [int]$parts[1]; Mean = [double]::Parse($parts[2]); Verdict = $verdict; Detail = "" }
+        $detail = ""
+        if ($verdict -eq "OK") {
+            $shift = Test-Shifted -Base $basePng -Live $png -Tolerance $Tolerance -BudgetPercent $MaxDiffPercent
+            if ($shift.Shifted) {
+                $verdict = "SHIFT"
+                $detail = ("matches only when the baseline moves {0},{1}: {2} px explained of {3}" -f $shift.Dx, $shift.Dy, $shift.Recovered, $shift.Still)
+            }
+        }
+        $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = $over; Max = [int]$parts[1]; Mean = [double]::Parse($parts[2]); Verdict = $verdict; Detail = $detail }
     }
 }
 
 Write-Host ""
 foreach ($r in $results) {
-    $colour = switch ($r.Verdict) { "OK" { "Green" } "BASE" { "Yellow" } "SKIP" { "DarkGray" } default { "Red" } }
+    $colour = switch ($r.Verdict) { "OK" { "Green" } "BASE" { "Yellow" } "SKIP" { "DarkGray" } "SHIFT" { "Red" } default { "Red" } }
     $line = "  {0,-10} {1,-6} {2,-6} over={3,8:N4}%  max={4,4}  mean={5,6:N2}  {6}" -f $r.Page, $r.Theme, $r.Verdict, $r.Over, $r.Max, $r.Mean, $r.Detail
     Write-Host $line -ForegroundColor $colour
 }
 
 $results | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $OutDir "visual-summary.json") -Encoding utf8
 
+# A verdict is only a pass if a pixel comparison actually happened. SKIP is not in
+# the failure set - a 100% host cannot be asked to match a 150% baseline - but it is
+# not a pass either, so the two counts are kept apart and the run's exit code is
+# decided from them rather than from "no failures".
 $bad = @($results | Where-Object { $_.Verdict -notin @("OK", "BASE", "SKIP") })
+$skipped = @($results | Where-Object { $_.Verdict -eq "SKIP" })
+$judged = @($results | Where-Object { $_.Verdict -in @("OK", "SHIFT") })
+$shifted = @($results | Where-Object { $_.Verdict -eq "SHIFT" })
 Write-Host ""
-if ($bad.Count -eq 0) {
-    Write-Host ("{0} captures within {1}% of the baseline" -f $results.Count, $MaxDiffPercent) -ForegroundColor Green
+if ($bad.Count -gt 0) {
+    $extra = if ($shifted.Count) { " ({0} of them by a one-pixel shift)" -f $shifted.Count } else { "" }
+    Write-Host ("{0} of {1} captures differ from the baseline{2}" -f $bad.Count, $results.Count, $extra) -ForegroundColor Red
+    exit 1
+}
+if ($judged.Count -eq 0) {
+    if ($skipped.Count -gt 0) {
+        # Every capture was skipped: nothing was compared, so nothing was judged.
+        # 77 is the documented "this host cannot run this gate" code that
+        # tools/gates.ps1 reports as SKIP - never green.
+        Write-Host ("0 compared, {0} skipped (scale differs from the baseline): nothing was judged, so this run cannot pass - re-baseline on this host with -Update" -f $skipped.Count) -ForegroundColor Yellow
+        exit 77
+    }
+    if ($results.Count -eq 0) {
+        Write-Host "0 captures, 0 compared (no page matched the selection): nothing was judged" -ForegroundColor Yellow
+        exit 77
+    }
+    Write-Host ("{0} baselines written, 0 compared (-Update run)" -f $results.Count) -ForegroundColor Yellow
     exit 0
 }
-Write-Host ("{0} of {1} captures differ from the baseline" -f $bad.Count, $results.Count) -ForegroundColor Red
-exit 1
+if ($skipped.Count -gt 0) {
+    Write-Host ("{0} compared within {1}% of the baseline; {2} skipped (not judged)" -f $judged.Count, $MaxDiffPercent, $skipped.Count) -ForegroundColor Yellow
+    exit 0
+}
+Write-Host ("{0} captures within {1}% of the baseline" -f $results.Count, $MaxDiffPercent) -ForegroundColor Green
+exit 0
