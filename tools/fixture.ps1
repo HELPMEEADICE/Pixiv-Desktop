@@ -51,11 +51,14 @@ function Get-FixtureTable {
             Name     = "ugoira"
             Page     = "detail"
             Env      = [ordered]@{
-                PIXIV_DESKTOP_DEMO         = "1"
-                PIXIV_DESKTOP_START_PAGE   = "home"
-                PIXIV_DESKTOP_START_ILLUST = "700000003"
+                PIXIV_DESKTOP_DEMO    = "1"
+                PIXIV_DESKTOP_FIXTURE = "ugoira"
             }
-            Setup    = "Space on the film strip (F1 toggle-playback), waited one frame interval"
+            // No hard-coded id: the app asks the demo catalogue for a ugoira work
+            // (TypeFilter::Ugoira) and holds it at frame 0, so this table cannot
+            // drift from whatever the catalogue decides an ugoira is. The id that
+            // used to sit here, 700000003, was an illustration.
+            Setup    = "the app opens the first demo ugoira on its own and holds frame 0; Space plays (F1 toggle-playback), waited one frame interval"
             Captures = @("detail-ugoira-play")
             Asserts  = "the frame index advanced between two captures of the same work, so a frozen film cannot pass"
             Defect   = "F1"

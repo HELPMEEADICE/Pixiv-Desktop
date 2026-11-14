@@ -200,7 +200,6 @@ pub(crate) struct App {
     #[allow(dead_code)]
     palette: PaletteState,
     /// Ugoira playback for the detail page (F1, detail track).
-    #[allow(dead_code)]
     playback: PlaybackState,
 }
 
@@ -307,6 +306,18 @@ impl App {
         // every arrival rather than only on a fresh navigation.
         ui.set_ranking_filter(ranking_index(self.ranking_kind));
         ui.set_search_word(self.search_word.clone().into());
+        // Round nine (F1, O1): a detail page owns a playback clock and a page
+        // model full of decoded bitmaps. Leaving it must give both back now. The
+        // tick's own route check stops the clock within one frame, but the
+        // bitmaps would otherwise live until the next visit, which is exactly the
+        // cost O1 exists to remove. The epoch bump is what makes a decode still in
+        // flight land dead instead of painting into a page nobody is looking at.
+        if self.detail.is_some() && next.page != Destination::Detail {
+            self.release_playback();
+            self.detail_epoch = self.detail_epoch.wrapping_add(1);
+            self.detail_models = None;
+            ui.set_detail_pages(ModelRc::default());
+        }
     }
 }
 

@@ -115,13 +115,35 @@ pub(crate) fn install(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_detail_select_page(move |index| {
-            let app = shared.borrow();
-            let ui = app.ui();
-            ui.set_detail_page_index(index);
-            ui.set_detail_zoom(1.0);
-            ui.set_detail_pan_x(0.0);
-            ui.set_detail_pan_y(0.0);
-            ui.set_detail_fit_mode(true);
+            let mut app = shared.borrow_mut();
+            // Selecting a page also plans the decodes around it: the viewer only
+            // ever holds the current page and its neighbours (O1).
+            app.show_page(index);
+        });
+    }
+
+    // ---- round nine: F1 playback, F4 visibility, U29 stepping ----
+    {
+        let shared = app.clone();
+        ui.on_toggle_playback(move || {
+            let mut app = shared.borrow_mut();
+            app.toggle_playback();
+        });
+    }
+
+    {
+        let shared = app.clone();
+        ui.on_page_step(move |delta| {
+            let mut app = shared.borrow_mut();
+            app.page_step(delta);
+        });
+    }
+
+    {
+        let shared = app.clone();
+        ui.on_pick_restrict(move |restrict| {
+            let mut app = shared.borrow_mut();
+            app.pick_restrict(restrict);
         });
     }
 
@@ -215,4 +237,52 @@ pub(crate) fn install(app: &Shared) {
                 .set_detail_zoom(zoom.clamp(crate::zoom::ZOOM_MIN, crate::zoom::ZOOM_MAX));
         });
     }
+
+    install_capture_fixture(app);
+}
+
+/// The app half of `PIXIV_DESKTOP_FIXTURE=ugoira` (the gate half is
+/// tools/fixture.ps1).
+///
+/// It parks the shell in the one state F1 has to be photographed in: the demo data
+/// source, the demo catalogue's ugoira open, frame 0 in the viewer and the clock
+/// stopped. Nothing here starts playback - the capture walk presses Space on the
+/// toolbar button, which is the seam the gate asserts on, and an autoplaying film
+/// could not produce two comparable pictures anyway.
+fn install_capture_fixture(app: &Shared) {
+    if std::env::var("PIXIV_DESKTOP_FIXTURE").ok().as_deref() != Some("ugoira") {
+        return;
+    }
+    {
+        let mut app = app.borrow_mut();
+        // A fixture must not depend on whether this machine happens to hold a live
+        // cookie, so the data source is forced here as well: the capture is of demo
+        // works and their pseudo-URLs.
+        if app.mode != Mode::Demo {
+            app.mode = Mode::Demo;
+            app.ui().set_demo_mode(true);
+        }
+    }
+    // The window is not mapped yet, and the deep link (`PIXIV_DESKTOP_START_ILLUST`)
+    // is applied after this function runs, so the work is opened once the loop is
+    // up - late enough to win over the deep link rather than be overwritten by it.
+    let shared = app.clone();
+    let timer = slint::Timer::default();
+    timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_millis(400),
+        move || {
+            let id = {
+                let app = shared.borrow();
+                let mut query = pixiv_types::domain::SearchQuery::new("");
+                query.kind = pixiv_types::domain::TypeFilter::Ugoira;
+                app.demo.search(&query).items.first().map(|work| work.id)
+            };
+            if let Some(id) = id {
+                App::open_detail(&shared, &id.to_string());
+            }
+        },
+    );
+    // The single-shot timer only has to outlive this function.
+    std::mem::forget(timer);
 }

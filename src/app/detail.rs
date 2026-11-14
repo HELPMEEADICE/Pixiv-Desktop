@@ -1,5 +1,8 @@
 use super::*;
 
+use super::ugoira::{demo_film, film_width_for};
+use pixiv_ugoira::UgoiraFilm;
+
 impl App {
     // ------------------------------------------------------------- detail
 
@@ -64,6 +67,10 @@ impl App {
             ui.set_detail_following(false);
             ui.set_detail_ugoira_hint("".into());
             ui.set_detail_tags(ModelRc::default());
+            // A film belongs to the work that opened it. Opening another work
+            // stops the clock and releases every frame of the old one before the
+            // new page has anything to show (F1).
+            app.release_playback();
             (app.mode, epoch)
         };
 
@@ -170,10 +177,13 @@ impl App {
             ui.set_detail_bookmarks(illust.bookmark.count as i32);
             ui.set_detail_likes(illust.stats.likes as i32);
             ui.set_detail_bookmarked(illust.bookmark.bookmarked);
+            // F4: the restriction the *reply* reported, never one inferred from a
+            // click. A private bookmark draws its lock glyph from this alone.
+            ui.set_bookmark_restrict(restrict_code(illust.bookmark.restrict));
             ui.set_detail_following(following);
             ui.set_detail_ugoira_hint(
-                if illust.kind == pixiv_types::domain::IllustKind::Ugoira {
-                    "可导出为 GIF 保存在下载目录；播放尚未内置，请在浏览器中查看原始动图。"
+                if illust.kind == IllustKind::Ugoira {
+                    "正在准备内置播放；也能导出为 GIF 保存在下载目录。"
                 } else {
                     ""
                 }
@@ -246,73 +256,30 @@ impl App {
         self.ui().set_detail_pages(ModelRc::from(models.clone()));
         self.ui().set_detail_state(0);
 
-        let urls: Vec<String> = if pages.is_empty() {
-            vec![illust.urls.largest().to_string()]
-        } else {
-            pages
-                .iter()
-                .map(|page| page.urls.regular.to_string())
-                .collect()
-        };
-
-        let mode = self.mode;
-        let cache = self.cache.clone();
-        let rt = self.rt.clone();
+        // ---- O1: decode what is shown, and only what is shown -------------
+        // The strip draws 48 px cells and the viewer draws the current page plus
+        // its neighbours. Before this, every page was decoded at viewer size and
+        // the thumbnails reused that bitmap: a 30-page work paid 30 large decodes
+        // for the one picture on screen. The plan comes from `detail_plan`, so the
+        // counting test and the running app agree on what "one decode" means.
         let seed = illust.id;
-        let target = models.clone();
-
-        rt.spawn(async move {
-            let mut stream = futures::stream::iter(urls.into_iter().enumerate())
-                .map(move |(index, url)| {
-                    let cache = cache.clone();
-                    async move {
-                        let raw = if mode == Mode::Demo {
-                            demo_raw(
-                                Id(seed.get().wrapping_add(index as u64)),
-                                900,
-                                1200,
-                                index as u64,
-                            )
-                            .await
-                        } else {
-                            fetch_sized_viewer(&cache, &url).await
-                        };
-                        (index, raw)
-                    }
-                })
-                .buffer_unordered(3);
-
-            while let Some((index, raw)) = stream.next().await {
-                on_ui(move |shared| {
-                    let Ok(app) = shared.try_borrow() else {
-                        return;
-                    };
-                    let Some(model) = app.detail_models.clone() else {
-                        return;
-                    };
-                    if app.detail_epoch != epoch {
-                        return;
-                    }
-                    let Some(mut page) = model.row_data(index) else {
-                        return;
-                    };
-                    match raw {
-                        Some(raw) => {
-                            let image = raw.to_slint();
-                            page.source = image.clone();
-                            page.thumb = image;
-                            page.loaded = true;
-                        }
-                        None => page.failed = true,
-                    }
-                    model.set_row_data(index, page);
-                });
-            }
-        });
+        let largest = illust.urls.largest().to_string();
+        let requests = detail_plan(&pages, &largest, 0);
 
         self.detail = Some(illust);
         self.detail_pages = pages;
-        self.detail_models = Some(target);
+        self.detail_models = Some(models.clone());
+        self.spawn_detail_decodes(requests, epoch, seed);
+
+        // F1: a ugoira gets its film decoded once, at the width it is drawn.
+        if let Some(illust) = self
+            .detail
+            .as_ref()
+            .filter(|d| d.kind == IllustKind::Ugoira)
+        {
+            let (width, height) = (illust.width, illust.height);
+            self.load_film(seed, width, height);
+        }
 
         // Only now, with this page owning the work: the bounded id lookup reads
         // `self.detail`, so asking before the move resolves the *previous* page's
@@ -396,9 +363,9 @@ impl App {
                 };
                 match raw {
                     Some(raw) => {
-                        let image = raw.to_slint();
-                        page.source = image.clone();
-                        page.thumb = image;
+                        // The strip's bitmap is a separate 48 px decode now, so a
+                        // viewer retry must not overwrite it with a 1600 px one.
+                        page.source = raw.to_slint();
                         page.loaded = true;
                         page.failed = false;
                     }
@@ -524,6 +491,10 @@ impl App {
             let ui = self.ui();
             ui.set_detail_bookmarks(count);
             ui.set_detail_bookmarked(state.bookmarked);
+            // F4: the menu and the lock glyph follow the reply as well, so a
+            // refused re-tag leaves the old restriction on screen instead of a
+            // menu that claims a state the server never accepted.
+            ui.set_bookmark_restrict(restrict_code(state.restrict));
         }
         self.resync_bookmarks();
     }
@@ -617,5 +588,721 @@ impl App {
                 }
             });
         });
+    }
+}
+
+// ------------------------------------------------------- O1: decode what is shown
+
+/// How large a decode the detail page is asking for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DecodeSize {
+    /// The 48 px strip cell.
+    Thumb,
+    /// The viewer, at its own cap.
+    Viewer,
+}
+
+/// One decode request, at the size the picture is drawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DecodeRequest {
+    /// Page index this request fills in.
+    pub index: usize,
+    pub url: String,
+    pub size: DecodeSize,
+}
+
+/// The strip's cells are 48 logical px (ui/pages/detail.slint draws each at
+/// 48 x 48), so the decode target is 48 x the display scale rather than the
+/// viewer's width.
+pub(crate) const THUMB_LOGICAL_PX: f32 = 48.0;
+/// Ceiling for a strip thumbnail: 48 logical at 300 % is 144, rounded up to a
+/// tier by target_width_up_to.
+pub(crate) const THUMB_MAX_WIDTH: u32 = 256;
+/// How many pages on each side of the current one get a viewer-sized decode.
+pub(crate) const VIEWER_RADIUS: usize = 1;
+/// Decodes in flight for one detail page. Three matches the buffer_unordered(3)
+/// that preceded this plan; it also bounds the strip of a 30-page work.
+const DETAIL_DECODE_CONCURRENCY: usize = 3;
+
+/// The strip URL for one page.
+fn page_url(page: &PageMeta, size: DecodeSize) -> &str {
+    let (primary, fallback) = match size {
+        DecodeSize::Thumb => (&page.urls.small, &page.urls.regular),
+        DecodeSize::Viewer => (&page.urls.regular, &page.urls.small),
+    };
+    if primary.is_empty() {
+        fallback.as_str()
+    } else {
+        primary.as_str()
+    }
+}
+
+/// Every decode the detail page needs, for the page the viewer is on.
+///
+/// One request per page for the strip, plus a viewer request for the current page
+/// and its neighbours - the only pictures actually drawn. The largest argument
+/// covers a work whose page list came back empty: it has exactly one image and it
+/// is both the strip cell and the viewer.
+///
+/// A URL is requested at most once per size, so two pages that share a URL (a
+/// crafted payload, or the single-image fallback) cannot double a decode.
+pub(crate) fn detail_plan(pages: &[PageMeta], largest: &str, current: usize) -> Vec<DecodeRequest> {
+    if pages.is_empty() {
+        if largest.is_empty() {
+            return Vec::new();
+        }
+        return vec![
+            DecodeRequest {
+                index: 0,
+                url: largest.to_string(),
+                size: DecodeSize::Thumb,
+            },
+            DecodeRequest {
+                index: 0,
+                url: largest.to_string(),
+                size: DecodeSize::Viewer,
+            },
+        ];
+    }
+
+    let mut requests = Vec::with_capacity(pages.len() + VIEWER_RADIUS * 2 + 1);
+    let mut seen: HashSet<String> = HashSet::new();
+    for (index, page) in pages.iter().enumerate() {
+        let url = page_url(page, DecodeSize::Thumb);
+        if url.is_empty() || !seen.insert(url.to_string()) {
+            continue;
+        }
+        requests.push(DecodeRequest {
+            index,
+            url: url.to_string(),
+            size: DecodeSize::Thumb,
+        });
+    }
+
+    let last = pages.len() - 1;
+    let current = current.min(last);
+    let first = current.saturating_sub(VIEWER_RADIUS);
+    let end = current.saturating_add(VIEWER_RADIUS).min(last);
+    let mut seen: HashSet<String> = HashSet::new();
+    for index in first..=end {
+        let Some(page) = pages.get(index) else {
+            continue;
+        };
+        let url = page_url(page, DecodeSize::Viewer);
+        if url.is_empty() || !seen.insert(url.to_string()) {
+            continue;
+        }
+        requests.push(DecodeRequest {
+            index,
+            url: url.to_string(),
+            size: DecodeSize::Viewer,
+        });
+    }
+    requests
+}
+
+/// Adopt one decode result into the page model.
+///
+/// The epoch_current flag is (detail_epoch == epoch) read at the moment the
+/// result landed: a decode that was in flight when the work or the page changed is
+/// dropped here, whole, rather than painted into a viewer that has moved on.
+/// Returns whether the row was touched, so a caller can tell adopt from drop.
+pub(crate) fn adopt_decode(
+    model: &VecModel<ViewerPage>,
+    request: &DecodeRequest,
+    image: Option<slint::Image>,
+    epoch_current: bool,
+) -> bool {
+    if !epoch_current {
+        return false;
+    }
+    let Some(mut page) = model.row_data(request.index) else {
+        return false;
+    };
+    match (request.size, image) {
+        (DecodeSize::Viewer, Some(image)) => {
+            page.source = image;
+            page.loaded = true;
+            page.failed = false;
+        }
+        (DecodeSize::Viewer, None) => {
+            page.loaded = false;
+            page.failed = true;
+        }
+        // A missing thumbnail keeps the placeholder: the viewer's own failure
+        // path is what reports a broken page, and saying it twice helps nobody.
+        (DecodeSize::Thumb, Some(image)) => page.thumb = image,
+        (DecodeSize::Thumb, None) => return false,
+    }
+    model.set_row_data(request.index, page);
+    true
+}
+
+/// U29: the page a step lands on, or None when it would leave the work.
+///
+/// The clamp is the rule: at the first page a -1 does nothing at all rather than
+/// wrapping to the last one, because a wrap is a page change the user did not ask
+/// for.
+pub(crate) fn stepped_page(current: i32, delta: i32, count: usize) -> Option<i32> {
+    if count == 0 {
+        return None;
+    }
+    let last = i32::try_from(count - 1).unwrap_or(i32::MAX);
+    let next = current.saturating_add(delta).clamp(0, last);
+    (next != current).then_some(next)
+}
+
+/// F4: the UI's 0 / 1 encoding of a bookmark's visibility.
+pub(crate) fn restrict_code(restrict: BookmarkRestrict) -> i32 {
+    match restrict {
+        BookmarkRestrict::Private => 1,
+        BookmarkRestrict::Public => 0,
+    }
+}
+
+/// The restriction a menu row asked for.
+pub(crate) fn restrict_from_code(code: i32) -> BookmarkRestrict {
+    if code == 1 {
+        BookmarkRestrict::Private
+    } else {
+        BookmarkRestrict::Public
+    }
+}
+
+impl App {
+    /// Decode width for one strip cell at the live display scale.
+    fn detail_thumb_target(&self) -> u32 {
+        let Some(ui) = self.ui.upgrade() else {
+            return THUMB_MAX_WIDTH;
+        };
+        let scale = ui.window().scale_factor().max(1.0);
+        crate::images::target_width_up_to(THUMB_LOGICAL_PX, scale, THUMB_MAX_WIDTH)
+    }
+
+    /// Run a plan off the UI thread and adopt each result that is still current.
+    fn spawn_detail_decodes(&self, requests: Vec<DecodeRequest>, epoch: u64, seed: Id) {
+        if requests.is_empty() {
+            return;
+        }
+        let mode = self.mode;
+        let cache = self.cache.clone();
+        let rt = self.rt.clone();
+        let thumb_target = self.detail_thumb_target();
+        rt.spawn(async move {
+            let mut stream = futures::stream::iter(requests)
+                .map(move |request| {
+                    let cache = cache.clone();
+                    async move {
+                        let raw = if mode == Mode::Demo {
+                            demo_page(seed, &request, thumb_target).await
+                        } else {
+                            match request.size {
+                                DecodeSize::Thumb => {
+                                    fetch_sized(&cache, &request.url, thumb_target).await
+                                }
+                                DecodeSize::Viewer => {
+                                    fetch_sized_viewer(&cache, &request.url).await
+                                }
+                            }
+                        };
+                        (request, raw)
+                    }
+                })
+                .buffer_unordered(DETAIL_DECODE_CONCURRENCY);
+
+            while let Some((request, raw)) = stream.next().await {
+                on_ui(move |shared| {
+                    let Ok(app) = shared.try_borrow() else {
+                        return;
+                    };
+                    let Some(model) = app.detail_models.clone() else {
+                        return;
+                    };
+                    // Read the epoch here, on the UI thread, at the instant the
+                    // result is adopted: comparing it in the task would race the
+                    // navigation it is supposed to lose to.
+                    let current = app.detail_epoch == epoch;
+                    adopt_decode(&model, &request, raw.map(|raw| raw.to_slint()), current);
+                });
+            }
+        });
+    }
+
+    /// Show page index, clamped, and plan the decodes around it.
+    pub(crate) fn show_page(&mut self, index: i32) {
+        let Some(model) = self.detail_models.clone() else {
+            return;
+        };
+        let count = model.row_count();
+        if count == 0 {
+            return;
+        }
+        let next = usize::try_from(index.max(0)).unwrap_or(0).min(count - 1);
+        let next = i32::try_from(next).unwrap_or(0);
+        let moved = {
+            let ui = self.ui();
+            let moved = ui.get_detail_page_index() != next;
+            ui.set_detail_page_index(next);
+            ui.set_detail_zoom(1.0);
+            ui.set_detail_pan_x(0.0);
+            ui.set_detail_pan_y(0.0);
+            ui.set_detail_fit_mode(true);
+            moved
+        };
+        if !moved {
+            // Re-selecting the page already on screen still resets the view, as
+            // it always has; it just has nothing new to decode.
+            return;
+        }
+        // The viewer only ever holds current +/- 1, so moving one page needs one
+        // new decode, not a second pass over the work.
+        self.request_detail_viewer(usize::try_from(next).unwrap_or(0));
+    }
+
+    /// U29: left/right on a thumbnail. Out of range does nothing.
+    pub(crate) fn page_step(&mut self, delta: i32) {
+        let current = self.ui().get_detail_page_index();
+        let count = self
+            .detail_models
+            .as_ref()
+            .map_or(0, |model| model.row_count());
+        if let Some(next) = stepped_page(current, delta, count) {
+            self.show_page(next);
+        }
+    }
+
+    /// Ask for the viewer-sized decode of the pages around the current one.
+    fn request_detail_viewer(&mut self, current: usize) {
+        let Some(model) = self.detail_models.clone() else {
+            return;
+        };
+        let largest = self
+            .detail
+            .as_ref()
+            .map(|detail| detail.urls.largest().to_string())
+            .unwrap_or_default();
+        let pages = self.detail_pages.clone();
+        let requests: Vec<DecodeRequest> = detail_plan(&pages, &largest, current)
+            .into_iter()
+            .filter(|request| request.size == DecodeSize::Viewer)
+            // A page that already holds its bitmap is not asked for again:
+            // stepping back and forth must not re-decode what is on screen.
+            .filter(|request| {
+                model
+                    .row_data(request.index)
+                    .is_some_and(|page| !page.loaded || page.failed)
+            })
+            .collect();
+        if requests.is_empty() {
+            return;
+        }
+        let seed = self.detail.as_ref().map_or(Id(0), |detail| detail.id);
+        self.spawn_detail_decodes(requests, self.detail_epoch, seed);
+    }
+
+    /// F1: fetch, decode and publish the film for the work just opened.
+    fn load_film(&mut self, id: Id, width: u32, height: u32) {
+        self.release_playback();
+        let epoch = self.detail_epoch;
+        // Tag this film's generation: a tick or a decode that lands after the
+        // page has moved on compares against it and stops.
+        self.playback.epoch = epoch;
+        let mode = self.mode;
+        let rt = self.rt.clone();
+        let client = self.client.clone();
+        let target = film_width_for(&self.ui());
+        rt.spawn(async move {
+            let result = load_film_bytes(mode, client, id, width, height, target).await;
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                if app.detail_epoch != epoch || app.playback.epoch != epoch {
+                    return;
+                }
+                match result {
+                    Ok(film) => app.publish_film(film),
+                    Err(message) => {
+                        // Every failure keeps the still and says why: a silent
+                        // film that never plays is the worst of the three.
+                        app.notify(3, message);
+                    }
+                }
+            });
+        });
+    }
+
+    /// F4: re-tag the current work's bookmark, or bookmark it, with the code the
+    /// menu sent (0 public / 1 private).
+    ///
+    /// set_bookmark(id, true, restrict) is both verbs: the API treats a bookmark
+    /// that already exists as "move it to this restriction", which is why choosing
+    /// a row in the menu is one call and never a remove-then-add.
+    pub(crate) fn pick_restrict(&mut self, code: i32) {
+        let restrict = restrict_from_code(code);
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let illust_id = detail.id;
+
+        if self.mode == Mode::Demo {
+            if let Some(item) = self.items.iter_mut().find(|item| item.id == illust_id) {
+                item.apply_bookmark(true, restrict);
+            }
+            if let Some(detail) = self.detail.as_mut().filter(|d| d.id == illust_id) {
+                detail.apply_bookmark(true, restrict);
+            }
+            {
+                let ui = self.ui();
+                ui.set_detail_bookmarked(true);
+                ui.set_bookmark_restrict(restrict_code(restrict));
+            }
+            self.notify(
+                2,
+                if restrict == BookmarkRestrict::Private {
+                    "演示模式：已设为仅自己可见（只在本机）"
+                } else {
+                    "演示模式：已设为公开收藏（只在本机）"
+                },
+            );
+            self.resync_bookmarks();
+            return;
+        }
+
+        if !self.session.is_authenticated() {
+            self.notify(2, "需要登录后才能收藏，请到设置页登录");
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let rt = self.rt.clone();
+        rt.spawn(async move {
+            let result = client.set_bookmark(illust_id, true, restrict).await;
+            on_ui(move |shared| {
+                let Ok(mut app) = shared.try_borrow_mut() else {
+                    return;
+                };
+                match result {
+                    Ok(state) => {
+                        // The verdict, not the request: a refused re-tag leaves
+                        // the menu on the restriction the server still reports.
+                        let private = restrict_code(state.restrict) == 1;
+                        app.apply_bookmark_state(illust_id, state);
+                        app.notify(
+                            1,
+                            if private {
+                                "已收藏（仅自己可见）"
+                            } else {
+                                "已收藏（公开）"
+                            },
+                        );
+                    }
+                    Err(error) => app.notify(3, format!("收藏失败：{error}")),
+                }
+            });
+        });
+    }
+}
+
+/// Decode one page of the demo catalogue at the size the plan asked for.
+async fn demo_page(seed: Id, request: &DecodeRequest, thumb_target: u32) -> Option<RawImage> {
+    let id = Id(seed.get().wrapping_add(request.index as u64));
+    let page = u64::try_from(request.index).unwrap_or(0);
+    match request.size {
+        DecodeSize::Thumb => {
+            let side = thumb_target.max(64);
+            demo_raw(id, side, side, page).await
+        }
+        DecodeSize::Viewer => demo_raw(id, 900, 1200, page).await,
+    }
+}
+
+/// Fetch and decode a film, off the UI thread, at target pixels wide.
+///
+/// The three failures the plan names arrive here as one sentence each: a 404 or an
+/// unauthorised archive is the PixivError text, a frame count that disagrees with
+/// the metadata is UgoiraError::FrameMismatch, and a damaged archive is the decode
+/// error.
+async fn load_film_bytes(
+    mode: Mode,
+    client: Option<Client>,
+    id: Id,
+    width: u32,
+    height: u32,
+    target: u32,
+) -> Result<UgoiraFilm, String> {
+    match mode {
+        Mode::Demo => {
+            let film = tokio::task::spawn_blocking(move || demo_film(id, width, height))
+                .await
+                .map_err(|error| format!("演示动图生成失败：{error}"))?;
+            film.ok_or_else(|| "演示动图生成失败：帧无法渲染，保持静帧显示".to_string())
+        }
+        Mode::Real => {
+            let Some(client) = client else {
+                return Err("没有可用的网络客户端，动图无法播放".to_string());
+            };
+            let meta = client
+                .ugoira_meta(id)
+                .await
+                .map_err(|error| format!("动图元数据不可用，保持静帧显示：{error}"))?;
+            let zip_url = meta.best_zip().to_string();
+            let (bytes, _) = client
+                .fetch_bytes(&zip_url)
+                .await
+                .map_err(|error| format!("动图压缩包下载失败，保持静帧显示：{error}"))?;
+            let frames = meta.frames;
+            let decoded = tokio::task::spawn_blocking(move || {
+                UgoiraFilm::decode_zip(&bytes, &frames).map(|film| {
+                    // scaled_to_width clones when it has nothing to do, and that
+                    // clone doubles the film's peak for a film that is already
+                    // small enough to draw.
+                    if target < film.width {
+                        film.scaled_to_width(target)
+                    } else {
+                        film
+                    }
+                })
+            })
+            .await
+            .map_err(|error| format!("动图解码任务失败，保持静帧显示：{error}"))?;
+            decoded.map_err(|error| format!("动图无法播放，保持静帧显示：{error}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixiv_types::domain::PageUrls;
+
+    fn synthetic_page(index: usize) -> PageMeta {
+        PageMeta {
+            index: u32::try_from(index).unwrap_or(0),
+            width: 1200,
+            height: 1600,
+            urls: PageUrls {
+                thumb_mini: format!("https://i.pximg.net/c/48x48/p{index}_square1200.jpg"),
+                small: format!("https://i.pximg.net/c/540x540/p{index}_master1200.jpg"),
+                regular: format!("https://i.pximg.net/img-master/p{index}_p0_master1200.jpg"),
+                original: format!("https://i.pximg.net/img-original/p{index}_p0.jpg"),
+            },
+        }
+    }
+
+    /// A cache that decodes nothing and counts what it was asked for.
+    ///
+    /// The defect O1 fixes is a number of decodes, and a real ImageCache cannot be
+    /// asserted on without a temp directory and a decoder. This fake implements
+    /// the only part of the contract the plan depends on: one request in, one
+    /// decode out, at the size named.
+    #[derive(Default)]
+    struct CountingCache {
+        calls: Vec<(String, DecodeSize)>,
+    }
+
+    impl CountingCache {
+        fn run(&mut self, plan: &[DecodeRequest]) {
+            for request in plan {
+                self.calls.push((request.url.clone(), request.size));
+            }
+        }
+
+        fn count(&self, size: DecodeSize) -> usize {
+            self.calls.iter().filter(|(_, at)| *at == size).count()
+        }
+
+        fn once_per_url(&self) -> bool {
+            let mut seen = HashSet::new();
+            self.calls
+                .iter()
+                .all(|(url, size)| seen.insert((url.clone(), *size)))
+        }
+    }
+
+    #[test]
+    fn thirty_pages_decode_three_large_images_and_thirty_thumbnails() {
+        let pages: Vec<PageMeta> = (0..30).map(synthetic_page).collect();
+        let plan = detail_plan(&pages, "https://i.pximg.net/img-original/largest.jpg", 15);
+        let mut cache = CountingCache::default();
+        cache.run(&plan);
+
+        assert_eq!(
+            cache.count(DecodeSize::Viewer),
+            3,
+            "current and both neighbours"
+        );
+        assert_eq!(
+            cache.count(DecodeSize::Thumb),
+            30,
+            "one strip cell per page"
+        );
+        assert_eq!(cache.calls.len(), 33, "nothing else is decoded");
+        assert!(cache.once_per_url(), "no URL is decoded twice");
+
+        let mut large: Vec<usize> = plan
+            .iter()
+            .filter(|request| request.size == DecodeSize::Viewer)
+            .map(|request| request.index)
+            .collect();
+        large.sort_unstable();
+        assert_eq!(large, vec![14, 15, 16]);
+    }
+
+    #[test]
+    fn the_viewer_decodes_only_what_the_edges_allow() {
+        let pages: Vec<PageMeta> = (0..30).map(synthetic_page).collect();
+        let first = detail_plan(&pages, "", 0);
+        assert_eq!(
+            first
+                .iter()
+                .filter(|r| r.size == DecodeSize::Viewer)
+                .count(),
+            2,
+            "the first page has one neighbour"
+        );
+        let last = detail_plan(&pages, "", 29);
+        assert_eq!(
+            last.iter().filter(|r| r.size == DecodeSize::Viewer).count(),
+            2,
+            "the last page has one neighbour"
+        );
+        let stale = detail_plan(&pages, "", 900);
+        assert!(
+            stale.iter().all(|request| request.index < pages.len()),
+            "every request points at a real page"
+        );
+    }
+
+    #[test]
+    fn a_single_page_and_an_empty_page_list_both_decode_once_per_size() {
+        let one = vec![synthetic_page(0)];
+        let plan = detail_plan(&one, "https://i.pximg.net/img-original/fallback.jpg", 0);
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].size, DecodeSize::Thumb);
+        assert_eq!(plan[1].size, DecodeSize::Viewer);
+
+        let empty = detail_plan(&[], "https://i.pximg.net/img-original/only.jpg", 0);
+        assert_eq!(
+            empty.len(),
+            2,
+            "the one image is both the cell and the viewer"
+        );
+        assert!(empty.iter().all(|request| request.index == 0));
+        assert!(detail_plan(&[], "", 0).is_empty(), "nothing to decode");
+    }
+
+    fn skeleton(count: usize) -> Rc<VecModel<ViewerPage>> {
+        let pages: Vec<ViewerPage> = (0..count)
+            .map(|_| ViewerPage {
+                source: slint::Image::default(),
+                thumb: slint::Image::default(),
+                width: 900,
+                height: 1200,
+                loaded: false,
+                failed: false,
+            })
+            .collect();
+        Rc::new(VecModel::from(pages))
+    }
+
+    #[test]
+    fn a_decode_from_an_older_epoch_never_paints() {
+        let model = skeleton(3);
+        let request = DecodeRequest {
+            index: 1,
+            url: "https://i.pximg.net/img-master/p1_p0_master1200.jpg".into(),
+            size: DecodeSize::Viewer,
+        };
+
+        // The work changed while this decode was in flight.
+        assert!(!adopt_decode(
+            &model,
+            &request,
+            Some(slint::Image::default()),
+            false
+        ));
+        let untouched = model.row_data(1).expect("row");
+        assert!(!untouched.loaded, "a stale decode paints nothing");
+
+        // The same result, adopted in the epoch it belongs to.
+        assert!(adopt_decode(
+            &model,
+            &request,
+            Some(slint::Image::default()),
+            true
+        ));
+        assert!(model.row_data(1).expect("row").loaded);
+        assert!(!model.row_data(0).expect("row").loaded, "only its own row");
+    }
+
+    #[test]
+    fn a_thumbnail_decode_never_marks_the_viewer_loaded() {
+        let model = skeleton(2);
+        let request = DecodeRequest {
+            index: 0,
+            url: "https://i.pximg.net/c/540x540/p0_master1200.jpg".into(),
+            size: DecodeSize::Thumb,
+        };
+        assert!(adopt_decode(
+            &model,
+            &request,
+            Some(slint::Image::default()),
+            true
+        ));
+        let row = model.row_data(0).expect("row");
+        assert!(!row.loaded, "a 48 px cell is not the viewer's source");
+        assert!(!row.failed);
+    }
+
+    #[test]
+    fn a_viewer_failure_is_reported_as_failed_even_with_a_thumbnail() {
+        let model = skeleton(1);
+        let request = DecodeRequest {
+            index: 0,
+            url: "https://i.pximg.net/img-master/p0_p0_master1200.jpg".into(),
+            size: DecodeSize::Viewer,
+        };
+        assert!(adopt_decode(&model, &request, None, true));
+        let row = model.row_data(0).expect("row");
+        assert!(row.failed);
+        assert!(!row.loaded);
+    }
+
+    /// U29: the clamp, and the rule that an out-of-range step changes nothing.
+    #[test]
+    fn a_page_step_never_leaves_the_work() {
+        let table = [
+            (0, -1, 5, None),
+            (0, 1, 5, Some(1)),
+            (2, 1, 5, Some(3)),
+            (4, 1, 5, None),
+            (4, -1, 5, Some(3)),
+            (3, 9, 5, Some(4)),
+            (1, -9, 5, Some(0)),
+            (0, 0, 5, None),
+            (0, 1, 1, None),
+            (0, 1, 0, None),
+        ];
+        for (current, delta, count, expected) in table {
+            assert_eq!(
+                stepped_page(current, delta, count),
+                expected,
+                "from {current} by {delta} of {count}"
+            );
+        }
+    }
+
+    /// F4: the glyph decides on this number, so it has to round-trip.
+    #[test]
+    fn the_restriction_code_matches_the_menu() {
+        assert_eq!(restrict_code(BookmarkRestrict::Public), 0);
+        assert_eq!(restrict_code(BookmarkRestrict::Private), 1);
+        assert_eq!(restrict_from_code(0), BookmarkRestrict::Public);
+        assert_eq!(restrict_from_code(1), BookmarkRestrict::Private);
+        // The menu can only send 0 or 1; anything else is public, never a
+        // half-drawn three-state menu.
+        assert_eq!(restrict_from_code(7), BookmarkRestrict::Public);
     }
 }
