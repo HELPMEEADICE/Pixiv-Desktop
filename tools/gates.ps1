@@ -275,8 +275,13 @@ if (-not $failed -and $Ui) {
         } | Out-Null
     }
     if (-not $failed) {
+        # -BaselineDir is passed, not inherited: G22 makes one page walk every stop, so
+        # the old default (docs/screenshots/baseline) would append forty-one focus-*.png
+        # to a *tracked* directory on every -Ui run. Round eight had already untracked
+        # thirty-four of them for the same reason. A gate must not write into the tree it
+        # is judging.
         Invoke-Gate "tools/verify-focus.ps1" {
-            pwsh -File tools/verify-focus.ps1 2>&1 | Select-Object -Last 40 | Out-Host
+            pwsh -File tools/verify-focus.ps1 -BaselineDir "target\focus\baseline" 2>&1 | Select-Object -Last 40 | Out-Host
         } | Out-Null
     }
     if (-not $failed) {

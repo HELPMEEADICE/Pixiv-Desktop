@@ -111,10 +111,18 @@ function Focus-AppWindow {
 function Get-FocusedInfo {
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction SilentlyContinue
     $f = [System.Windows.Automation.AutomationElement]::FocusedElement
-    if ($null -eq $f) { return [pscustomobject]@{ Name = ''; Type = '' } }
+    if ($null -eq $f) { return [pscustomobject]@{ Name = ''; Type = ''; X = 0; Y = 0; Width = 0; Height = 0 } }
+    # The rectangle is part of the answer, not a decoration: G21's stop identity is
+    # (Name, Type, rect), because two buttons that share a name are two places on the
+    # screen and a walk that treats them as one ends at the second of them.
+    $r = $f.Current.BoundingRectangle
     return [pscustomobject]@{
-        Name = $f.Current.Name
-        Type = ($f.Current.ControlType.ProgrammaticName -replace 'ControlType\.', '')
+        Name   = $f.Current.Name
+        Type   = ($f.Current.ControlType.ProgrammaticName -replace 'ControlType\.', '')
+        X      = [int]$r.X
+        Y      = [int]$r.Y
+        Width  = [int]$r.Width
+        Height = [int]$r.Height
     }
 }
 

@@ -27,10 +27,19 @@
 #     sensible (that is verify-a11y.ps1 territory: name, role, action), that an
 #     eleventh stop is visible, or that a ring drawn outside its element
 #     rectangle was seen at all.
-#   * measured limit, not a design choice: the first ten stops on all three pages
-#     are the command bar and the navigation rail (back, forward, search, theme,
-#     then the eight rail entries). The walk proves the ring on the chrome. It
-#     has not yet reached a card, and says so instead of implying otherwise.
+#   * measured limit, not a design choice: until round nine the first ten stops on
+#     all three pages were the command bar and the navigation rail (back, forward,
+#     search, theme, then the eight rail entries), so the walk proved the ring on the
+#     chrome and had never reached a card.
+#
+# G22 (round nine): ten stops was 8 % of a page. Every page in -FullPages (default:
+# home) is now walked until its focus ring closes - the same (Name, Type, rectangle)
+# identity rule tools/verify-a11y.ps1 walks by, from tools/walk-lib.ps1 - so the ring
+# is measured on all 51 stops home has, cards included. The other pages keep ten,
+# because a full walk costs a capture and a pixel map per stop and the ring on the
+# chrome is the same three pages deep. The run prints its own duration per page and
+# for the walk as a whole, and it FAILS if no page managed a closed walk: a sample
+# that quietly stayed a sample is the defect G22 names.
 #   * one declared exception: components.slint:424 and :436 give the search field
 #     a focused border plus a 2px accent bottom rule instead of the ring, so an
 #     Edit stop passes on Theme.accent-fill and the table prints which of the two
@@ -45,24 +54,39 @@
 #      never as PASS - a fabricated PASS would be worse than no gate.
 #
 # Baselines: each focused state is captured to
-# docs/screenshots/baseline/focus-<page>-<n>.png. Additive only: an existing
-# baseline is never overwritten, so a committed capture keeps dating the run
-# that first produced it. The capture measured is always the fresh one in
-# target/focus/current, never the baseline.
+# target/focus/baseline/focus-<page>-<n>.png, and additively - an existing baseline is
+# never overwritten, so a capture keeps dating the run that first produced it. The
+# capture measured is always the fresh one in target/focus/current, never the baseline.
+#
+# Why they are not in docs/screenshots/baseline any more: round nine gave one page a full
+# walk (G22, 51 stops on home), and the old default would have appended forty-one
+# focus-home-*.png to a *tracked* directory on every operator's next -Ui run. Round eight
+# had already untracked thirty-four of those files for the same reason - nobody read them
+# and they churned the diff. A gate must not write into the repository it is judging.
 #
 # Usage:
 #   pwsh -File tools/verify-focus.ps1                        # home, detail, settings
 #   pwsh -File tools/verify-focus.ps1 -Pages home,settings
 #   pwsh -File tools/verify-focus.ps1 -Stops 6 -Dark         # dark ring #7ac0f0
+#   pwsh -File tools/verify-focus.ps1 -FullPages home        # every stop on home
+#   pwsh -File tools/verify-focus.ps1 -FullPages @()         # the pre-G22 ten, all pages
 #   pwsh -File tools/verify-focus.ps1 -Report                # measure, never fail
 param(
     [string[]]$Pages = @("home", "detail", "settings"),
     [string]$Size = "1024x768",
     [string]$Exe = "target\debug\pixiv-desktop.exe",
     [int]$Stops = 10,
+    # G22: the pages that walk every stop instead of the first $Stops. Empty means the
+    # pre-round-nine behaviour (a ten-stop sample everywhere) and is what the selftest
+    # plants to show the assertion goes red.
+    [string[]]$FullPages = @("home"),
+    [int]$MaxStops = 200,
     [int]$Tolerance = 10,
     [int]$MinPixels = 6,
-    [string]$BaselineDir = "docs\screenshots\baseline",
+    # G22: a worktree directory, never a tracked one - see the header. tools/gates.ps1
+    # passes this explicitly as well, so a change of default here cannot move the writes
+    # back into docs/ without that line changing too.
+    [string]$BaselineDir = "target\focus\baseline",
     [string]$OutDir = "target\focus",
     [switch]$Dark,
     [switch]$Report
@@ -73,6 +97,11 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot "gui-lib.ps1")
 . (Join-Path $PSScriptRoot "drive.ps1")
 . (Join-Path $PSScriptRoot "pixel.ps1")
+# G21/G22: the stop identity and the "walk until the ring closes" engine are shared with
+# tools/verify-a11y.ps1; the verdict and the walk-limit decision are in tools/focus-lib.ps1
+# so the selftest can plant a stop with nothing drawn on it without a desktop.
+. (Join-Path $PSScriptRoot "walk-lib.ps1")
+. (Join-Path $PSScriptRoot "focus-lib.ps1")
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
 
 $Pages = @($Pages | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -168,7 +197,21 @@ function Invoke-FocusWalk {
         }
 
         $rows = @()
-        for ($i = 1; $i -le $Stops; $i++) {
+        # G22: how far this page walks is one decision, in one place
+        # (tools/focus-lib.ps1 Get-WalkLimit): every stop for a page in -FullPages, the
+        # first $Stops for the rest. The pre-round-nine behaviour is the same call with
+        # -FullPages @(), which is what the selftest plants.
+        $limit = Get-WalkLimit -Page $Page -FullPages $FullPages -Stops $Stops -MaxStops $MaxStops
+        $full = (@($FullPages) -contains $Page)
+        $keys = New-Object System.Collections.Generic.List[string]
+        $cycle = $false
+        $misses = 0
+        $end = "cap"
+        # G22 also asks the run to report its own cost: a gate that takes a minute per
+        # page has to say so where the operator reads the verdict, not in a scrollback.
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+
+        for ($i = 1; $i -le $limit; $i++) {
             Send-TabKey -Count 1
             Start-Sleep -Milliseconds 200
             $el = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -182,6 +225,26 @@ function Invoke-FocusWalk {
                 $enabled = $el.Current.IsEnabled
                 $r = $el.Current.BoundingRectangle
                 if ($r.Width -gt 0 -and $r.Height -gt 0) { $rect = $r }
+            }
+
+            # A press that focuses nothing is not a stop: no rectangle, nothing to
+            # measure, and no evidence either way. Five in a row mean the walk has left
+            # the app's focus ring, which is a truncated walk and is printed as one.
+            if (-not $name -and -not $type) {
+                $misses++
+                if ($misses -ge 5) { $end = "no-focus"; break }
+                continue
+            }
+            $misses = 0
+
+            # G22: a full walk ends when the (Name, Type, rectangle) identity repeats -
+            # the rule tools/verify-a11y.ps1 uses (G21). Identifying a stop by (Name,
+            # Type) alone ended the walk at the second control sharing a name and read as
+            # a cycle; a numbered ten made the sample the requirement.
+            $key = Get-StopKey -Name $name -Type $type -X $(if ($null -ne $rect) { [int]$rect.X } else { 0 }) -Y $(if ($null -ne $rect) { [int]$rect.Y } else { 0 }) -Width $(if ($null -ne $rect) { [int]$rect.Width } else { 0 }) -Height $(if ($null -ne $rect) { [int]$rect.Height } else { 0 })
+            if ($full) {
+                if ($keys.Contains($key)) { $cycle = $true; $end = "cycle"; break }
+                $keys.Add($key)
             }
 
             # UI-NOTES 12h: the pointer is part of the capture. A pointer resting
@@ -239,10 +302,11 @@ function Invoke-FocusWalk {
                 }
             }
 
-            $verdict = "NONE"
-            if ($ringPx -ge $MinPixels -and $alpha -eq 1.0) { $verdict = "RING" }
-            elseif ($ringPx -ge ($MinPixels * 2) -and $alpha -gt 0) { $verdict = "RING-DIM" }
-            elseif ($accentPx -ge $MinPixels -and $type -eq "Edit") { $verdict = "ACCENT" }
+            # G22: the classification is a function now (tools/focus-lib.ps1), so the
+            # "reached a stop and it drew nothing" branch can be re-run on a runner -
+            # planted stop, ring=0, accent=0, verdict NONE - instead of only by a human
+            # reading this loop and trusting it.
+            $verdict = Get-FocusVerdict -RingPixels $ringPx -Alpha $alpha -AccentPixels $accentPx -Type $type -MinPixels $MinPixels
 
             $baseline = Join-Path $BaselineDir ($stem + ".png")
             $kept = $false
@@ -269,7 +333,17 @@ function Invoke-FocusWalk {
                 Baseline = if ($kept -or (Test-Path $baseline)) { $baseline } else { "" }
             }
         }
-        return [pscustomobject]@{ Page = $Page; Skip = $null; Stops = $rows }
+        $watch.Stop()
+        return [pscustomobject]@{
+            Page     = $Page
+            Skip     = $null
+            Stops    = $rows
+            Full     = $full
+            Cycle    = $cycle
+            WalkEnd  = $end
+            Limit    = $limit
+            Seconds  = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+        }
     }
     finally {
         Stop-App
@@ -298,7 +372,11 @@ foreach ($page in $Pages) {
     }
     $sessions += $walk
     Write-Host ""
-    Write-Host ("  {0} - {1} stops" -f $walk.Page, $walk.Stops.Count)
+    # G22: the header says how far this page walked and what it cost. "full walk ...
+    # cycle" is the claim the gate now makes about at least one page; a sample is still
+    # printed as a sample, with the number it sampled.
+    $kind = if ($walk.Full) { "full walk, ended on {0}" -f $walk.WalkEnd } else { "sample of {0}" -f $walk.Limit }
+    Write-Host ("  {0} - {1} stops ({2}) in {3}s" -f $walk.Page, $walk.Stops.Count, $kind, $walk.Seconds)
     $walk.Stops | ForEach-Object {
         $colour = switch ($_.Verdict) { "RING" { "Green" } "RING-DIM" { "Green" } "ACCENT" { "Green" } default { "Red" } }
         $short = if ($_.Name.Length -gt 40) { $_.Name.Substring(0, 38) } else { $_.Name }
@@ -309,8 +387,14 @@ foreach ($page in $Pages) {
 }
 
 $allStops = @($sessions | ForEach-Object { $_.Stops } | Where-Object { $null -ne $_ })
-$missing = @($allStops | Where-Object { $_.Verdict -eq "NONE" })
+# G22: the invisible-stop list comes from the same function the selftest plants a stop
+# in, so "one invisible stop" means the same thing to the gate and to its experiment.
+$missing = @(Get-InvisibleStops -Stops $allStops)
 $ringStops = @($allStops | Where-Object { $_.Verdict -eq "RING" -or $_.Verdict -eq "RING-DIM" })
+# G22 keeps the three classes apart in the totals as well as in the rows: a dimmed ring is
+# drawn on purpose for a disabled control, and a run whose "with the ring" count is all
+# dim would be a different fact from one whose count is all full strength.
+$dimStops = @($allStops | Where-Object { $_.Verdict -eq "RING-DIM" })
 $accentStops = @($allStops | Where-Object { $_.Verdict -eq "ACCENT" })
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -322,9 +406,16 @@ $summary = [ordered]@{
     pages      = $sessions.Count
     stops      = $allStops.Count
     withRing   = $ringStops.Count
+    withRingDim = $dimStops.Count
     withAccent = $accentStops.Count
     missing    = $missing.Count
     skipped    = $skips
+    # G22: how much of each page the walk covered, and what it cost. A number that moves
+    # has to be explainable (plan section 9 rule 4), and a sample count is a number.
+    fullPages  = @($sessions | Where-Object { $_.Full } | ForEach-Object { $_.Page })
+    closedWalks = @($sessions | Where-Object { $_.Full -and $_.Cycle } | ForEach-Object { $_.Page })
+    durationSeconds = [math]::Round((($sessions | Measure-Object -Property Seconds -Sum).Sum), 1)
+    walk       = @($sessions | ForEach-Object { [ordered]@{ page = $_.Page; stops = $_.Stops.Count; full = $_.Full; end = $_.WalkEnd; seconds = $_.Seconds } })
     detail     = $allStops
 }
 ($summary | ConvertTo-Json -Depth 6) | Set-Content -Path (Join-Path $OutDir "focus-summary.json") -Encoding utf8
@@ -335,12 +426,33 @@ if ($allStops.Count -eq 0) {
     Write-Host ("SKIP: {0}" -f $reason) -ForegroundColor DarkYellow
     exit 77
 }
-Write-Host ("{0} Tab stops on {1} pages: {2} with the focus ring, {3} with the text-field accent rule, {4} invisible" -f `
-        $allStops.Count, $sessions.Count, $ringStops.Count, $accentStops.Count, $missing.Count) -ForegroundColor $(if ($missing.Count) { "Red" } else { "Green" })
+
+# G22, second half: at least one page has to have walked every stop it has. A run in
+# which every page took the ten-stop sample measured the chrome and called it the page -
+# which is exactly what the round-eight gate shipped - so that run is a FAIL, not a pass
+# with a small number printed beside it.
+$fullWalks = @($sessions | Where-Object { $_.Full })
+$closedWalks = @($fullWalks | Where-Object { $_.Cycle })
+$walkSeconds = [math]::Round((($sessions | Measure-Object -Property Seconds -Sum).Sum), 1)
+$requestedFull = if (@($FullPages).Count) { @($FullPages) -join ", " } else { "none requested" }
+
+$countLine = "{0} Tab stops on {1} pages: {2} with the focus ring ({3} of them dimmed on a disabled control), {4} with the text-field accent rule, {5} invisible" -f $allStops.Count, $sessions.Count, $ringStops.Count, $dimStops.Count, $accentStops.Count, $missing.Count
+Write-Host $countLine -ForegroundColor $(if ($missing.Count) { "Red" } else { "Green" })
+$walkList = if ($closedWalks.Count) { ($closedWalks | ForEach-Object { "{0}: {1} stops" -f $_.Page, $_.Stops.Count }) -join ", " } else { "none" }
+Write-Host ("  walk: {0} page(s) walked every stop ({1}); {2} page(s) sampled; {3:N1}s total" -f $closedWalks.Count, $walkList, ($sessions.Count - $closedWalks.Count), $walkSeconds)
 if ($skips.Count) { Write-Host ("  skipped pages: " + ($skips -join "; ")) -ForegroundColor DarkYellow }
-if ($missing.Count -eq 0) { exit 0 }
+
+$strict = @()
+if ($missing.Count -gt 0) {
+    $strict += ("{0} Tab stop(s) were reached and show no focus indication" -f $missing.Count)
+}
+if ($closedWalks.Count -eq 0) {
+    $strict += ("no page walked every stop (-FullPages {0}): the ring is still measured on a sample, so a ring outside the chrome can stay unmeasured" -f $requestedFull)
+}
+if ($strict.Count -eq 0) { exit 0 }
+$strict | ForEach-Object { Write-Host ("  FAIL " + $_) -ForegroundColor Red }
 if ($Report) {
-    Write-Host ("{0} invisible stops, not enforced (-Report)" -f $missing.Count) -ForegroundColor Yellow
+    Write-Host ("{0} failure(s), not enforced (-Report)" -f $strict.Count) -ForegroundColor Yellow
     exit 0
 }
 exit 1
