@@ -114,10 +114,31 @@ fn snippet(body: &str) -> Option<String> {
 /// Map a non-success HTTP status onto the error the UI will show.
 ///
 /// Order matters and is fixed by the API contract: `404` is "gone", `401`/`403`
-/// are "sign in", a flagged body carries Pixiv's own message, and everything
-/// else is a plain transport failure. `429` stays retryable through
-/// [`PixivError::is_retryable`] because it maps to `Http { status: 429 }`.
+/// are "sign in", `429` is "slow down", a flagged body carries Pixiv's own
+/// message, and everything else is a plain transport failure.
+///
+/// This form is for callers that have only the status and the body. The
+/// transport uses [`map_status_error_with_hint`] so that a `Retry-After` reaches
+/// both the error and the backoff loop.
 pub(crate) fn map_status_error(status: u16, body: &str) -> PixivError {
+    map_status_error_with_hint(status, body, None)
+}
+
+/// As [`map_status_error`], carrying the server's own `Retry-After` hint.
+///
+/// `429` maps to [`PixivError::RateLimited`] rather than `Http { status: 429 }`:
+/// both consumers already have a friendly line keyed on that variant
+/// (`src/app/settings.rs:16`, `crates/pixiv-download/src/worker.rs:554`), and a
+/// `429` that arrives as `Http` can never reach either of them. The wait is the
+/// server's number when it sent one and [`BACKOFF_BASE`] otherwise — the first
+/// step the exponential backoff would have taken anyway. `RateLimited` stays
+/// retryable through [`PixivError::is_retryable`], which is what the retry loop
+/// reads.
+pub(crate) fn map_status_error_with_hint(
+    status: u16,
+    body: &str,
+    retry_after: Option<Duration>,
+) -> PixivError {
     let flagged = serde_json::from_str::<Value>(body)
         .ok()
         .as_ref()
@@ -129,6 +150,7 @@ pub(crate) fn map_status_error(status: u16, body: &str) -> PixivError {
                 .unwrap_or_else(|| "资源不存在".to_string()),
         ),
         401 | 403 => PixivError::Unauthorized,
+        429 => PixivError::RateLimited(retry_after.unwrap_or(BACKOFF_BASE)),
         _ => match flagged {
             Some(message) => PixivError::Api(message),
             None => PixivError::http(status, snippet(body).unwrap_or_default()),
@@ -358,17 +380,21 @@ pub(crate) fn ranking_rows(document: RankingResponseWire) -> Vec<RankingRow> {
         .collect()
 }
 
-/// `/ajax/user/{id}/profile/all`.
-/// /ajax/user/{id}/profile/all, as separate illustration and manga counts.
+/// `/ajax/user/{id}/profile/all`, decoded once for both answers it carries.
 ///
-/// The two categories live in two dictionaries on the wire; merging them would
-/// report a combined total the profile card does not promise.
-pub(crate) fn parse_user_work_counts(raw: &str) -> Result<(usize, usize), PixivError> {
-    decode_body::<UserProfileAllWire>(raw).map(|body| (body.illusts.len(), body.manga.len()))
+/// This document is the artist's whole id map — 94 KB for a busy account — and it
+/// is the only payload behind *both* the work counts and the id list a profile
+/// page needs. Decoding it here once is what lets one fetch answer both questions;
+/// the two callers downstream used to download it twice for two halves of the same
+/// dictionary.
+pub(crate) fn parse_profile_all(raw: &str) -> Result<(usize, usize, Vec<Id>), PixivError> {
+    decode_body::<UserProfileAllWire>(raw)
+        .map(|body| (body.illusts.len(), body.manga.len(), illust_ids(&body)))
 }
 
+/// The same document, as the newest-first id list.
 pub(crate) fn parse_user_illust_ids(raw: &str) -> Result<Vec<Id>, PixivError> {
-    decode_body::<UserProfileAllWire>(raw).map(|body| illust_ids(&body))
+    parse_profile_all(raw).map(|(_, _, ids)| ids)
 }
 
 /// Union of the illustration and manga id maps, newest first.
@@ -1028,6 +1054,28 @@ mod tests {
     }
 
     #[test]
+    fn one_profile_all_text_answers_both_counting_and_listing() {
+        // The same document the profile page used to download twice. One decode
+        // must produce the counts *and* the id list, or `profile_bundle` would
+        // still need a second fetch for one of them.
+        let raw = fixture("user_profile_all.json");
+        let (illusts, manga, ids) = parse_profile_all(&raw).expect("profile parses");
+        assert_eq!(ids, parse_user_illust_ids(&raw).expect("ids"));
+        assert_eq!(illusts + manga, ids.len(), "every id is counted once");
+        assert!(illusts > 0, "the fixture has illustrations");
+        assert!(ids.windows(2).all(|pair| pair[1] < pair[0]));
+
+        // The two dictionaries stay separate: a manga-only id raises the manga
+        // count and still appears in the list.
+        let synthetic = r#"{"error":false,"message":"","body":{
+            "illusts":{"100":null,"200":null},"manga":{"300":null},
+            "novels":{"400":null},"pickup":[]}}"#;
+        let (illusts, manga, ids) = parse_profile_all(synthetic).expect("synthetic parses");
+        assert_eq!((illusts, manga), (2, 1));
+        assert_eq!(ids, vec![Id(300), Id(200), Id(100)]);
+    }
+
+    #[test]
     fn tag_search_fixture_falls_back_to_romaji() {
         let translations =
             parse_tag_translations(&fixture("search_tags.json")).expect("tags parse");
@@ -1320,10 +1368,30 @@ mod tests {
             }
             other => panic!("expected Http error, got {other:?}"),
         }
-        // 429 must remain retryable so the backoff loop can honour Retry-After.
+        // 429 is RateLimited, not Http { status: 429 }. Both consumers that own a
+        // friendly "too many requests" sentence match that variant
+        // (src/app/settings.rs:16, crates/pixiv-download/src/worker.rs:554), so
+        // while 429 arrived as Http the sentence was unreachable and the user saw
+        // a raw status code. It stays retryable, which is what the loop reads.
         let limited = map_status_error(429, "");
-        assert!(matches!(limited, PixivError::Http { status: 429, .. }));
+        assert!(matches!(limited, PixivError::RateLimited(_)));
         assert!(limited.is_retryable());
+        // Without a hint the wait is the backoff's own first step.
+        match limited {
+            PixivError::RateLimited(after) => assert_eq!(after, BACKOFF_BASE),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        // With one, the wait is the server's number, not ours.
+        match map_status_error_with_hint(429, "", Some(Duration::from_secs(9))) {
+            PixivError::RateLimited(after) => assert_eq!(after, Duration::from_secs(9)),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        // A 503 keeps its status (it is not "slow down", it is "broken") but the
+        // hint still reaches the caller.
+        assert!(matches!(
+            map_status_error_with_hint(503, "", Some(Duration::from_secs(7))),
+            PixivError::Http { status: 503, .. }
+        ));
         // Long bodies are truncated instead of being copied verbatim.
         let huge = "x".repeat(SNIPPET_LIMIT * 2);
         match map_status_error(500, &huge) {

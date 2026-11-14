@@ -93,7 +93,29 @@ pub struct ClientConfig {
     pub min_interval: Duration,
     /// Sent as `User-Agent`.
     pub user_agent: String,
+    /// Hard ceiling on one buffered response body, in bytes.
+    ///
+    /// Checked against a declared `Content-Length` before a byte of body is read
+    /// and against the running total on every chunk, because `Response::bytes()`
+    /// buffers the whole document before the caller can look at the status: a
+    /// Cloudflare interstitial or an endless `chunked` reply would otherwise be
+    /// held in memory in full. 32 MiB is roughly 60 times the largest JSON
+    /// envelope this client asks for, and small enough that a hostile answer
+    /// cannot become the process's memory problem.
+    pub max_body_bytes: u64,
+    /// Ceiling for an image or archive body.
+    ///
+    /// A separate, larger number because these are legitimately bigger documents
+    /// than a JSON envelope: an original-resolution page or an ugoira archive
+    /// runs to tens of megabytes, and refusing those would break the viewer for
+    /// the sake of a limit aimed at text.
+    pub max_image_bytes: u64,
 }
+
+/// 32 MiB: see [`ClientConfig::max_body_bytes`].
+pub const DEFAULT_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
+/// 64 MiB: see [`ClientConfig::max_image_bytes`].
+pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
 impl Default for ClientConfig {
     fn default() -> Self {
@@ -102,6 +124,8 @@ impl Default for ClientConfig {
             max_retries: 2,
             min_interval: Duration::from_millis(250),
             user_agent: DEFAULT_USER_AGENT.to_string(),
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
         }
     }
 }
@@ -132,6 +156,24 @@ struct Inner {
     session: RwLock<Session>,
     limiter: RateLimiter,
     config: ClientConfig,
+    /// A scripted stand-in for the network, armed only by this crate's tests.
+    ///
+    /// `reqwest` offers no seam a test can substitute, and "one profile is one
+    /// request per document" has to be asserted rather than asserted-in-a-comment.
+    /// When this is `Some`, every attempt answers from the table instead of
+    /// opening a socket; production leaves it `None` and the field does not exist.
+    #[cfg(test)]
+    fake: Mutex<Option<FakeWire>>,
+}
+
+/// A table of canned replies, standing in for `www.pixiv.net`.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct FakeWire {
+    /// `(url prefix, status, content type, body)`, matched in order.
+    replies: Vec<(String, u16, Option<String>, String)>,
+    /// Every URL this client asked for, in the order it asked.
+    seen: Vec<String>,
 }
 
 impl std::fmt::Debug for Client {
@@ -241,13 +283,160 @@ fn network_error(error: &reqwest::Error) -> PixivError {
     }
 }
 
-/// Read the `Retry-After` hint from a response, if any.
-fn retry_hint(response: &reqwest::Response) -> Option<Duration> {
-    response
-        .headers()
+/// Read the `Retry-After` hint a failed response carries, if any.
+///
+/// Honoured for every failed status, not only for `429`: a `503` carrying
+/// `Retry-After` means the same thing, and reading the header only for `429`
+/// made the client retry into a service that had just said when to come back.
+/// A 2xx answer has no wait to honour, so it never yields a hint.
+fn retry_hint_for(status: u16, headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    if (200..300).contains(&status) {
+        return None;
+    }
+    headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(mapping::parse_retry_after)
+}
+
+/// The arithmetic behind the response-size ceiling.
+///
+/// Split out from the socket so the decision is a unit test rather than a claim:
+/// [`BodyBudget::check_declared`] runs before the first body byte is read, and
+/// [`BodyBudget::take`] runs on every chunk, so a document that lies about its
+/// length (or sends none) still stops at the ceiling instead of after it.
+#[derive(Debug)]
+struct BodyBudget {
+    limit: u64,
+    taken: u64,
+}
+
+impl BodyBudget {
+    fn new(limit: u64) -> Self {
+        Self { limit, taken: 0 }
+    }
+
+    /// Refuse a declared `Content-Length` above the ceiling, before reading.
+    ///
+    /// Nothing has been buffered at this point, which is the whole point: the
+    /// check that used to be impossible until `bytes()` had already paid for the
+    /// document.
+    fn check_declared(&self, declared: Option<u64>) -> Result<(), PixivError> {
+        match declared {
+            Some(len) if len > self.limit => Err(self.over()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Count one chunk, failing the moment the running total crosses the ceiling.
+    ///
+    /// This is not a `Content-Length` check repeated: `gzip` decoding means the
+    /// bytes that arrive are not the bytes that were declared, so the only
+    /// trustworthy number is the count of what has actually been handed over.
+    fn take(&mut self, len: usize) -> Result<(), PixivError> {
+        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        let taken = self.taken.saturating_add(len);
+        if taken > self.limit {
+            return Err(self.over());
+        }
+        self.taken = taken;
+        Ok(())
+    }
+
+    /// The error a refused body produces.
+    ///
+    /// Not [`PixivError::Network`]: that is retryable, and re-requesting a
+    /// document that is oversized by construction just spends the user's quota to
+    /// arrive at the same answer.
+    fn over(&self) -> PixivError {
+        PixivError::Other(format!("响应体超过 {} 字节上限，已停止读取", self.limit))
+    }
+}
+
+/// The `Content-Length` a response declared, when it declared a usable one.
+fn declared_length(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+/// Buffer one response body under `limit` bytes.
+///
+/// The declaration is checked first and every chunk after it, so an oversized
+/// answer costs one header parse when it is honest about its size and one chunk
+/// when it is not.
+async fn read_body(
+    mut response: reqwest::Response,
+    limit: u64,
+    hint: Option<Duration>,
+) -> Result<Vec<u8>, Failure> {
+    let declared = declared_length(response.headers());
+    let mut budget = BodyBudget::new(limit);
+    budget
+        .check_declared(declared)
+        .map_err(|error| Failure::with_hint(error, hint))?;
+    // Reserve only what was declared and admitted: a declared length is the one
+    // trustworthy hint about allocation, and it is already bounded by `limit`.
+    let capacity = usize::try_from(declared.unwrap_or(0).min(limit)).unwrap_or(0);
+    let mut body = Vec::with_capacity(capacity);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| Failure::with_hint(network_error(&e), hint))?
+    {
+        budget
+            .take(chunk.len())
+            .map_err(|error| Failure::with_hint(error, hint))?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Turn a buffered text response into the caller's answer.
+fn finish_text(status: u16, body: String, hint: Option<Duration>) -> Result<String, Failure> {
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        Err(Failure::with_hint(
+            mapping::map_status_error_with_hint(status, &body, hint),
+            hint,
+        ))
+    }
+}
+
+/// Turn a buffered binary response into the caller's answer.
+fn finish_bytes(
+    status: u16,
+    body: Vec<u8>,
+    content_type: Option<String>,
+    hint: Option<Duration>,
+) -> Result<(Vec<u8>, Option<String>), Failure> {
+    if (200..300).contains(&status) {
+        Ok((body, content_type))
+    } else {
+        let text = String::from_utf8_lossy(&body);
+        Err(Failure::with_hint(
+            mapping::map_status_error_with_hint(status, &text, hint),
+            hint,
+        ))
+    }
+}
+
+/// Turn a buffered `POST` answer into the caller's answer.
+///
+/// The raw status is kept on the failure because a `422` is the one code that
+/// means "your CSRF token went stale" rather than "the request was wrong".
+fn finish_post(status: u16, text: String, hint: Option<Duration>) -> Result<String, Failure> {
+    if (200..300).contains(&status) {
+        Ok(text)
+    } else {
+        Err(Failure::with_hint(
+            mapping::map_status_error_with_hint(status, &text, hint),
+            hint,
+        )
+        .with_status(status))
+    }
 }
 
 impl Client {
@@ -275,6 +464,8 @@ impl Client {
                 session: RwLock::new(session),
                 limiter: RateLimiter::new(config.min_interval),
                 config,
+                #[cfg(test)]
+                fake: Mutex::new(None),
             }),
         })
     }
@@ -325,33 +516,51 @@ impl Client {
     }
 
     /// `GET /ajax/user/{id}/profile/all` — enumerate an artist's work ids.
+    ///
+    /// One document, one request: the id map is the whole answer.
     pub async fn user_illust_ids(&self, user: Id) -> Result<Vec<Id>, PixivError> {
         let raw = self.get_text(&endpoint::user_profile_all(user)).await?;
         mapping::parse_user_illust_ids(&raw)
     }
 
-    /// GET /ajax/user/{id} combined with the profile id map.
+    /// One artist, one request per document: the profile and its work ids.
     ///
-    /// The detail payload cannot count works, and the id map cannot name the
-    /// artist, so both requests are needed to build one profile. The follower
-    /// count is a third request, and only the signed-in account may read its own,
-    /// so it is attached when it is readable instead of guessed at.
+    /// A profile page needs two Pixiv documents — `/ajax/user/{id}/profile/all` for
+    /// the work counts *and* the id list, and `/ajax/user/{id}` for the name,
+    /// avatar and comment. That is two requests, and it used to be four: the
+    /// caller ran `user_profile` and `user_illust_ids` side by side, and each of
+    /// them downloaded the same 94 KB id map, so one artist cost two fetches of
+    /// one document, serialised through the global rate limiter.
     ///
-    /// The two calls run concurrently: they are independent, and doing them in
-    /// sequence doubled the time the profile card spent on a spinner.
-    pub async fn user_profile(&self, user: Id) -> Result<UserProfile, PixivError> {
+    /// Here the id map is fetched once and decoded once
+    /// ([`mapping::parse_profile_all`]), and both halves of the answer are derived
+    /// from it. The follower count is a third request and only for the signed-in
+    /// account, which is the only one Pixiv lets a session read.
+    ///
+    /// The two fetches still run concurrently: they are independent, and doing
+    /// them in sequence doubled the time the profile card spent on a spinner.
+    pub async fn profile_bundle(&self, user: Id) -> Result<(UserProfile, Vec<Id>), PixivError> {
         let profile_url = endpoint::user_profile_all(user);
         let detail_url = endpoint::user_detail(user);
         let (all, raw) = tokio::join!(self.get_text(&profile_url), self.get_text(&detail_url));
         // The two counts come from the id map, which keeps illustrations and
         // manga in separate dictionaries: a union would report one merged
         // total, which is not what the profile card promises.
-        let (illust_count, manga_count) = mapping::parse_user_work_counts(&all?)?;
+        let (illust_count, manga_count, ids) = mapping::parse_profile_all(&all?)?;
         let mut profile = mapping::parse_user_profile(&raw?, illust_count, manga_count)?;
         if self.session().user_id == Some(user) {
             profile.followers = self.user_follower_count(user).await.unwrap_or(None);
         }
-        Ok(profile)
+        Ok((profile, ids))
+    }
+
+    /// `GET /ajax/user/{id}` combined with the profile id map, discarding the ids.
+    ///
+    /// Kept because a caller that only wants the card should not have to destructure
+    /// a tuple; it is exactly [`Client::profile_bundle`] with half the answer
+    /// dropped, so it costs the same two requests and never re-fetches the map.
+    pub async fn user_profile(&self, user: Id) -> Result<UserProfile, PixivError> {
+        self.profile_bundle(user).await.map(|(profile, _)| profile)
     }
 
     /// GET /ajax/street/for_you -- the personalised home feed.
@@ -720,6 +929,12 @@ impl Client {
     }
 
     async fn attempt_text(&self, url: &str) -> Result<String, Failure> {
+        #[cfg(test)]
+        {
+            if let Some((status, _, body)) = self.scripted(url) {
+                return finish_text(status, body, None);
+            }
+        }
         self.inner.limiter.wait().await;
         let response = self
             .authorize(url, self.inner.http.get(url))
@@ -728,30 +943,22 @@ impl Client {
             .map_err(|e| Failure::new(network_error(&e)))?;
 
         let status = response.status().as_u16();
-        let hint = if status == 429 {
-            retry_hint(&response)
-        } else {
-            None
-        };
+        let hint = retry_hint_for(status, response.headers());
         // `Response::text` needs the `charset` feature, which this crate does
-        // not enable, so the body is decoded here instead.
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| Failure::with_hint(network_error(&e), hint))?;
-        let body = String::from_utf8_lossy(&bytes).into_owned();
-
-        if (200..300).contains(&status) {
-            Ok(body)
-        } else {
-            Err(Failure::with_hint(
-                mapping::map_status_error(status, &body),
-                hint,
-            ))
-        }
+        // not enable, and `Response::bytes` would buffer the whole document
+        // before anything could judge it: the body is read under the ceiling and
+        // decoded here instead.
+        let bytes = read_body(response, self.inner.config.max_body_bytes, hint).await?;
+        finish_text(status, String::from_utf8_lossy(&bytes).into_owned(), hint)
     }
 
     async fn attempt_bytes(&self, url: &str) -> Result<(Vec<u8>, Option<String>), Failure> {
+        #[cfg(test)]
+        {
+            if let Some((status, content_type, body)) = self.scripted(url) {
+                return finish_bytes(status, body.into_bytes(), content_type, None);
+            }
+        }
         self.inner.limiter.wait().await;
         let response = self
             .authorize(url, self.inner.http.get(url))
@@ -762,30 +969,16 @@ impl Client {
             .map_err(|e| Failure::new(network_error(&e)))?;
 
         let status = response.status().as_u16();
-        let hint = if status == 429 {
-            retry_hint(&response)
-        } else {
-            None
-        };
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| Failure::with_hint(network_error(&e), hint))?;
-
-        if (200..300).contains(&status) {
-            Ok((bytes.to_vec(), content_type))
-        } else {
-            let body = String::from_utf8_lossy(&bytes);
-            Err(Failure::with_hint(
-                mapping::map_status_error(status, &body),
-                hint,
-            ))
-        }
+        let hint = retry_hint_for(status, response.headers());
+        // The image path is allowed a bigger ceiling than the text path, because
+        // an original page or an ugoira archive is legitimately large.
+        let bytes = read_body(response, self.inner.config.max_image_bytes, hint).await?;
+        finish_bytes(status, bytes, content_type, hint)
     }
 
     /// One `POST` attempt, handing back the raw status and body.
@@ -801,6 +994,12 @@ impl Client {
         body: String,
         content_type: &'static str,
     ) -> Result<String, Failure> {
+        #[cfg(test)]
+        {
+            if let Some((status, _, body)) = self.scripted(url) {
+                return finish_post(status, body, None);
+            }
+        }
         self.inner.limiter.wait().await;
         let response = self
             .authorize(
@@ -816,25 +1015,9 @@ impl Client {
             .map_err(|e| Failure::new(network_error(&e)))?;
 
         let status = response.status().as_u16();
-        let hint = if status == 429 {
-            retry_hint(&response)
-        } else {
-            None
-        };
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| Failure::with_hint(network_error(&e), hint))?;
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-
-        if (200..300).contains(&status) {
-            Ok(text)
-        } else {
-            Err(
-                Failure::with_hint(mapping::map_status_error(status, &text), hint)
-                    .with_status(status),
-            )
-        }
+        let hint = retry_hint_for(status, response.headers());
+        let bytes = read_body(response, self.inner.config.max_body_bytes, hint).await?;
+        finish_post(status, String::from_utf8_lossy(&bytes).into_owned(), hint)
     }
 
     /// `GET` returning the response body, retrying retryable failures.
@@ -915,6 +1098,28 @@ impl Client {
             tokio::time::sleep(mapping::backoff_delay(attempt, failure.retry_after)).await;
             attempt += 1;
         }
+    }
+}
+
+#[cfg(test)]
+impl Client {
+    /// Answer one request from the armed table instead of the network.
+    ///
+    /// `None` means "no table", in which case the caller proceeds to `reqwest` as
+    /// it always does. A table that is armed but has no reply for `url` is a test
+    /// bug, and panicking here is the only way to keep that bug from turning into
+    /// a live request (the whole point of the fake is that the suite never opens a
+    /// socket).
+    fn scripted(&self, url: &str) -> Option<(u16, Option<String>, String)> {
+        let mut fake = self.inner.fake.lock();
+        let fake = fake.as_mut()?;
+        fake.seen.push(url.to_string());
+        let reply = fake
+            .replies
+            .iter()
+            .find(|(prefix, _, _, _)| url.starts_with(prefix.as_str()))
+            .unwrap_or_else(|| panic!("no scripted reply for {url}"));
+        Some((reply.1, reply.2.clone(), reply.3.clone()))
     }
 }
 
@@ -1124,5 +1329,186 @@ mod tests {
         );
         assert_eq!(hinted.retry_after, Some(Duration::from_secs(3)));
         assert!(hinted.error.is_retryable());
+    }
+
+    // -- one document, one request -----------------------------------------
+
+    /// `/ajax/user/{id}/profile/all`, shaped like the live document: two
+    /// illustrations and one manga, which is the pair of counts the card shows.
+    const PROFILE_ALL: &str = r#"{"error":false,"message":"","body":{
+        "illusts":{"905":null,"904":null},"manga":{"906":null},
+        "novels":[],"pickup":[]}}"#;
+    /// `/ajax/user/{id}`, reduced to the fields the card reads.
+    const USER_DETAIL: &str = r#"{"error":false,"message":"","body":{
+        "userId":"74135333","name":"artist","pixivId":"handle","image":"",
+        "imageBig":"https://i.pximg.net/a.jpg","comment":"hi","following":12,
+        "isFollowed":false,"premium":false}}"#;
+
+    /// A client whose transport answers from a table instead of a socket.
+    fn scripted_client(replies: &[(&str, u16, &str)]) -> Client {
+        let client = Client::new(
+            ClientConfig {
+                min_interval: Duration::ZERO,
+                ..ClientConfig::default()
+            },
+            Session::default(),
+        )
+        .expect("client builds");
+        *client.inner.fake.lock() = Some(FakeWire {
+            replies: replies
+                .iter()
+                .map(|(url, status, body)| ((*url).to_string(), *status, None, (*body).to_string()))
+                .collect(),
+            seen: Vec::new(),
+        });
+        client
+    }
+
+    /// Every URL the scripted client was asked for, in order.
+    fn asked(client: &Client) -> Vec<String> {
+        client
+            .inner
+            .fake
+            .lock()
+            .as_ref()
+            .expect("the fake stays armed")
+            .seen
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn one_profile_bundle_is_two_requests_and_both_answers() {
+        let user = Id(74_135_333);
+        let profile_url = endpoint::user_profile_all(user);
+        let detail_url = endpoint::user_detail(user);
+        let client = scripted_client(&[
+            (profile_url.as_str(), 200, PROFILE_ALL),
+            (detail_url.as_str(), 200, USER_DETAIL),
+        ]);
+
+        let (profile, ids) = client
+            .profile_bundle(user)
+            .await
+            .expect("the bundle is built");
+
+        // The whole point: two documents, two requests. It used to be four,
+        // because the id map was downloaded once per caller.
+        let urls = asked(&client);
+        assert_eq!(urls.len(), 2, "one request per document, got {urls:?}");
+        assert_eq!(
+            urls.iter()
+                .filter(|url| url.contains("/profile/all"))
+                .count(),
+            1
+        );
+        assert_eq!(urls.iter().filter(|url| url.contains("?full=1")).count(), 1);
+
+        // Both halves of the answer come from the single profile_all document.
+        assert_eq!(profile.illust_count, 2);
+        assert_eq!(profile.manga_count, 1);
+        assert_eq!(ids, vec![Id(906), Id(905), Id(904)]);
+        // The card itself is filled from the detail document, still once.
+        assert_eq!(profile.id, user);
+        assert_eq!(profile.name, "artist");
+        assert_eq!(profile.followees, 12);
+        assert!(
+            profile.followers.is_none(),
+            "only the signed-in account may read its own followers"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_two_old_entry_points_cost_what_they_did_and_no_more() {
+        let user = Id(74_135_333);
+        let profile_url = endpoint::user_profile_all(user);
+        let detail_url = endpoint::user_detail(user);
+
+        // `user_profile` is the bundle with half the answer dropped: same two.
+        let client = scripted_client(&[
+            (profile_url.as_str(), 200, PROFILE_ALL),
+            (detail_url.as_str(), 200, USER_DETAIL),
+        ]);
+        let profile = client.user_profile(user).await.expect("profile parses");
+        assert_eq!(asked(&client).len(), 2);
+        assert_eq!(profile.illust_count, 2);
+
+        // `user_illust_ids` needs the id map alone: one request, as before.
+        let client = scripted_client(&[(profile_url.as_str(), 200, PROFILE_ALL)]);
+        let ids = client.user_illust_ids(user).await.expect("ids parse");
+        assert_eq!(asked(&client).len(), 1);
+        assert_eq!(ids, vec![Id(906), Id(905), Id(904)]);
+    }
+
+    // -- the response ceiling ----------------------------------------------
+
+    #[test]
+    fn the_ceiling_refuses_an_oversized_declaration_before_reading() {
+        let budget = BodyBudget::new(1024 * 1024);
+        // Ten megabytes declared against a one megabyte ceiling: refused on the
+        // header, so no chunk is ever requested. That is what "before buffering"
+        // has to mean — the old code paid for the whole document first.
+        let refused = budget.check_declared(Some(10 * 1024 * 1024));
+        assert!(refused.is_err(), "an oversized declaration must be refused");
+        assert!(
+            !refused.unwrap_err().is_retryable(),
+            "asking again would arrive at the same oversized answer"
+        );
+        // The ceiling is inclusive; one byte over is not.
+        assert!(budget.check_declared(Some(1024 * 1024)).is_ok());
+        assert!(budget.check_declared(Some(1024 * 1024 + 1)).is_err());
+        // No declaration proves nothing, which is why the running check exists.
+        assert!(budget.check_declared(None).is_ok());
+    }
+
+    #[test]
+    fn the_ceiling_stops_a_body_that_grows_past_it_mid_stream() {
+        // A chunked answer that declares nothing: half a megabyte at a time under
+        // a one megabyte ceiling must stop on the third chunk, not after the whole
+        // document has been buffered.
+        let mut budget = BodyBudget::new(1024 * 1024);
+        assert!(budget.take(512 * 1024).is_ok());
+        assert!(
+            budget.take(512 * 1024).is_ok(),
+            "exactly at the ceiling is allowed"
+        );
+        assert_eq!(budget.taken, 1024 * 1024);
+        assert!(
+            budget.take(1).is_err(),
+            "the ceiling is a limit, not a suggestion"
+        );
+        // A refused chunk is not counted: the budget never claims what it refused.
+        assert_eq!(budget.taken, 1024 * 1024);
+    }
+
+    #[test]
+    fn a_retry_after_on_a_503_sets_the_wait() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        // This header used to be read only for 429, so a 503 that said "come back
+        // in seven seconds" was retried after 300 ms.
+        let hint = retry_hint_for(503, &headers);
+        assert_eq!(hint, Some(Duration::from_secs(7)));
+        assert_eq!(mapping::backoff_delay(0, hint), Duration::from_secs(7));
+        // The status is still reported as 503; only the wait moves.
+        assert!(matches!(
+            mapping::map_status_error_with_hint(503, "", hint),
+            PixivError::Http { status: 503, .. }
+        ));
+        // A 429 with the same header carries the wait inside the error, which is
+        // where the friendly sentence reads it from.
+        match mapping::map_status_error_with_hint(429, "", retry_hint_for(429, &headers)) {
+            PixivError::RateLimited(after) => assert_eq!(after, Duration::from_secs(7)),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        // Success takes no hint, and an HTTP-date is not a hint this client honours.
+        assert_eq!(retry_hint_for(200, &headers), None);
+        let mut date = HeaderMap::new();
+        date.insert(
+            RETRY_AFTER,
+            HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"),
+        );
+        assert_eq!(retry_hint_for(503, &date), None);
     }
 }
