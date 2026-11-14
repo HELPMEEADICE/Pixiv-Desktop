@@ -269,6 +269,14 @@ lives in `src/app/feed/mod.rs`, which C owns, so the Lead lands it after both re
 
 ### Phase 2 — what is left, in this order (next wave)
 
+[Added after Phase 1 landed: § 2.1's G4 and G5 were found by this round's audit and then
+left unscheduled by the first draft of this list. They are item 0, ahead of everything
+else, because G5 is the reason one finding in this plan was false. The amendment is
+recorded rather than folded in silently.]
+
+0. **G4/G5** the accessibility gate: a missing budget must fail instead of `exit 0`; a page
+   absent from the budget must fail instead of falling back to the 1/2/3 floors; and the Tab
+   walk must stop when focus cycles, not at a fixed 10 that is then pinned as the budget.
 1. **U3** focus-follow scrolling + a focus gate that walks past the chrome.
 2. **R1** detail paging: current page ±1 at viewer size, thumbnails at 48 px, epoch
    incremented on leave.

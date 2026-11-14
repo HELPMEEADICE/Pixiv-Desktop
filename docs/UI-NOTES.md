@@ -856,6 +856,144 @@ byte-identical afterwards, which is the whole output a refactor like that should
 
 ---
 
+## 14. Round seven: five gates that could not fail
+
+Rounds one to six were about what the app draws. Round seven opened with the
+measurements themselves, because round six closed on a claim that was false: § 13f's
+first item. Every finding below was confirmed by reading the path and running it.
+
+### 14a. A comparison that never happened was reported as a pass
+
+`tools/verify-visual.ps1` adds a `SKIP` row when the baseline sidecar's `scale` differs
+from the live one, and built its failure set with `Verdict -notin @("OK","BASE","SKIP")`
+(:200 before this round). So on a 100 % or 125 % host - a DPI `verify-dpi.ps1` tells the
+reader to try - all twenty comparisons were skipped and the script printed *"20 captures
+within 0.02 % of the baseline"* and exited 0.
+
+Now a run in which nothing was compared exits **77** (`gates.ps1` already reads that as
+SKIP) and says how many it skipped; a partly-skipped run exits 0 only with the skipped
+count printed. `-Update` still exits 0, because it compares nothing by design.
+
+### 14b. The comparator could not see the defect class rounds four and five were about
+
+`PixDiff.Compare` counts a pixel as equal when any neighbour within `Tolerance` matches,
+which absorbs sub-pixel antialiasing - and also means a capture displaced wholesale by one
+pixel scores `over = 0`. § 12d was a defect of exactly one pixel of clearance.
+
+A second question is now asked of every capture that already matched: a *strict* counter
+(`CompareShift`, no neighbour absorption) compares the capture against the baseline moved
+by one pixel in each of the four directions, and if a move recovers more than the gate's
+own budget in pixels the verdict is **SHIFT** and the gate fails. Measured: a one-pixel
+displacement explains **77 584** pixels; the budget at 1536×1152 is 354, so it cannot be
+confused with antialiasing noise (0-225 px per capture on this host).
+
+### 14c. The lint gate could not fail on a lint
+
+`gates.ps1` ran `cargo check` through `RUSTC_WORKSPACE_WRAPPER` with no `-D warnings` -
+`cargo check` exits 0 on a warning - and both lint branches then filtered output with
+`^(warning|error)` while `--message-format short` emits `path:line:col: warning: …`, so
+per-item lints were dropped twice over. The step now sets `RUSTFLAGS='-D warnings'`
+(restored in the same `finally` as the wrapper and the target dir) and no longer filters.
+
+Proved in both directions with a real probe: `let unused_probe = 1;` in `src/app/mod.rs`
+produced `src\app\mod.rs:201:13: error: unused variable: unused_probe`, the gate reported
+`FAIL`, exit 1; with the line removed the gate passed with the file byte-identical
+(sha256 65976320F652BB7D1A5C87FF6443C8C259E49C1E0EC41D99006C1AB64D869546).
+
+`tools/selftest-gates.ps1` is the re-runnable half: five cases over a read-only copy of one
+tracked baseline - `match` (positive control), `shift` (a one-pixel move must be SHIFT),
+`erase` (200×200 of pixels must be DIFF), `skip` (nothing compared must be exit 77), and a
+static `lint` case that reads `gates.ps1` for the declaration and the filter. Removing the
+three fixes and re-running the same file flips three of the five cases to FAIL, which is
+what makes it a guard rather than a rerun.
+
+### 14d. What those gates were hiding
+
+* **The 最新作品 strip clipped every card's title and author.** `home.slint` sized the band
+  at `150px + card-caption-height` (194px) with `clip: true`, while `IllustCard` is
+  `column-width × clamped-aspect + caption` - 196-224px of cover alone at 140px, before the
+  caption. Fixed by letting the card state its cover (`cover-height-override`, default 0px so
+  the masonry grid is untouched) and having the strip state the same 150px the skeleton
+  beside it always claimed: 150 + 44 + 10 (bar band) = 204px.
+* **Dark-mode hover erased the bookmark glyph.** The pill's hover surface was `Theme.layer`,
+  which *is* `#2b2b2b` in dark, and the unmarked glyph is the fixed `#2b2b2b`: 1.00:1. Fixed
+  by keeping the surface fixed and moving hover to the border. Measured on screen, same crop,
+  same pointer path: ink-coloured pixels of a 58×58 crop around the pill were **1950 idle →
+  3205 hover** before and **1950 idle → 1998 hover** after. That pair needed a real pointer
+  (`tools/drive.ps1` `Move-Pointer`), which is why six rounds never saw it.
+* **The marked state was the next one in the queue.** With the surface fixed, `accent-fill`
+  (#4cb0f5 in dark) measures 2.38:1 on that pill, so the marked glyph was unreadable before
+  anyone hovered it. A fixed `Theme.pill-ink-marked` (#0071c2, 5.07:1 in both themes) is now
+  what the marked state paints, and `bookmark_pill_keeps_its_glyph_visible` reads the `tint:`
+  expression - themed or literal - so both inks are checked against the surface in both
+  themes. It used to filter to literals, which is exactly how `Theme.accent-fill` escaped.
+* **Tab does reach a card, and the page does not follow it.** 45 stops on `home`: 13 chrome,
+  12 chips, first card at 27. From 27 on, every reported card rectangle is clipped to the
+  viewport's bottom edge, so focus sits on artwork that is not on screen. § 13f's first item
+  is corrected in place; the fix is round seven's next wave.
+
+### 14e. Two runtime costs that were not about the UI at all
+
+* **"Load more" rebuilt every column, every time.** `render_feed` took the previous page out
+  of `self.items` with `std::mem::take` and *then* read `self.items.len()`, so the count was
+  0 by construction, `append_columns` was dead code and every append ran `rebuild_columns`.
+  The count and the take are now one operation (`take_existing`), the choice is a pure
+  function (`plan_feed_update`) and placement is shared (`place_in_columns`), so the
+  incremental path is the one that runs. Guard: a test asserts the pre-existing column
+  models are `Rc::ptr_eq` after a second page arrives.
+* **The profile banner was decoded at the card ceiling.** `target_width` clamps to 640px,
+  which is right for a grid card and wrong for a banner drawn across the row: `1200 × 1.5`
+  became 640, stretched over ~1800 physical px. `target_width_up_to` keeps the 32px tier
+  rounding and takes the cap from the caller (2048 for the banner): the same request now
+  decodes 1824. The cover path is unchanged, which the test pins by asserting
+  `target_width(1200.0, 1.5)` is still 640.
+
+Two smaller ones landed with them: the avatar map evicts oldest-first instead of calling
+`clear()` at 256 entries (and the banner, which lives in the same map, can no longer be
+evicted by avatar pressure), and the download tick takes one queue snapshot instead of two
+deep clones per 500ms.
+
+### 14f. The re-baseline, and why it is all twenty
+
+Before the re-baseline the gate reported **20 of 20 differ**, `over = 0.0922-0.0971 %`,
+`max = 118-139`. The cause is one line: the field text moved 2px onto its control's centre
+line (§ 14d), and the search field lives in the command bar that every page carries - so a
+two-pixel shift inside one control moves a small number of pixels on all twenty captures.
+That is the argument, and it is a number, not a reassurance: identical page-specific noise
+across sixteen pages that share nothing but the bar.
+
+After `-Update` the same gate reports 20 of 20 `OK` at `over = 0.0000 %`, and the twenty
+baselines are in the commit that changed the pixels.
+
+One page's fix is *not* visible in any capture: the 最新作品 strip renders only when
+`latest-state == 0`, and forced demo mode sets it to `BAND_EMPTY` (`src/app/feed/home.rs:411`),
+so the strip has never been photographed - which is also why its clipped captions survived
+six rounds. Its proof is arithmetic (204px box against a 194px card before, 194 ≤ 204 after)
+and the skeleton beside it; § 14h keeps the capture gap on the record.
+
+### 14g. What the new guards cannot decide
+
+`selftest-gates.ps1` proves the comparator, not the application: a shift it reports is a
+displacement of a capture, and it says nothing about *what* moved. `SHIFT` asks four one-
+pixel questions; a two-pixel move is caught by the ordinary comparison instead, at a bigger
+`over`. And the two accessibility-gate holes this round found are **not** closed - see § 14h.
+
+### 14h. What is still not verified here
+
+* **The accessibility gate still passes without its budget** (`verify-a11y.ps1:197` exits 0
+  when the file is missing) and still falls back to the 1/2/3 floors for a page that is absent
+  from it, and `minTabStops` is still pinned to the same 10 steps the walk takes - the reason
+  § 13f was wrong. Scheduled as round seven's next item, not done in this one.
+* **Focus does not scroll.** Measured, unfixed (§ 14d). The focus gate still walks the ten
+  chrome stops because that is all it has ever walked.
+* **The download page has never been seen populated**, the recent-search row still breaks at a
+  hard-coded four chips, and the state block is still 8px off centre.
+* **Hover has no gate yet**, although it is now measurable: § 14d's pill pair was taken with
+  `tools/drive.ps1` by hand and would make a cheap gate.
+* A real screen reader reading the tree § 12a produced; the Linux and macOS input paths.
+
+---
+
 ## Appendix: round-one limits (kept for the record)
 
 ### Not verified in round one
