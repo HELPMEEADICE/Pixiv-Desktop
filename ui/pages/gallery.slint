@@ -17,6 +17,7 @@ import { Theme, Type } from "../theme.slint";
 import {
     IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton,
     ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard,
+    BatchBar,
 } from "../components.slint";
 
 /// The masonry columns themselves. No scroll view, no header: callers embed this
@@ -29,6 +30,11 @@ export component ArtworkGrid inherits Rectangle {
     callback open-illust(string);
     callback open-author(string);
     callback toggle-bookmark(string);
+    /// Round nine (F2): a card reported a click. The modifiers are forwarded as
+    /// they arrived — `false` for both when the platform did not deliver them, which
+    /// is why the page also carries an explicit selection-mode toggle instead of
+    /// betting the feature on Ctrl/Shift reaching `TouchArea.pointer-event`.
+    callback card-clicked(string, bool, bool);
 
     height: cols.preferred-height;
     width: cols.preferred-width;
@@ -46,9 +52,14 @@ export component ArtworkGrid inherits Rectangle {
                 item: it;
                 column-width: root.card-width;
                 show-author: root.show-author;
+                // The frozen F2 seam: `selected` is the item's, `selectable` decides
+                // whether the 22 px check is drawn at all. Both default from the item,
+                // so a producer that never sets them gets exactly today's card.
+                selected: it.selected;
                 open => { root.open-illust(it.id); }
                 open-author => { root.open-author(it.author-id); }
                 toggle-bookmark => { root.toggle-bookmark(it.id); }
+                clicked-with(ctrl, shift) => { root.card-clicked(it.id, ctrl, shift); }
             }
         }
     }
@@ -106,6 +117,37 @@ export component GalleryPage inherits Rectangle {
     in property <int> recommend-users-state: 2;
     in property <string> recommend-users-message: "";
     callback open-user(string);
+
+    // ---- round nine: multi-select (F2) ----
+    // The frozen seam. `selection-mode` is in-out because the mode is entered from
+    // two places that both own intent: the header toggle below (the plan's fallback
+    // when Ctrl/Shift never reach a pointer event) and Rust, which may enter it on a
+    // Ctrl+click. `selected-count` is Rust's, from `Selection::ids`.
+    in-out property <bool> selection-mode: false;
+    in property <int> selected-count: 0;
+    callback select-all();
+    callback clear-selection();
+    callback batch-download();
+    callback batch-bookmark();
+    /// Enter/leave the mode from the page's own toggle. The page does not assign
+    /// `selection-mode` itself: the mode is one decision for the whole window (the
+    /// same `Selection::active` Rust owns), so the page reports the gesture and the
+    /// shell writes the property the page is bound to.
+    callback toggle-selection-mode();
+    /// Leave the mode outright — the batch bar's 「完成」.
+    callback exit-selection();
+    /// The keyboard path into select-all. A callback cannot be invoked from outside
+    /// the component that declares it, so the shell's Ctrl+A calls this function,
+    /// which fires the page's own `select-all` and lets the shell forward it to Rust
+    /// like every other gesture.
+    public function request-select-all() { root.select-all(); }
+    /// A card was clicked with the keys that were (or were not) delivered.
+    callback card-clicked(string, bool, bool);
+
+    /// Roving focus cursors for the two chip rows on this page (U7). A strip is one
+    /// Tab stop: Left/Right move this index and the chip that owns it takes focus.
+    in-out property <int> tag-cursor: 0;
+    in-out property <int> recent-cursor: 0;
 
     /// How many placeholder columns to draw.
     ///
@@ -167,6 +209,19 @@ export component GalleryPage inherits Rectangle {
                     font-size: Theme.font-small;
                     vertical-alignment: center;
                 }
+
+                // The pointer-only way into selection mode, and the reason F2 does not
+                // depend on modifiers surviving `TouchArea.pointer-event`: one 32 px
+                // control that flips the mode the bar and the cards already understand.
+                // `kind` swaps so the button reads as a toggle, as WinUI's does.
+                AppButton {
+                    label: root.selection-mode ? "退出多选" : "多选";
+                    icon: root.selection-mode ? "close" : "check";
+                    kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
+                    compact: true;
+                    row-height: 32px;
+                    clicked => { root.toggle-selection-mode(); }
+                }
             }
 
             if root.subtitle != "" : Text {
@@ -220,9 +275,18 @@ export component GalleryPage inherits Rectangle {
                     spacing: Theme.space-2;
                     alignment: start;
 
-                    for t in root.tags : TagChip {
+                    // U7: one stop for the whole strip. `index`/`cursor` make exactly
+                    // one chip focusable, Left/Right walk the row, Enter/Space search it.
+                    for t[i] in root.tags : TagChip {
                         label: t;
                         active: t == root.active-tag;
+                        index: i;
+                        cursor: root.tag-cursor;
+                        gained-focus(idx) => { root.tag-cursor = idx; }
+
+                        move-cursor(d) => {
+                            root.tag-cursor = Math.max(0, Math.min(root.tags.length - 1, root.tag-cursor + d));
+                        }
                         clicked => { root.open-tag(t); }
                     }
                 }
@@ -341,6 +405,7 @@ export component GalleryPage inherits Rectangle {
             open-illust(id) => { root.open-illust(id); }
             open-author(id) => { root.open-author(id); }
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
+            card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
         }
 
         // ---------------- empty / error / locked ----------------
@@ -403,8 +468,19 @@ export component GalleryPage inherits Rectangle {
                         for r in Math.ceil(root.recent-searches.length / 4) : HorizontalLayout {
                             spacing: Theme.space-2;
                             alignment: center;
+                            // Indexed across the wrapped rows, not per line: the row is
+                            // one stop even though the chips sit on several lines (U7).
                             for c in Math.min(4, root.recent-searches.length - r * 4) : TagChip {
                                 label: root.recent-searches[r * 4 + c];
+                                index: r * 4 + c;
+                                cursor: root.recent-cursor;
+                                gained-focus(idx) => { root.recent-cursor = idx; }
+
+                                move-cursor(d) => {
+                                    root.recent-cursor = Math.max(0, Math.min(
+                                        root.recent-searches.length - 1,
+                                        root.recent-cursor + d));
+                                }
                                 clicked => { root.pick-search(root.recent-searches[r * 4 + c]); }
                             }
                         }
@@ -425,5 +501,28 @@ export component GalleryPage inherits Rectangle {
                 label: "正在加载更多…";
             }
         }
+
+        // Room for the floating batch bar, so the last row of cards can still be
+        // scrolled clear of it. Only when the bar exists: the scroll body of a page
+        // that is not in selection mode is byte for byte what it was.
+        if root.selection-mode : Rectangle {
+            height: 48px + Theme.space-3;
+        }
+    }
+
+    // ---- floating batch bar (F2) ----
+    // Anchored to the page, outside the scroll: a bar that lives in the scroll body
+    // would slide away exactly when the user is reaching for it. Inset by one page
+    // padding on each side so it reads as a control strip, not a second status bar.
+    if root.selection-mode : BatchBar {
+        x: Theme.space-3;
+        width: max(0px, root.width - Theme.space-3 * 2);
+        y: root.height - self.height - Theme.space-3;
+        count: root.selected-count;
+        select-all => { root.select-all(); }
+        clear-selection => { root.clear-selection(); }
+        batch-download => { root.batch-download(); }
+        batch-bookmark => { root.batch-bookmark(); }
+        close => { root.exit-selection(); }
     }
 }

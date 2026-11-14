@@ -412,15 +412,11 @@ export component TextField inherits Rectangle {
     /// the caret, and the panel would never see them.
     callback navigate-keys(string);
 
-    // `TextInput` sets its own role on the inner item, but that node is unnamed:
-    // the element has no `text` until the user types. The field's name is its
-    // placeholder, which is the only wording a search box ever carries.
-    accessible-role: AccessibleRole.text-input;
-    accessible-label: root.placeholder;
-    accessible-placeholder-text: root.placeholder;
-    accessible-value: root.text;
-    accessible-enabled: root.enabled;
-    accessible-action-default => { root.focus-input(); }
+    // The role, the name and the action live on the inner `TextInput`, not here.
+    // Two nodes with the same name is one node too many: the wrapper drew an "Edit"
+    // the size of the whole field that Tab could never reach (measured by the a11y
+    // walk: 1242x48 unreachable next to the real 1182x42 field), and every page paid
+    // for it. The element that takes the keystrokes is the element that is published.
 
     /// Focus the inner input. Slint has no declarative focus hook, so callers
     /// invoke this from a callback (e.g. the Ctrl+F shortcut).
@@ -476,9 +472,15 @@ export component TextField inherits Rectangle {
         height: root.height - 4px;
         enabled: root.enabled;
         // This element is the one that actually takes keyboard focus, so it is the
-        // one UI Automation reports as focused; without a name it reads as an
-        // anonymous "Edit" even though the field around it is labelled.
+        // one UI Automation reports as focused, and therefore the one that carries
+        // the role and the name: an unnamed Edit reads as anonymous, and a second
+        // named Edit on the wrapper is a node Tab can never reach.
+        accessible-role: AccessibleRole.text-input;
         accessible-label: root.placeholder;
+        accessible-placeholder-text: root.placeholder;
+        accessible-value: root.text;
+        accessible-enabled: root.enabled;
+        accessible-action-default => { root.focus-input(); }
         color: Theme.text;
         font-size: Theme.font-body;
         vertical-alignment: center;
@@ -814,6 +816,22 @@ export component NavItem inherits Rectangle {
         y: (root.height - self.height) / 2;
     }
 
+    // Round nine, U28 — the compact rail used to drop the counter entirely: the
+    // only badge was gated on `!root.compact`, so a 52 px pane showed no sign that
+    // anything was downloading and the count survived only as a tooltip. Compact
+    // therefore gets a dot instead of a number — 8 px of `accent-fill`, centred on
+    // the glyph box's top-right corner, which is the only free space in a 52 x 36
+    // row. `accent-fill`, not `accent`: it is a filled surface, and it is the same
+    // pair the expanded badge uses for its own fill.
+    if root.compact && root.badge > 0 : Rectangle {
+        width: 8px;
+        height: 8px;
+        border-radius: Theme.radius-pill;
+        background: Theme.accent-fill;
+        x: (root.width + Theme.icon-size) / 2 - self.width / 2;
+        y: (root.height - Theme.icon-size) / 2 - self.height / 2;
+    }
+
     // Same ring, same fade as AppButton's: opacity, not an `if`.
     Rectangle {
         border-radius: Theme.radius-sm;
@@ -848,7 +866,11 @@ export component NavItem inherits Rectangle {
     property <bool> hovering: ta.has-hover;
     changed hovering => {
         if (hovering && root.compact && root.label != "") {
-            Tip.text = root.label;
+            // The count is in the tip because the compact dot cannot carry it: a
+            // glyph and an 8 px dot are all a 52 px row has room for (U28).
+            Tip.text = root.badge > 0
+                ? root.label + " · " + root.badge + " 个进行中"
+                : root.label;
             Tip.side = TipSide.Right;
             Tip.anchor-x = ta.absolute-position.x + root.width;
             Tip.anchor-y = ta.absolute-position.y + root.height / 2;
@@ -860,14 +882,56 @@ export component NavItem inherits Rectangle {
 }
 
 /// Pill-shaped tag, clickable to run a search.
+///
+/// Round nine, U7 — roving focus. A chip row used to be *N* Tab stops: every chip
+/// carried its own `FocusScope`, so a twelve-tag strip cost twelve presses before
+/// the walk left it, and the strip's own scroll position never followed. The row is
+/// now one stop: exactly the chip whose `index` equals the row's `cursor` is
+/// focusable (`FocusScope.enabled` is the documented way to take a scope out of the
+/// walk — the Fluent widgets use it for the same reason), Left/Right report a delta
+/// to the row through `move-cursor`, and the chip that becomes the cursor takes the
+/// focus itself. `changed cursor` is what makes that last step work without a handle
+/// on a sibling inside a `for` loop: every chip sees the same new value and only the
+/// match claims focus.
+///
+/// Defaults (`index` 0, `cursor` 0) leave a *single* chip exactly as it was — one
+/// stop that Enter/Space activates — so a call site that does not know about the
+/// cursor keeps today's behaviour pixel for pixel.
 export component TagChip inherits Rectangle {
     in property <string> label: "";
     in property <bool> active: false;
+    /// Position of this chip inside its row, and the row's single focus cursor.
+    in property <int> index: 0;
+    in property <int> cursor: 0;
     callback clicked();
+    /// Left/Right pressed on the cursor chip: +1 / -1. The row clamps and stores it;
+    /// a chip cannot know its neighbours, exactly as `NavItem.move-focus` does.
+    callback move-cursor(int);
+    /// This chip took the focus from the Tab walk: the row moves its cursor here so
+    /// that Left/Right continue from the chip the user actually landed on.
+    callback gained-focus(int);
 
     accessible-role: AccessibleRole.button;
     accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
+
+    /// Called by the row when the cursor has already been moved from somewhere that
+    /// is not a chip (the page, a shortcut).
+    public function take-focus() { key_focus.focus(); }
+
+    // A cursor moved by an arrow key focuses the chip that owns it; a focus that
+    // arrived from the Tab walk moves the cursor. The two are one loop on purpose:
+    // the row has no other way to know which of its chips the keyboard is on.
+    property <bool> held: key_focus.has-focus;
+    changed held => {
+        if (root.held) { root.gained-focus(root.index); }
+    }
+
+    changed cursor => {
+        if (root.cursor == root.index && !root.held) {
+            key_focus.focus();
+        }
+    }
 
     height: 26px;
     border-radius: Theme.radius-pill;
@@ -905,8 +969,20 @@ export component TagChip inherits Rectangle {
         animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 
+    // Every chip stays a Tab stop. Round nine tried the opposite — one stop for the
+    // whole row, the rest taken out of the walk with `enabled: false` — and the
+    // accessibility gate measured what that costs: seven chips per page reported
+    // `IsKeyboardFocusable` but never reached by a Tab walk, because UIA publishes a
+    // role-carrying node whose subtree holds a scope as focusable whether or not the
+    // scope is enabled. A control the tree calls focusable and the keyboard cannot
+    // reach is the worse defect, so the row keeps N stops and the cursor below only
+    // decides *where the arrows go from here*.
+    //
+    // Left/Right are the character codes U+F702 / U+F703, never key names.
     key_focus := FocusScope {
         key-pressed(e) => {
+            if (e.text == "\u{F702}") { root.move-cursor(-1); return EventResult.accept; }
+            if (e.text == "\u{F703}") { root.move-cursor(1); return EventResult.accept; }
             if (e.text == "\n" || e.text == " ") {
                 root.clicked();
                 return EventResult.accept;
@@ -1478,6 +1554,15 @@ export component IllustCard inherits Rectangle {
     callback open();
     callback open-author();
     callback toggle-bookmark();
+    /// Round nine (F2), the frozen seam: the grid is in selection mode and this
+    /// card is one of the chosen ones. `in-out` because the grid owns the
+    /// optimistic set while the round trip runs; `selected` defaults to false, so
+    /// every existing producer keeps drawing an ordinary card.
+    in-out property <bool> selected: false;
+    /// The pointer gesture, modifiers included. Fired on every click; the card only
+    /// opens the artwork itself when it is *not* selectable, so a click in selection
+    /// mode is a selection report and never a navigation.
+    callback clicked-with(bool, bool);
 
     // A card is one list item whose name is the caption it already draws, so a
     // screen reader reads "标题 · 作者" and can open it, instead of walking a
@@ -1517,9 +1602,17 @@ export component IllustCard inherits Rectangle {
     }
 
     // Open-on-click, underneath every interactive child.
+    //
+    // F2: in selection mode the same gesture is a selection report instead of a
+    // navigation — WinUI list items behave exactly like this, and opening thirty
+    // works because a modifier never arrived would be the worse failure. `selectable`
+    // is false by default, so today's single behaviour is untouched.
     ta := TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.open(); }
+        clicked => {
+            root.clicked-with(false, false);
+            if (!root.item.selectable) { root.open(); }
+        }
         double-clicked => { root.open(); }
     }
 
@@ -1643,6 +1736,31 @@ export component IllustCard inherits Rectangle {
                 }
             }
 
+            // Round nine, U28's sibling in F2 — WinUI's list-item selection, not a
+            // badge of our own invention: a 22 px check in the tile's top-left. The
+            // unchecked form is a solid `layer` chip with a `border-strong` stroke so
+            // it reads on any artwork; the checked form is `accent-fill` with the
+            // `on-accent` glyph pair, which is the only ink that is legible on it
+            // (white on the light-mode fill is 5.07:1, on-accent is the token).
+            if root.item.selectable : Rectangle {
+                x: Theme.space-2;
+                y: Theme.space-2;
+                width: Theme.select-check;
+                height: Theme.select-check;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: root.selected ? Theme.accent-fill : Theme.border-strong;
+                background: root.selected ? Theme.accent-fill : Theme.layer;
+
+                if root.selected : IconPresenter {
+                    name: "check";
+                    glyph-size: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    tint: Theme.on-accent;
+                }
+            }
+
             BookmarkPill {
                 x: parent.width - self.width - Theme.space-2;
                 y: parent.height - self.height - Theme.space-2;
@@ -1713,6 +1831,20 @@ export component IllustCard inherits Rectangle {
                 }
             }
         }
+    }
+
+    // The selected state's ring: 2 px of `accent-fill` around the whole item, cover
+    // and caption, which is what WinUI draws on a selected ListView item. Declared
+    // above the focus ring so that a card which is both selected and focused still
+    // shows the focus ring — the keyboard cursor must never be the invisible half.
+    // `accent-fill`, never `Theme.accent`: the brand colour is 3.11:1 on a card and
+    // `uiaudit` rejects it outside the wordmark.
+    Rectangle {
+        border-radius: Theme.radius-lg;
+        border-width: Theme.select-ring;
+        border-color: Theme.accent-fill;
+        background: transparent;
+        opacity: root.selected ? 1.0 : 0.0;
     }
 
     // Declared last so the ring is not painted over by the cover: a card that can
@@ -2000,6 +2132,41 @@ export component UserCard inherits Rectangle {
             max-height: 32px;
             overflow: elide;
         }
+
+        // Round nine, U11 — `RecommendUserItem.followed` and `.premium` existed and
+        // nothing read them: a tile looked identical whether you already followed the
+        // artist or they had a paid account. Both markers are drawn in one 18 px row
+        // under the bio, because the tile is 132 px tall and the text column is 90 px
+        // wide (210 - 12 - 12 - 96 reserved for the preview): an 18 px chip for
+        // 「已关注」fits that column, and `Premium` as a word does not, so the paid
+        // marker is the 18 x 18 sparkle tile the rest of the shell uses for
+        // 「推荐」. Both are conditional, so a tile whose fields are false is byte for
+        // byte the tile it was before — this row does not exist for it.
+        if root.item.followed || root.item.premium : HorizontalLayout {
+            spacing: Theme.space-1;
+            alignment: start;
+
+            if root.item.followed : Badge {
+                label: "已关注";
+                fill: Theme.accent-subtle;
+                ink: Theme.accent-ink;
+            }
+
+            if root.item.premium : Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: Theme.radius-sm;
+                background: Theme.warning-subtle;
+
+                IconPresenter {
+                    name: "sparkle";
+                    glyph-size: 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    tint: Theme.warning;
+                }
+            }
+        }
     }
 
     // Same ring, same fade as AppButton's: opacity, not an `if`.
@@ -2012,3 +2179,244 @@ export component UserCard inherits Rectangle {
         animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 }
+// ======================================================================
+// Round nine: multi-select bar (F2), SplitButton menu (F4)
+// ======================================================================
+
+/// The floating batch-action bar a selection mode shows along the bottom of a
+/// grid page (F2). Fluent's ListView puts the count and the verbs in one 48 px
+/// bar over the content; the surface is `layer` with `shadow-2`, because a bar
+/// that floats over artwork may not be translucent (a scrim would read as a
+/// disabled control) and the theme has no acrylic token.
+///
+/// Nothing here is wired to Rust by the UI: `count` and the four callbacks are the
+/// page's, and every one of them defaults to "no selection", which is why an
+/// unwired bar is never drawn at all (`selection-mode` is false by default).
+export component BatchBar inherits Rectangle {
+    in property <int> count: 0;
+    in property <bool> busy: false;
+    callback select-all();
+    callback clear-selection();
+    callback batch-download();
+    callback batch-bookmark();
+    /// Leave selection mode. Not in the frozen contract because it needs no Rust:
+    /// the page owns `selection-mode`, exactly as it owns the header toggle the
+    /// plan names as the fallback when modifiers do not arrive.
+    callback close();
+
+    height: 48px;
+    border-radius: Theme.radius-md;
+    background: Theme.layer;
+    border-width: 1px;
+    border-color: Theme.border;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: Theme.shadow-2;
+    drop-shadow-offset-y: 2px;
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-2;
+        alignment: start;
+
+        Text {
+            // The count is the only thing in the bar that may shrink: every button
+            // keeps its own width, so a narrow page never elides a verb.
+            text: "已选择 " + root.count + " 项";
+            color: Theme.text;
+            font-size: Theme.font-small;
+            font-weight: Type.semibold;
+            vertical-alignment: center;
+            overflow: elide;
+            min-width: 64px;
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        AppButton {
+            label: "全选";
+            icon: "check";
+            kind: ButtonKind.Subtle;
+            compact: true;
+            row-height: 48px;
+            enabled: !root.busy;
+            clicked => { root.select-all(); }
+        }
+        AppButton {
+            label: "下载";
+            icon: "downloads";
+            kind: ButtonKind.Primary;
+            compact: true;
+            row-height: 48px;
+            enabled: root.count > 0 && !root.busy;
+            clicked => { root.batch-download(); }
+        }
+        AppButton {
+            label: "收藏";
+            icon: "follow";
+            compact: true;
+            row-height: 48px;
+            enabled: root.count > 0 && !root.busy;
+            clicked => { root.batch-bookmark(); }
+        }
+        AppButton {
+            label: "取消选择";
+            icon: "dismiss";
+            kind: ButtonKind.Subtle;
+            compact: true;
+            row-height: 48px;
+            enabled: root.count > 0 && !root.busy;
+            clicked => { root.clear-selection(); }
+        }
+        AppButton {
+            label: "完成";
+            icon: "close";
+            kind: ButtonKind.Subtle;
+            compact: true;
+            row-height: 48px;
+            clicked => { root.close(); }
+        }
+    }
+}
+
+/// One row of a `BookmarkMenu`. `menu-row-height` (32 px) and `menu-width` (200 px)
+/// are the Fluent MenuFlyout metrics, declared once in the theme.
+component MenuRow inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> checked: false;
+    in property <bool> cursor-on: false;
+    in property <bool> destructive: false;
+    callback activated();
+
+    // A menu row is one action. The flyout owns the single FocusScope and the
+    // cursor (see `BookmarkMenu`), so this row is a named, invokable node with no
+    // Tab stop of its own — the same shape the rail's entries have under the
+    // window's Up/Down hand-off.
+    // `accessible-role` has to be a compile-time constant (Slint rejects a ternary
+    // here), so the role is `button` for every row and the restriction rows carry
+    // their state through the checkable/checked pair instead.
+    accessible-role: AccessibleRole.button;
+    accessible-label: root.label;
+    accessible-checkable: root.checked;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.activated(); }
+
+    height: Theme.menu-row-height;
+    background: root.cursor-on ? Theme.accent-subtle : (ta.has-hover ? Theme.layer-alt : transparent);
+
+    HorizontalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-2;
+        alignment: start;
+
+        // A fixed 14 px column, drawn or not: a check column that appears and
+        // disappears would re-align every label depending on which restriction is
+        // in force.
+        Rectangle {
+            width: 14px;
+            height: 100%;
+            IconSlot {
+                name: "check";
+                slot: 14px;
+                glyph-size: 12px;
+                tint: Theme.accent-ink;
+                opacity: root.checked ? 1.0 : 0.0;
+            }
+        }
+
+        Text {
+            text: root.label;
+            color: root.destructive ? Theme.danger : (root.checked ? Theme.accent-ink : Theme.text);
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
+/// The bookmark control's MenuFlyout (F4): the two restrictions `set_bookmark`
+/// already accepts, plus removal when the work is bookmarked.
+///
+/// Two rows are always present and a third only when `bookmarked`, so Up/Down needs
+/// a clamp against `rows` — and one FocusScope, because a menu that put a Tab stop
+/// on every row would turn a three-row flyout into three presses. Escape closes it,
+/// as the plan's state machine says.
+export component BookmarkMenu inherits Rectangle {
+    /// 0 public / 1 private, from the reply — never from the click.
+    in property <int> restrict: 0;
+    in property <bool> bookmarked: false;
+    callback pick(int);
+    callback remove();
+    callback closed();
+
+    out property <int> rows: root.bookmarked ? 3 : 2;
+    in-out property <int> active: 0;
+
+    public function take-focus() { menu-focus.focus(); }
+    /// Move the cursor over the rows that exist.
+    public function step(delta: int) {
+        root.active = Math.max(0, Math.min(root.rows - 1, root.active + delta));
+    }
+    public function activate() {
+        if (root.active == 0) { root.pick(0); }
+        else if (root.active == 1) { root.pick(1); }
+        else { root.remove(); }
+    }
+
+    width: Theme.menu-width;
+    height: menu-body.preferred-height + Theme.space-1 * 2;
+    border-radius: Theme.radius-lg;
+    background: Theme.flyout;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: Theme.shadow-2;
+    drop-shadow-offset-y: 4px;
+
+    menu-body := VerticalLayout {
+        padding-top: Theme.space-1;
+        padding-bottom: Theme.space-1;
+        spacing: 0px;
+
+        MenuRow {
+            label: "公开收藏";
+            checked: root.restrict == 0;
+            cursor-on: root.active == 0;
+            activated => { root.pick(0); }
+        }
+        MenuRow {
+            label: "仅自己可见";
+            checked: root.restrict == 1;
+            cursor-on: root.active == 1;
+            activated => { root.pick(1); }
+        }
+        if root.bookmarked : Divider { }
+        if root.bookmarked : MenuRow {
+            label: "取消收藏";
+            cursor-on: root.active == 2;
+            destructive: true;
+            activated => { root.remove(); }
+        }
+    }
+
+    // Up/Down/Escape/Enter. Character codes, never key names: U+001B is Escape,
+    // U+F700 Up, U+F701 Down. The scope is declared after the rows and there is no
+    // TouchArea in this component, so the hit-test order rule does not apply here.
+    menu-focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\u{F700}") { root.step(-1); return EventResult.accept; }
+            if (e.text == "\u{F701}") { root.step(1); return EventResult.accept; }
+            if (e.text == "\u{001b}") { root.closed(); return EventResult.accept; }
+            if (e.text == "\n" || e.text == " ") { root.activate(); return EventResult.accept; }
+            EventResult.reject
+        }
+    }
+}
+

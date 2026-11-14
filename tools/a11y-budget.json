@@ -1,5 +1,5 @@
 {
-  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. Written by tools/verify-a11y.ps1 -Update, which ratchets: each floor is max(previous, measured), so a re-pin on a degraded build cannot lower one. invokable = elements with an InvokePattern, distinctTab = distinct stops the Tab walk reached before its (Name, Type) pair repeated.",
+  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. Written by tools/verify-a11y.ps1 -Update, which ratchets: each floor is max(previous, measured), so a re-pin on a degraded build cannot lower one. invokable = elements with an InvokePattern, distinctTab = distinct stops the Tab walk reached before its (Name, Type, rectangle) identity repeated - G21, round nine: the pair alone ended the walk at the second control sharing a name and read as a cycle. One floor was lowered once, by hand and on purpose: settings minFocusable 20 -> 19, because round nine removed the duplicate Edit node TextField used to publish (one focusable node was reported twice, and the second copy was never reachable) - a floor above what the tree can produce is unsatisfiable, which is not the same thing as a guard. The new coverage assertion is what now stops that class from coming back.",
   "default": {
     "minInvokable": 1,
     "minFocusable": 2,
@@ -46,7 +46,7 @@
     },
     "settings": {
       "minInvokable": 16,
-      "minFocusable": 20,
+      "minFocusable": 19,
       "minTabStops": 23
     }
   }

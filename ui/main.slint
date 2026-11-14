@@ -25,6 +25,7 @@
 // Re-exported rather than merely imported: `slint::include_modules!` only emits
 // bindings for what the root file *exports*, and Rust has to reach the `Theme`
 // global (`ui.global::<Theme>()`) to push the persisted theme choice into it.
+import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, ThemeMode } from "theme.slint";
 import { Tip, TipSide } from "tip.slint";
 export { Theme, Type, ThemeMode } from "theme.slint";
@@ -40,13 +41,105 @@ import { DownloadsPage, DownloadRow } from "pages/downloads.slint";
 import { SettingsPage } from "pages/settings.slint";
 import { ProfilePage } from "pages/profile.slint";
 
+/// One row of the command palette (F3). The frozen seam: the label is what the row
+/// says, `detail` is the right-hand explanation, `shortcut` the chord that does the
+/// same thing from the shell, and `kind` (0 page, 1 action, 2 recent view, 3 direct
+/// target) decides what choosing it means — the label is never parsed back.
+export struct PaletteRow {
+    label: string,
+    detail: string,
+    shortcut: string,
+    kind: int,
+}
+
+/// One row of the command palette.
+///
+/// No `FocusScope`, deliberately: the palette is a cursor list driven from its query
+/// field, exactly as the bookmark flyout is driven from its own scope. Eight rows
+/// that each held a Tab stop would be eight presses before the walk left the panel —
+/// the defect U7 is about, one control over.
+component PaletteRowView inherits Rectangle {
+    in property <PaletteRow> entry;
+    in property <bool> active: false;
+    callback chosen();
+
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: root.entry.detail == ""
+        ? root.entry.label
+        : root.entry.label + " · " + root.entry.detail;
+    accessible-action-default => { root.chosen(); }
+
+    height: Theme.palette-row-height;
+    background: root.active ? Theme.accent-subtle
+        : (ta.has-hover ? Theme.layer-alt : transparent);
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-2;
+        alignment: start;
+
+        // The kind is the row's glyph: a page, an action, a recollection, or a
+        // target the user pasted. Same vocabulary as the navigation rail, so a reader
+        // does not have to learn a second icon set for the same eight pages.
+        IconSlot {
+            name: root.entry.kind == 1 ? "sparkle"
+                : root.entry.kind == 2 ? "clock"
+                : root.entry.kind == 3 ? "open"
+                : "grid";
+            slot: Theme.icon-size;
+            tint: root.active ? Theme.accent-ink : Theme.text-secondary;
+        }
+
+        Text {
+            text: root.entry.label;
+            color: Theme.text;
+            font-size: Theme.font-small;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        if root.entry.detail != "" : Text {
+            text: root.entry.detail;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-caption;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        if root.entry.shortcut != "" : Text {
+            text: root.entry.shortcut;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-caption;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+    }
+}
+
 /// One row of the search-suggestion dropdown.
 ///
 /// Local search history is drawn with a different glyph and colour, because a
 /// local recollection must never look like a Pixiv suggestion.
 component SuggestRow inherits Rectangle {
     in property <SuggestionItem> item;
+    /// Its position in the list, so the panel can scroll it into view (U6) without
+    /// measuring: `34px` is this row's own height and the panel owns the arithmetic.
+    in property <int> index: 0;
     callback choose();
+    /// This row became the keyboard cursor. The panel turns that into a scroll
+    /// position; a row cannot reach its own scroll view.
+    callback became-active(int);
+
+    property <bool> is-active: root.item.active;
+    changed is-active => {
+        if (root.is-active) { root.became-active(root.index); }
+    }
 
     height: 34px;
     background: root.item.active ? Theme.accent-subtle
@@ -182,6 +275,55 @@ export component AppWindow inherits Window {
     in property <[SuggestionItem]> suggestions: [];
     in property <bool> suggest-visible: false;
     in property <string> suggest-note: "";
+    /// Where the suggestion list is scrolled to, in px (U6). The panel derives it
+    /// from the cursor row; it is a property so the ScrollView has one owner.
+    property <length> suggest-scroll-y: 0px;
+
+    // ---- round nine: command palette (F3) ----
+    // The frozen seam. Every default keeps today's window: the palette is closed, no
+    // row exists and the cursor is on none of them.
+    in-out property <bool> palette-open: false;
+    in property <[PaletteRow]> palette-rows: [];
+    in-out property <int> palette-active: -1;
+    /// The query text. `palette-query(string)` reports edits, so Rust needs no
+    /// second copy; this one exists because a field that cannot hold what the user
+    /// typed is not a field. In-out so a host may also clear it.
+    in-out property <string> palette-text: "";
+    callback palette-query(string);
+    callback palette-choose(int);
+    callback palette-close();
+
+    // ---- round nine: multi-select (F2), shared by the three grid pages ----
+    // One flag, one count, one set of verbs: `Selection::active` is a property of the
+    // window in Rust too, so the pages are bound to this rather than each keeping a
+    // copy that could disagree.
+    in-out property <bool> selection-mode: false;
+    in property <int> selected-count: 0;
+    callback select-all();
+    callback clear-selection();
+    callback batch-download();
+    callback batch-bookmark();
+    callback card-clicked(string, bool, bool);
+
+    // ---- round nine: detail playback and bookmark restriction (F1/F4/U29) ----
+    in property <bool> film-ready: false;
+    in property <image> film-frame;
+    in property <int> film-index: 0;
+    in property <int> film-count: 0;
+    in-out property <bool> film-playing: false;
+    callback toggle-playback();
+    callback page-step(int);
+    in property <int> bookmark-restrict: 0;
+    callback pick-restrict(int);
+
+    // ---- round nine: download queue control (F5) ----
+    in property <bool> queue-paused: false;
+    in property <int> queue-done: 0;
+    in property <int> queue-total: 0;
+    in property <string> throughput: "";
+    callback pause-task(int);
+    callback resume-task(int);
+    callback toggle-pause-all();
 
     // ---- native user profile ----
     in property <string> profile-name: "";
@@ -452,14 +594,35 @@ export component AppWindow inherits Window {
                 search-field.focus-input();
                 return EventResult.accept;
             }
+            // F3. `Ctrl+P` is the plan's chord; the palette opens as a property, so the
+            // whole panel is reachable with no host wiring at all.
+            if (e.modifiers.control && e.text == "p") {
+                root.palette-open = !root.palette-open;
+                if (!root.palette-open) { root.palette-close(); }
+                return EventResult.accept;
+            }
+            // F2's second entry point. A modifier *key* event is not a pointer event:
+            // `e.modifiers` is delivered here whether or not it survives
+            // `TouchArea.pointer-event`, which is the experiment F2 defers. Ctrl+A
+            // therefore works today, and the header toggle covers the pointer case.
+            if (e.modifiers.control && e.text == "a" && !root.palette-open) {
+                if (root.page == Destination.Home) { home-page.request-select-all(); }
+                else if (root.is-gallery-page) { gallery.request-select-all(); }
+                else if (root.page == Destination.UserProfile) { profile-page.request-select-all(); }
+                return EventResult.accept;
+            }
             if (e.modifiers.alt && e.text == "\u{F702}") { root.go-back(); return EventResult.accept; }
             if (e.modifiers.alt && e.text == "\u{F703}") { root.go-forward(); return EventResult.accept; }
             if (e.modifiers.control && e.text == "r") { root.grid-retry(); return EventResult.accept; }
             if (e.text == "\u{F70E}") { root.toggle-fullscreen(); return EventResult.accept; }
             if (e.text == "\u{001b}") {
-                // Escape closes the suggestion panel before it means anything
-                // else: that is what the key does in every search field.
-                if (root.suggest-visible) {
+                // Escape closes the palette first, then the suggestion panel, and only
+                // then means anything to the page: most modal surface wins, which is
+                // what the key does in every shell that has one.
+                if (root.palette-open) {
+                    root.palette-open = false;
+                    root.palette-close();
+                } else if (root.suggest-visible) {
                     root.suggest-dismissed();
                 } else {
                     root.shell-shortcut("escape");
@@ -571,9 +734,21 @@ export component AppWindow inherits Window {
                     // Account affordance. The avatar is the account's real
                     // image; a letter in a coloured circle is not an avatar and
                     // read as one for a whole release.
+                    //
+                    // The role, the name and the action sit on this cell and not on the
+                    // `TouchArea` below, and that is not cosmetic: the a11y walk measured
+                    // a Button named 「未登录，打开设置以登录」 that Tab never reached,
+                    // because the node UIA publishes was the pointer target while the
+                    // focusable node was the scope inside it. `AppButton` has always put
+                    // its role on the component root with the scope underneath, which is
+                    // why its buttons walk cleanly; this is the same shape.
                     Rectangle {
                         width: 28px;
                         height: 100%;
+                        accessible-role: AccessibleRole.button;
+                        accessible-label: root.authenticated
+                            ? "我的主页" : "未登录，打开设置以登录";
+                        accessible-action-default => { root.open-account(); }
 
                         Avatar {
                             width: 28px;
@@ -615,10 +790,6 @@ export component AppWindow inherits Window {
 
                         avatar-area := TouchArea {
                             mouse-cursor: pointer;
-                            accessible-role: AccessibleRole.button;
-                            accessible-label: root.authenticated
-                                ? "我的主页" : "未登录，打开设置以登录";
-                            accessible-action-default => { root.open-account(); }
                             clicked => { root.open-account(); }
                         }
                         // Published, not drawn here: `y: Theme.topbar-height + 6px`
@@ -810,6 +981,19 @@ export component AppWindow inherits Window {
                         retry => { root.grid-retry(); }
                         action => { root.grid-action(); }
                         load-more => { root.load-more(); }
+
+                        // F2, the shared selection seam. The mode is the window's (one
+                        // `Selection::active` in Rust), so it is bound rather than aliased,
+                        // and the page reports the gesture instead of writing it.
+                        selection-mode: root.selection-mode;
+                        selected-count: root.selected-count;
+                        toggle-selection-mode => { root.selection-mode = !root.selection-mode; }
+                        exit-selection => { root.selection-mode = false; }
+                        select-all => { root.select-all(); }
+                        clear-selection => { root.clear-selection(); }
+                        batch-download => { root.batch-download(); }
+                        batch-bookmark => { root.batch-bookmark(); }
+                        card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
                     }
 
                     gallery := GalleryPage {
@@ -857,9 +1041,19 @@ export component AppWindow inherits Window {
                         action => { root.grid-action(); }
                         load-more => { root.load-more(); }
                         pick-search(w) => { root.search-submitted(w); }
+
+                        selection-mode: root.selection-mode;
+                        selected-count: root.selected-count;
+                        toggle-selection-mode => { root.selection-mode = !root.selection-mode; }
+                        exit-selection => { root.selection-mode = false; }
+                        select-all => { root.select-all(); }
+                        clear-selection => { root.clear-selection(); }
+                        batch-download => { root.batch-download(); }
+                        batch-bookmark => { root.batch-bookmark(); }
+                        card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
                     }
 
-                    ProfilePage {
+                    profile-page := ProfilePage {
                         width: parent.width;
                         height: parent.height;
                         visible: root.page == Destination.UserProfile;
@@ -894,6 +1088,16 @@ export component AppWindow inherits Window {
                         toggle-bookmark(id) => { root.toggle-bookmark(id); }
                         open-external => { root.shell-shortcut("open-external"); }
                         load-more => { root.profile-load-more(); }
+
+                        selection-mode: root.selection-mode;
+                        selected-count: root.selected-count;
+                        toggle-selection-mode => { root.selection-mode = !root.selection-mode; }
+                        exit-selection => { root.selection-mode = false; }
+                        select-all => { root.select-all(); }
+                        clear-selection => { root.clear-selection(); }
+                        batch-download => { root.batch-download(); }
+                        batch-bookmark => { root.batch-bookmark(); }
+                        card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
                     }
 
                     DetailPage {
@@ -952,6 +1156,18 @@ export component AppWindow inherits Window {
                         set-fit-mode(m) => { root.detail-set-fit-mode(m); }
                         set-zoom(z) => { root.detail-set-zoom(z); }
                         toggle-fullscreen => { root.toggle-fullscreen(); }
+
+                        // F1 / F4 / U29, all `in` except playback, which the button also
+                        // flips locally so the control can draw its own state offline.
+                        film-ready: root.film-ready;
+                        film-frame: root.film-frame;
+                        film-index: root.film-index;
+                        film-count: root.film-count;
+                        film-playing <=> root.film-playing;
+                        toggle-playback => { root.toggle-playback(); }
+                        page-step(d) => { root.page-step(d); }
+                        bookmark-restrict: root.bookmark-restrict;
+                        pick-restrict(r) => { root.pick-restrict(r); }
                     }
 
                     DownloadsPage {
@@ -971,6 +1187,15 @@ export component AppWindow inherits Window {
                         choose-directory => { root.download-choose-directory(); }
                         open-folder => { root.download-open-folder(); }
                         open-task(id) => { root.download-open-task(id); }
+
+                        // F5
+                        queue-paused: root.queue-paused;
+                        queue-done: root.queue-done;
+                        queue-total: root.queue-total;
+                        throughput: root.throughput;
+                        pause-task(id) => { root.pause-task(id); }
+                        resume-task(id) => { root.resume-task(id); }
+                        toggle-pause-all => { root.toggle-pause-all(); }
                     }
 
                     SettingsPage {
@@ -1170,6 +1395,10 @@ export component AppWindow inherits Window {
         x: search-host.absolute-position.x;
         y: search-host.absolute-position.y + search-host.height - 2px;
         width: max(240px, search-host.width);
+        // U6: still the 392 px ceiling, now a *view* onto the list instead of a pair of
+        // scissors. Nine rows are 306 px, twelve are 408; before this the panel drew
+        // all of them into a 392 px box with `clip: true` and there was no way to
+        // reach the tenth — the list was cut, not scrolled.
         height: min(392px, panel-body.preferred-height + 10px);
         border-radius: Theme.radius-md;
         background: Theme.layer;
@@ -1180,14 +1409,144 @@ export component AppWindow inherits Window {
         drop-shadow-offset-y: 6px;
         clip: true;
 
-        panel-body := VerticalLayout {
-            padding-top: 5px;
-            padding-bottom: 5px;
+        panel-scroll := ScrollView {
+            width: 100%;
+            height: 100%;
+            content-y <=> root.suggest-scroll-y;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+            panel-body := VerticalLayout {
+                // The viewport width, not the content width: a body that sizes itself
+                // from `flickable.content-width` closes the loop Slint names as
+                // `content-width -> panel-body.width -> min-width -> content-width`.
+                // `PageScroll` states its own body width the same way.
+                width: max(0px, panel-scroll.visible-width);
+                padding-top: 5px;
+                padding-bottom: 5px;
+                spacing: 0px;
+
+                if root.suggestions.length == 0 : Text {
+                    height: 40px;
+                    text: root.suggest-note;
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-small;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                // U6: the cursor row scrolls itself into view. The row cannot reach the
+                // scroll view, so it reports its index and the panel owns the arithmetic:
+                // 34 px is `SuggestRow`'s own height, 5 px is the body padding above it,
+                // and 64 px of lead keeps the cursor two rows below the top edge instead of
+                // pinned to the last visible pixel. The ScrollView clamps the rest.
+                for s[i] in root.suggestions : SuggestRow {
+                    item: s;
+                    index: i;
+                    choose => { root.suggest-chosen(s.tag); }
+                    became-active(index) => {
+                        root.suggest-scroll-y = Math.max(0px, index * 34px + 5px - 64px);
+                    }
+                }
+
+                if root.suggestions.length > 0 && root.suggest-note != "" : Text {
+                    height: 20px;
+                    x: Theme.space-3;
+                    width: max(0px, parent.width - Theme.space-3 * 2);
+                    text: root.suggest-note;
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+    }
+    // ================= command palette (F3) =================
+    // Declared after the suggestion panel so it wins every overlap: a palette the user
+    // just opened outranks a dropdown about the search box behind it.
+    //
+    // No scrim and no acrylic: the plan asks for `layer` + `border-strong` + `shadow-2`,
+    // which is the idiom the shell already claims. The click-catcher below is
+    // transparent, so the page underneath stays legible — Windows Terminal, not a modal.
+    if root.palette-open : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: transparent;
+
+        palette-scrim := TouchArea {
+            clicked => {
+                root.palette-open = false;
+                root.palette-close();
+            }
+        }
+    }
+
+    if root.palette-open : Rectangle {
+        // Centred horizontally, `palette-offset-y` below the body's top edge (the body
+        // starts under the 48 px command bar), 520 px wide with a 360 px floor and a
+        // 32 px window gutter so a 720 px window still holds it.
+        x: (root.width - self.width) / 2;
+        y: Theme.topbar-height + Theme.palette-offset-y;
+        width: min(Theme.palette-width, max(Theme.palette-min-width, root.width - Theme.space-8));
+        height: min(
+            root.height - Theme.topbar-height - Theme.palette-offset-y - Theme.space-4,
+            palette-body.preferred-height);
+        border-radius: Theme.radius-lg;
+        background: Theme.layer;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: Theme.shadow-2;
+        drop-shadow-offset-y: 8px;
+        clip: true;
+
+        palette-body := VerticalLayout {
             spacing: 0px;
 
-            if root.suggestions.length == 0 : Text {
-                height: 40px;
-                text: root.suggest-note;
+            // The query row: 40 px, with the accent wash behind the field so the field
+            // itself keeps its own borderless surface inside the panel.
+            Rectangle {
+                height: Theme.palette-query-height;
+                background: Theme.layer-alt;
+
+                palette-field := TextField {
+                    height: Theme.palette-query-height;
+                    leading-icon: "search";
+                    placeholder: "打开页面、执行操作，或粘贴作品链接…";
+                    text <=> root.palette-text;
+                    edited(t) => { root.palette-query(t); }
+                    // Up/Down move the cursor instead of the caret; `TextField` hands
+                    // them over for exactly this reason.
+                    navigate-keys(k) => {
+                        if (k == "\u{F700}") {
+                            root.palette-active = Math.max(-1, root.palette-active - 1);
+                        } else {
+                            root.palette-active = Math.min(
+                                root.palette-rows.length - 1, root.palette-active + 1);
+                        }
+                    }
+                    accepted(t) => {
+                        if (root.palette-active >= 0 && root.palette-active < root.palette-rows.length) {
+                            root.palette-open = false;
+                            root.palette-choose(root.palette-active);
+                        }
+                    }
+                    cleared => { root.palette-query(""); }
+                }
+            }
+
+            Divider { }
+
+            // Rows. A cursor list, not eight Tab stops — the palette is driven from the
+            // field above it, exactly as the bookmark flyout is driven from its scope.
+            if root.palette-rows.length == 0 : Text {
+                height: Theme.palette-row-height;
+                text: "没有匹配的页面、操作或链接";
                 color: Theme.text-tertiary;
                 font-size: Theme.font-small;
                 horizontal-alignment: center;
@@ -1195,22 +1554,46 @@ export component AppWindow inherits Window {
                 overflow: elide;
             }
 
-            for s in root.suggestions : SuggestRow {
-                item: s;
-                choose => { root.suggest-chosen(s.tag); }
+            for r[i] in root.palette-rows : PaletteRowView {
+                entry: r;
+                active: i == root.palette-active;
+                chosen => {
+                    root.palette-open = false;
+                    root.palette-choose(i);
+                }
             }
 
-            if root.suggestions.length > 0 && root.suggest-note != "" : Text {
-                height: 20px;
-                x: Theme.space-3;
-                width: max(0px, parent.width - Theme.space-3 * 2);
-                text: root.suggest-note;
-                color: Theme.text-tertiary;
-                font-size: Theme.font-caption;
-                vertical-alignment: center;
-                overflow: elide;
+            // The key-hint footer: 26 px, `layer-alt`, and the only place the chords are
+            // written down. A footer that is clipped is the same as no footer, which is
+            // why the panel height above is `palette-body.preferred-height` rather than a
+            // fixed panel size.
+            Rectangle {
+                height: 26px;
+                background: Theme.layer-alt;
+
+                HorizontalLayout {
+                    padding-left: Theme.space-3;
+                    padding-right: Theme.space-3;
+                    spacing: Theme.space-3;
+                    alignment: start;
+
+                    Text {
+                        text: "↑↓ 选择 · Enter 打开 · Esc 关闭";
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+
+                    if root.palette-rows.length > 0 : Text {
+                        text: root.palette-rows.length + " 条";
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        vertical-alignment: center;
+                    }
+                }
             }
         }
-    }
     }
 }

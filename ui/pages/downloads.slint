@@ -24,7 +24,10 @@ export struct DownloadRow {
     subtitle: string,
     /// 0..100, -1 when indeterminate
     progress: int,
-    /// 0 queued, 1 running, 2 done, 3 failed, 4 cancelled, 5 skipped
+    /// 0 queued, 1 running, 2 done, 3 failed, 4 cancelled, 5 skipped,
+    /// 6 paused (round nine, F5: `TaskState::Paused`). Six is the *UI-side* number:
+    /// it is the one place this page has to agree with `src/app/downloads.rs`, and
+    /// it is stated here rather than in a magic `if` ten lines down.
     state: int,
     message: string,
     path: string,
@@ -37,9 +40,15 @@ component TaskRow inherits Rectangle {
     callback cancel();
     callback retry();
     callback reveal();
+    /// Round nine (F5): pause/resume this task. `pause` reuses `Cancel` inside the
+    /// manager so a running task gives its permit back instead of holding it until
+    /// the body arrives; the row does not know that, and only reports the intent.
+    callback pause();
+    callback resume();
 
     out property <bool> finished: root.entry.state == 2 || root.entry.state == 5;
     out property <bool> running: root.entry.state == 0 || root.entry.state == 1;
+    out property <bool> paused: root.entry.state == 6;
 
     height: 76px;
     border-radius: Theme.radius-md;
@@ -65,6 +74,7 @@ component TaskRow inherits Rectangle {
                 background: root.entry.state == 3 ? Theme.danger-subtle
                     : root.entry.state == 2 ? Theme.success-subtle
                     : root.entry.state == 4 ? Theme.layer-sunken
+                    : root.paused ? Theme.layer-sunken
                     : Theme.accent-subtle;
 
                 IconPresenter {
@@ -72,12 +82,14 @@ component TaskRow inherits Rectangle {
                         : root.entry.state == 3 ? "warning"
                         : root.entry.state == 4 ? "close"
                         : root.entry.state == 5 ? "copy"
+                        : root.paused ? "pause"
                         : "downloads";
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                     tint: root.entry.state == 3 ? Theme.danger
                         : root.entry.state == 2 ? Theme.success
                         : root.entry.state == 4 ? Theme.text-tertiary
+                        : root.paused ? Theme.text-secondary
                         : Theme.accent-ink;
                 }
             }
@@ -104,9 +116,12 @@ component TaskRow inherits Rectangle {
                 overflow: elide;
             }
 
-            if root.running : ProgressBar {
+            // The meter stays while a task is paused: U13 was "the progress bar has
+            // no frozen width", and a paused row that hid its own progress would hide
+            // the one number a resumed download continues from.
+            if root.running || root.paused : ProgressBar {
                 progress: root.entry.progress < 0 ? 0.0 : root.entry.progress * 1.0 / 100.0;
-                indeterminate: root.entry.progress < 0;
+                indeterminate: root.entry.progress < 0 && !root.paused;
                 width: 100%;
             }
             if root.entry.state == 3 && root.entry.message != "" : Text {
@@ -128,10 +143,17 @@ component TaskRow inherits Rectangle {
                     : root.entry.state == 2 ? "已完成"
                     : root.entry.state == 3 ? "失败"
                     : root.entry.state == 5 ? "已存在"
+                    : root.paused ? "已暂停"
                     : "已取消";
+                // F5: the paused chip is the one badge in this page that carries ink on
+                // `accent-fill`, so it takes the `on-accent` pair — the exact pair U23
+                // measured (`#ffffff` on dark `accent-fill` is 2.38:1, `on-accent` is
+                // 8.01:1). Every other badge here is ink on a *subtle* wash and keeps
+                // `accent-ink`.
                 fill: root.entry.state == 3 ? Theme.danger-subtle
                     : root.entry.state == 2 ? Theme.success-subtle
                     : root.entry.state == 4 ? Theme.layer-sunken
+                    : root.paused ? Theme.accent-fill
                     : Theme.accent-subtle;
                 // State 4 is the cancelled task, and its ink was text-tertiary on
                 // layer-sunken: #6e6e6e on #ececee measures 4.32:1 in light mode,
@@ -141,6 +163,7 @@ component TaskRow inherits Rectangle {
                 ink: root.entry.state == 3 ? Theme.danger
                     : root.entry.state == 2 ? Theme.success
                     : root.entry.state == 4 ? Theme.text-secondary
+                    : root.paused ? Theme.on-accent
                     : Theme.accent-ink;
             }
         }
@@ -163,12 +186,26 @@ component TaskRow inherits Rectangle {
             visible: root.entry.state == 3 || root.entry.state == 4;
             clicked => { root.retry(); }
         }
+        // F5: pause/resume sits where the state is, one control per row. A paused row
+        // offers resume, a queued or running one offers pause. `resume` returns the row
+        // to Queued; HTTP Range resume is out of scope this round, which is why the
+        // paused row keeps its own progress rather than pretending to restart at 0.
+        IconButton {
+            icon: root.paused ? "play" : "pause";
+            tip: root.paused ? "继续下载" : "暂停下载";
+            size: Theme.control-height-sm;
+            row-height: 76px;
+            visible: root.running || root.paused;
+            clicked => {
+                if (root.paused) { root.resume(); } else { root.pause(); }
+            }
+        }
         IconButton {
             icon: "dismiss";
             tip: "取消";
             size: Theme.control-height-sm;
             row-height: 76px;
-            visible: root.running;
+            visible: root.running || root.paused;
             clicked => { root.cancel(); }
         }
     }
@@ -182,6 +219,18 @@ export component DownloadsPage inherits Rectangle {
     in property <string> directory: "";
     in property <string> template-text: "";
 
+    // ---- round nine: queue control (F5) ----
+    // The frozen seam. Every one of these defaults to "an ordinary queue":
+    // `queue-paused` false, `queue-done`/`queue-total` 0 and `throughput` empty,
+    // which draws the header exactly as it was before this round.
+    in property <bool> queue-paused: false;
+    in property <int> queue-done: 0;
+    in property <int> queue-total: 0;
+    /// Pre-formatted ("1.8 MB/s"), empty while unknown. A page is not the place to
+    /// decide units: the three-second sliding window lives in `pixiv-download`,
+    /// which is also the only place that knows what a byte is.
+    in property <string> throughput: "";
+
     callback cancel(int);
     callback retry(int);
     callback clear-finished();
@@ -189,6 +238,15 @@ export component DownloadsPage inherits Rectangle {
     callback open-folder();
     callback open-task(int);
     callback retry-all();
+    callback pause-task(int);
+    callback resume-task(int);
+    callback toggle-pause-all();
+
+    /// `done` out of `total`, clamped: a total of 0 is "nothing queued", not a divide
+    /// by zero and not a full bar.
+    out property <float> queue-progress: root.queue-total > 0
+        ? Math.max(0.0, Math.min(1.0, root.queue-done * 1.0 / root.queue-total))
+        : 0.0;
 
     background: Theme.canvas;
 
@@ -220,6 +278,73 @@ export component DownloadsPage inherits Rectangle {
                     color: Theme.text-tertiary;
                     font-size: Theme.font-small;
                     vertical-alignment: center;
+                }
+            }
+
+            // ---- F5: total progress, throughput, pause-all ----
+            // One 32 px row under the heading. The bar is wrapped in a full-height cell
+            // because `ProgressBar` is 3 px and a fixed-size child of a horizontal layout
+            // is aligned to the *start* of the cross axis — the defect this file already
+            // records twice at the top and the reason every control here states a
+            // `row-height`.
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                height: Theme.control-height;
+
+                Rectangle {
+                    width: 120px;
+                    height: 100%;
+                    ProgressBar {
+                        width: 120px;
+                        y: (parent.height - self.height) / 2;
+                        progress: root.queue-progress;
+                    }
+                }
+
+                Text {
+                    text: root.queue-total > 0
+                        ? ("已完成 " + root.queue-done + " / " + root.queue-total)
+                        : "队列为空";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                }
+
+                // Empty while unknown: a throughput line that reads "0 B/s" when the
+                // window has no samples yet is a lie about a stalled queue.
+                if root.throughput != "" : Text {
+                    text: root.throughput;
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                }
+
+                // The paused chip takes the `on-accent` pair: it is the only label in
+                // this page drawn on `accent-fill`, and U23 is the record of what
+                // white-on-accent costs in dark mode.
+                if root.queue-paused : Rectangle {
+                    width: paused-badge.width;
+                    height: 100%;
+
+                    paused-badge := Badge {
+                        y: (parent.height - self.height) / 2;
+                        label: "已暂停";
+                        fill: Theme.accent-fill;
+                        ink: Theme.on-accent;
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                AppButton {
+                    label: root.queue-paused ? "全部继续" : "全部暂停";
+                    icon: root.queue-paused ? "play" : "pause";
+                    kind: root.queue-paused ? ButtonKind.Primary : ButtonKind.Secondary;
+                    compact: true;
+                    row-height: Theme.control-height;
+                    enabled: root.active-count > 0 || root.queue-paused;
+                    clicked => { root.toggle-pause-all(); }
                 }
             }
         }
@@ -315,6 +440,8 @@ export component DownloadsPage inherits Rectangle {
                 cancel => { root.cancel(row.id); }
                 retry => { root.retry(row.id); }
                 reveal => { root.open-task(row.id); }
+                pause => { root.pause-task(row.id); }
+                resume => { root.resume-task(row.id); }
             }
         }
     }

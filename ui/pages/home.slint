@@ -17,6 +17,7 @@ import { Theme, Type } from "../theme.slint";
 import {
     AppButton, ButtonKind, IconSlot, TagChip, PageScroll, StateView, StateKind, Skeleton,
     ProgressBar, LoadingRow, IllustItem, IllustCard, RecommendTagItem, RecommendUserItem, UserCard,
+    BatchBar,
 } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
 
@@ -111,6 +112,31 @@ export component HomePage inherits Rectangle {
     callback action();
     callback retry();
 
+    // ---- round nine: multi-select (F2) ----
+    // The frozen seam, identical to the gallery page's: the mode is in-out because
+    // the hero toggle and Rust both own intent, and `selected-count` is Rust's.
+    in-out property <bool> selection-mode: false;
+    in property <int> selected-count: 0;
+    callback select-all();
+    callback clear-selection();
+    callback batch-download();
+    callback batch-bookmark();
+    /// Enter/leave the mode from the page's own toggle. The page does not assign
+    /// `selection-mode` itself: the mode is one decision for the whole window (the
+    /// same `Selection::active` Rust owns), so the page reports the gesture and the
+    /// shell writes the property the page is bound to.
+    callback toggle-selection-mode();
+    /// Leave the mode outright — the batch bar's 「完成」.
+    callback exit-selection();
+    /// The keyboard path into select-all. A callback cannot be invoked from outside
+    /// the component that declares it, so the shell's Ctrl+A calls this function,
+    /// which fires the page's own `select-all` and lets the shell forward it to Rust
+    /// like every other gesture.
+    public function request-select-all() { root.select-all(); }
+    callback card-clicked(string, bool, bool);
+    /// Roving focus cursor for the recommended-tag strip (U7).
+    in-out property <int> tag-cursor: 0;
+
     /// How many placeholder columns to draw.
     ///
     /// A literal four was drawn here, and at the 720 px minimum window the pane
@@ -197,6 +223,18 @@ export component HomePage inherits Rectangle {
                     row-height: 68px;
                     clicked => { root.refresh(); }
                 }
+
+                // The pointer way into selection mode — the plan's documented fallback
+                // when Ctrl/Shift never arrive in a pointer event. Same shape and same
+                // wording as the gallery page's toggle, so the two pages cannot drift.
+                AppButton {
+                    label: root.selection-mode ? "退出多选" : "多选";
+                    icon: root.selection-mode ? "close" : "check";
+                    kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
+                    compact: true;
+                    row-height: 68px;
+                    clicked => { root.toggle-selection-mode(); }
+                }
             }
         }
 
@@ -243,9 +281,18 @@ export component HomePage inherits Rectangle {
                     HorizontalLayout {
                         spacing: Theme.space-2;
                         alignment: start;
-                        for t in root.recommend-tags : TagChip {
+                        // U7: one Tab stop for the strip; Left/Right walk it.
+                        for t[i] in root.recommend-tags : TagChip {
                             label: t.label;
                             active: t.emphasized;
+                            index: i;
+                            cursor: root.tag-cursor;
+                            gained-focus(idx) => { root.tag-cursor = idx; }
+
+                            move-cursor(d) => {
+                                root.tag-cursor = Math.max(0, Math.min(
+                                    root.recommend-tags.length - 1, root.tag-cursor + d));
+                            }
                             clicked => { root.open-tag(t.name); }
                         }
                     }
@@ -266,6 +313,7 @@ export component HomePage inherits Rectangle {
             open-illust(id) => { root.open-illust(id); }
             open-author(id) => { root.open-author(id); }
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
+            card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
         }
 
         if root.feed-state == 1 : HorizontalLayout {
@@ -453,5 +501,23 @@ export component HomePage inherits Rectangle {
                 vertical-alignment: center;
             }
         }
+
+        // Room for the floating batch bar (F2), only while it exists.
+        if root.selection-mode : Rectangle {
+            height: 48px + Theme.space-3;
+        }
+    }
+
+    // ---- floating batch bar (F2) ----
+    if root.selection-mode : BatchBar {
+        x: Theme.space-3;
+        width: max(0px, root.width - Theme.space-3 * 2);
+        y: root.height - self.height - Theme.space-3;
+        count: root.selected-count;
+        select-all => { root.select-all(); }
+        clear-selection => { root.clear-selection(); }
+        batch-download => { root.batch-download(); }
+        batch-bookmark => { root.batch-bookmark(); }
+        close => { root.exit-selection(); }
     }
 }

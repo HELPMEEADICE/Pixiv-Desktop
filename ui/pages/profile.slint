@@ -9,7 +9,7 @@
 import { Theme, Type } from "../theme.slint";
 import {
     AppButton, ButtonKind, IconButton, IconSlot, PageScroll, StateView, StateKind, Skeleton,
-    ProgressBar, LoadingRow, Avatar, IllustItem, ProfileStatItem,
+    ProgressBar, LoadingRow, Avatar, IllustItem, ProfileStatItem, BatchBar,
 } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
 
@@ -81,6 +81,28 @@ export component ProfilePage inherits Rectangle {
     callback toggle-bookmark(string);
     callback open-external();
     callback load-more();
+
+    // ---- round nine: multi-select (F2) ----
+    // The frozen seam, identical to the two grid pages'.
+    in-out property <bool> selection-mode: false;
+    in property <int> selected-count: 0;
+    callback select-all();
+    callback clear-selection();
+    callback batch-download();
+    callback batch-bookmark();
+    /// Enter/leave the mode from the page's own toggle. The page does not assign
+    /// `selection-mode` itself: the mode is one decision for the whole window (the
+    /// same `Selection::active` Rust owns), so the page reports the gesture and the
+    /// shell writes the property the page is bound to.
+    callback toggle-selection-mode();
+    /// Leave the mode outright — the batch bar's 「完成」.
+    callback exit-selection();
+    /// The keyboard path into select-all. A callback cannot be invoked from outside
+    /// the component that declares it, so the shell's Ctrl+A calls this function,
+    /// which fires the page's own `select-all` and lets the shell forward it to Rust
+    /// like every other gesture.
+    public function request-select-all() { root.select-all(); }
+    callback card-clicked(string, bool, bool);
 
     background: Theme.canvas;
 
@@ -231,6 +253,18 @@ export component ProfilePage inherits Rectangle {
                         enabled: !root.busy;
                         clicked => { root.toggle-follow(); }
                     }
+                    // The selection toggle is icon-only here and labelled on the two
+                    // grid pages: the action block is a fixed 210 px and two labelled
+                    // buttons already fill 176 px of it, so a third label would be
+                    // clipped. 32 px of square control fits, and `IconButton` names
+                    // itself from its tip, so nothing is anonymous to a screen reader.
+                    IconButton {
+                        icon: root.selection-mode ? "close" : "check";
+                        tip: root.selection-mode ? "退出多选" : "多选";
+                        active: root.selection-mode;
+                        row-height: 34px;
+                        clicked => { root.toggle-selection-mode(); }
+                    }
                     AppButton {
                         label: "刷新";
                         icon: "refresh";
@@ -306,6 +340,7 @@ export component ProfilePage inherits Rectangle {
             open-illust(id) => { root.open-illust(id); }
             open-author(id) => { root.open-author(id); }
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
+            card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
         }
 
         if root.state == 1 : HorizontalLayout {
@@ -342,5 +377,23 @@ export component ProfilePage inherits Rectangle {
                 label: "正在加载更多作品…";
             }
         }
+
+        // Room for the floating batch bar (F2), only while it exists.
+        if root.selection-mode : Rectangle {
+            height: 48px + Theme.space-3;
+        }
+    }
+
+    // ---- floating batch bar (F2) ----
+    if root.selection-mode : BatchBar {
+        x: Theme.space-3;
+        width: max(0px, root.width - Theme.space-3 * 2);
+        y: root.height - self.height - Theme.space-3;
+        count: root.selected-count;
+        select-all => { root.select-all(); }
+        clear-selection => { root.clear-selection(); }
+        batch-download => { root.batch-download(); }
+        batch-bookmark => { root.batch-bookmark(); }
+        close => { root.exit-selection(); }
     }
 }

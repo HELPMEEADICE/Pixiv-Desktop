@@ -15,7 +15,7 @@ import { Theme, Type } from "../theme.slint";
 import {
     AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind, Avatar,
     Skeleton, HoverTip, InfoBar, InfoKind, PageScroll, ProgressBar, LoadingRow, SectionHeader,
-    IconPresenter, IconSlot,
+    IconPresenter, IconSlot, BookmarkMenu,
 } from "../components.slint";
 
 /// One viewable page. `thumb` is the thumbnail-strip image; `source` is either
@@ -38,6 +38,11 @@ export component ZoomViewer inherits Rectangle {
     in-out property <length> pan-x: 0px;
     in-out property <length> pan-y: 0px;
     in property <bool> show-controls: true;
+    /// Round nine (F1): the frame a playing ugoira is on. Slint images carry their
+    /// own size, so an unset frame is `width == 0` and the viewer falls back to the
+    /// still — which is why playback needs no second component and no second layout
+    /// path, and why a paused or unwired film paints today's pixels.
+    in property <image> frame;
 
     /// Cursor position (px), wheel delta (px), and the viewer's own viewport.
     callback request-zoom(float, float, float, float, float);
@@ -70,7 +75,7 @@ export component ZoomViewer inherits Rectangle {
     property <float> last-y: 0.0;
 
     img := Image {
-        source: root.page.source;
+        source: root.frame.width > 0 ? root.frame : root.page.source;
         x: (root.width - self.width) / 2 + root.pan-x;
         y: (root.height - self.height) / 2 + root.pan-y;
         width: max(1px, root.page.width * root.scale * 1px);
@@ -247,6 +252,300 @@ export component ZoomViewer inherits Rectangle {
     }
 }
 
+/// The metadata column itself: title, author, actions, statistics, description and
+/// tags. Split out of `InfoPanel` for one reason — U5. The panel is used two ways:
+/// filling a 589 px column that scrolls its own metadata (the wide layout), and
+/// standing at its natural height inside the page's scroll (the narrow one). A
+/// percent and a length cannot be chosen between in one binding, and a `min-height`
+/// read back from the panel's own ScrollView is a binding loop (measured: Slint
+/// names the cycle flickable.content-height -> body.height -> page.body-height ->
+/// min-height). Two containers over one body is the version that compiles and has
+/// one copy of the content.
+component InfoBody inherits VerticalLayout {
+    in property <string> title: "";
+    in property <string> author: "";
+    in property <string> author-id: "";
+    in property <image> avatar;
+    /// 0 ok, 1 loading, 2 failed or absent
+    in property <int> avatar-state: 1;
+    in property <string> description: "";
+    in property <[string]> tags: [];
+    in property <string> posted: "";
+    in property <int> kind: 0;
+    in property <int> page-count: 1;
+    in property <int> views: 0;
+    in property <int> bookmarks: 0;
+    in property <int> likes: 0;
+    in property <bool> bookmarked: false;
+    in property <bool> authenticated: false;
+    in property <bool> following: false;
+    in property <bool> busy: false;
+    in property <string> ugoira-hint: "";
+    in property <int> bookmark-restrict: 0;
+    /// Roving focus cursor for the tag chips (U7).
+    in-out property <int> tag-cursor: 0;
+
+    callback toggle-bookmark();
+    callback open-author();
+    callback open-tag(string);
+    callback download-page();
+    callback download-all();
+    callback export-ugoira();
+    callback open-external();
+    callback follow();
+    callback restrict-menu-at(length, length);
+
+    spacing: Theme.space-3;
+
+
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Theme.font-title;
+        font-weight: Type.semibold;
+        wrap: word-wrap;
+    }
+
+    // ---- author ----
+    Rectangle {
+        height: 44px;
+        border-radius: Theme.radius-md;
+        background: ta-author.has-hover ? Theme.layer-alt : transparent;
+
+        HorizontalLayout {
+            padding-left: Theme.space-1;
+            padding-right: Theme.space-1;
+            spacing: Theme.space-2;
+            alignment: start;
+
+            // The real face. A 32px blue disc with the character 画 was the last
+            // thing in the app that looked like an avatar without being one; the
+            // cards, the profile header and the top bar all switched to the real
+            // image and this panel was left behind.
+            //
+            // Full-height cell, centred explicitly: a fixed-size child of a
+            // horizontal layout is aligned to the start of the cross axis, which
+            // is what put the old tile 6px high in a 44px row.
+            Rectangle {
+                width: 32px;
+                height: 100%;
+                Avatar {
+                    size: 32px;
+                    y: (parent.height - self.height) / 2;
+                    source: root.avatar;
+                    state: root.avatar-state;
+                    fallback: root.author;
+                }
+            }
+
+            // The author link must not cover the follow button. It used to be
+            // a sibling declared *after* this layout, which in Slint puts it on
+            // top of the whole row: every click on 「关注」 was swallowed by the
+            // author touch area and the follow button never fired. Scoping the
+            // touch area to the name column keeps the whole row clickable for
+            // "open author" while giving the button its own hit region.
+            ta-author := TouchArea {
+                mouse-cursor: pointer;
+                horizontal-stretch: 1;
+                clicked => { root.open-author(); }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 0px;
+                    Text {
+                        text: root.author;
+                        color: Theme.text;
+                        font-size: Theme.font-body;
+                        font-weight: Type.medium;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "ID " + root.author-id;
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-caption;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            AppButton {
+                label: root.following ? "已关注" : "关注";
+                icon: "artist";
+                compact: true;
+                // compact is 26 px; without the row height the button is placed
+                // 9 px above the centre line of the 44 px author row.
+                row-height: 44px;
+                kind: root.following ? ButtonKind.Primary : ButtonKind.Secondary;
+                enabled: root.authenticated && !root.busy;
+                clicked => { root.follow(); }
+            }
+        }
+    }
+
+    // ---- primary actions ----
+    //
+    // F4: the bookmark is a Fluent SplitButton — the action, then a 24 px
+    // chevron column (`Theme.split-chevron`) that opens the restriction menu.
+    // Two interactive children, so two Tab stops, which is what a SplitButton
+    // is: the main half and the menu half are different verbs. Both halves are
+    // shared primitives (`AppButton`, `IconButton`), so hover, press, focus ring,
+    // role and keyboard all come from the components rather than from here.
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        alignment: start;
+
+        Rectangle {
+            // Wraps the pair so the 32 px row and the 26 px `保存本页` button
+            // beside it share one cross-axis rule: a fixed-size child of a
+            // horizontal layout is aligned to the start of the cross axis.
+            width: split.preferred-width;
+            height: 32px;
+
+            split := HorizontalLayout {
+                spacing: 0px;
+                alignment: start;
+
+                AppButton {
+                    label: root.bookmarked
+                        ? (root.bookmark-restrict == 1 ? "私密收藏" : "已收藏")
+                        : "收藏";
+                    icon: "follow";
+                    kind: root.bookmarked ? ButtonKind.Primary : ButtonKind.Secondary;
+                    enabled: !root.busy;
+                    row-height: 32px;
+                    clicked => { root.toggle-bookmark(); }
+                }
+
+                chevron := IconButton {
+                    icon: "chevron-down";
+                    tip: "收藏可见范围";
+                    size: Theme.split-chevron;
+                    row-height: 32px;
+                    enabled: !root.busy;
+                    clicked => {
+                        root.restrict-menu-at(
+                            chevron.absolute-position.x,
+                            chevron.absolute-position.y + chevron.height);
+                    }
+                }
+            }
+        }
+
+        AppButton {
+            label: "保存本页";
+            icon: "downloads";
+            clicked => { root.download-page(); }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        alignment: start;
+        AppButton {
+            label: root.page-count > 1 ? ("下载全部 " + root.page-count) : "下载";
+            icon: "downloads";
+            kind: ButtonKind.Secondary;
+            clicked => { root.download-all(); }
+        }
+        if root.kind == 2 : AppButton {
+            label: "导出动图 GIF";
+            icon: "play";
+            kind: ButtonKind.Secondary;
+            enabled: !root.busy;
+            clicked => { root.export-ugoira(); }
+        }
+    }
+
+    AppButton {
+        label: "在浏览器中打开";
+        icon: "open";
+        kind: ButtonKind.Subtle;
+        clicked => { root.open-external(); }
+    }
+
+    if !root.authenticated : InfoBar {
+        kind: InfoKind.Warning;
+        title: "只读模式";
+        message: "收藏与关注需要先完成登录（设置 → 账户）。";
+    }
+
+    if root.kind == 2 && root.ugoira-hint != "" : InfoBar {
+        kind: InfoKind.Info;
+        title: "动图（Ugoira）";
+        message: root.ugoira-hint;
+    }
+
+    Divider { }
+
+    // ---- stats ----
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        alignment: start;
+        Text { text: "浏览 " + root.views; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+        Text { text: "收藏 " + root.bookmarks; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+        Text { text: "赞 " + root.likes; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+        Text { text: root.posted; color: Theme.text-tertiary; font-size: Theme.font-small; vertical-alignment: center; overflow: elide; }
+    }
+
+    if root.description != "" : Text {
+        text: root.description;
+        color: Theme.text-secondary;
+        font-size: Theme.font-small;
+        wrap: word-wrap;
+    }
+
+    if root.tags.length > 0 : VerticalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: "标签";
+            color: Theme.text-tertiary;
+            font-size: Theme.font-caption;
+            font-weight: Type.semibold;
+        }
+        // Two chips per row, emitted as explicit cells. A horizontal ScrollView
+        // was tried first (a strip fixed at 60px that grows a scrollbar as soon
+        // as the labels are a few pixels too wide looks like a broken control),
+        // and so was `GridLayout` (it lays every child on a single row and just
+        // overflows). Conditional children are excluded from the layout, so a
+        // row with one tag renders as one chip and never truncates.
+        VerticalLayout {
+            spacing: 6px;
+            for r in Math.ceil(root.tags.length / 2) : HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+
+                // U7: one Tab stop for the whole chip block, even though it wraps.
+                // The index is the tag's position, not its cell, so Left/Right walk
+                // the reader's order.
+                if r * 2 < root.tags.length : TagChip {
+                    label: root.tags[r * 2];
+                    index: r * 2;
+                    cursor: root.tag-cursor;
+                    gained-focus(idx) => { root.tag-cursor = idx; }
+
+                    move-cursor(d) => {
+                        root.tag-cursor = Math.max(0, Math.min(
+                            root.tags.length - 1, root.tag-cursor + d));
+                    }
+                    clicked => { root.open-tag(root.tags[r * 2]); }
+                }
+                if r * 2 + 1 < root.tags.length : TagChip {
+                    label: root.tags[r * 2 + 1];
+                    index: r * 2 + 1;
+                    cursor: root.tag-cursor;
+                    gained-focus(idx) => { root.tag-cursor = idx; }
+
+                    move-cursor(d) => {
+                        root.tag-cursor = Math.max(0, Math.min(
+                            root.tags.length - 1, root.tag-cursor + d));
+                    }
+                    clicked => { root.open-tag(root.tags[r * 2 + 1]); }
+                }
+            }
+        }
+    }
+}
+
 /// Right-hand metadata column.
 export component InfoPanel inherits Rectangle {
     in property <string> title: "";
@@ -269,6 +568,10 @@ export component InfoPanel inherits Rectangle {
     in property <bool> following: false;
     in property <bool> busy: false;
     in property <string> ugoira-hint: "";
+    /// Round nine (F4): which restriction the reply says is in force. The menu
+    /// draws it, and the split button mines it for its tooltip — the panel never
+    /// guesses from the last click.
+    in property <int> bookmark-restrict: 0;
 
     callback toggle-bookmark();
     callback open-author();
@@ -278,11 +581,21 @@ export component InfoPanel inherits Rectangle {
     callback export-ugoira();
     callback open-external();
     callback follow();
+    /// The chevron was pressed: open the restriction menu at this point, in screen
+    /// coordinates (the menu itself is painted by the page, because a flyout inside
+    /// a clipped column or a scroll view is a flyout that cannot be reached).
+    callback restrict-menu-at(length, length);
+    /// Roving focus cursor for the tag chips this panel draws (U7).
+    in-out property <int> tag-cursor: 0;
 
     background: Theme.layer;
     border-width: 1px;
     border-color: Theme.border;
 
+    // U5. The panel fills the column the page sized (589 px at 1280 x 800) and scrolls
+    // its metadata inside it — unchanged from every previous round. The narrow layout
+    // does not use this component at all: it draws `InfoBody` inline, because a scroll
+    // view inside a scroll view is two scrollbars for one gesture.
     page := PageScroll {
         width: 100%;
         height: 100%;
@@ -291,195 +604,36 @@ export component InfoPanel inherits Rectangle {
         gutter: false;
         spacing: Theme.space-3;
 
-        Text {
-            text: root.title;
-            color: Theme.text;
-            font-size: Theme.font-title;
-            font-weight: Type.semibold;
-            wrap: word-wrap;
-        }
-
-        // ---- author ----
-        Rectangle {
-            height: 44px;
-            border-radius: Theme.radius-md;
-            background: ta-author.has-hover ? Theme.layer-alt : transparent;
-
-            HorizontalLayout {
-                padding-left: Theme.space-1;
-                padding-right: Theme.space-1;
-                spacing: Theme.space-2;
-                alignment: start;
-
-                // The real face. A 32px blue disc with the character 画 was the last
-                // thing in the app that looked like an avatar without being one; the
-                // cards, the profile header and the top bar all switched to the real
-                // image and this panel was left behind.
-                //
-                // Full-height cell, centred explicitly: a fixed-size child of a
-                // horizontal layout is aligned to the start of the cross axis, which
-                // is what put the old tile 6px high in a 44px row.
-                Rectangle {
-                    width: 32px;
-                    height: 100%;
-                    Avatar {
-                        size: 32px;
-                        y: (parent.height - self.height) / 2;
-                        source: root.avatar;
-                        state: root.avatar-state;
-                        fallback: root.author;
-                    }
-                }
-
-                // The author link must not cover the follow button. It used to be
-                // a sibling declared *after* this layout, which in Slint puts it on
-                // top of the whole row: every click on 「关注」 was swallowed by the
-                // author touch area and the follow button never fired. Scoping the
-                // touch area to the name column keeps the whole row clickable for
-                // "open author" while giving the button its own hit region.
-                ta-author := TouchArea {
-                    mouse-cursor: pointer;
-                    horizontal-stretch: 1;
-                    clicked => { root.open-author(); }
-
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 0px;
-                        Text {
-                            text: root.author;
-                            color: Theme.text;
-                            font-size: Theme.font-body;
-                            font-weight: Type.medium;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: "ID " + root.author-id;
-                            color: Theme.text-tertiary;
-                            font-size: Theme.font-caption;
-                            overflow: elide;
-                        }
-                    }
-                }
-
-                AppButton {
-                    label: root.following ? "已关注" : "关注";
-                    icon: "artist";
-                    compact: true;
-                    // compact is 26 px; without the row height the button is placed
-                    // 9 px above the centre line of the 44 px author row.
-                    row-height: 44px;
-                    kind: root.following ? ButtonKind.Primary : ButtonKind.Secondary;
-                    enabled: root.authenticated && !root.busy;
-                    clicked => { root.follow(); }
-                }
-            }
-        }
-
-        // ---- primary actions ----
-        HorizontalLayout {
-            spacing: Theme.space-2;
-            alignment: start;
-
-            AppButton {
-                label: root.bookmarked ? "已收藏" : "收藏";
-                icon: "follow";
-                kind: root.bookmarked ? ButtonKind.Primary : ButtonKind.Secondary;
-                enabled: !root.busy;
-                clicked => { root.toggle-bookmark(); }
-            }
-            AppButton {
-                label: "保存本页";
-                icon: "downloads";
-                clicked => { root.download-page(); }
-            }
-        }
-
-        HorizontalLayout {
-            spacing: Theme.space-2;
-            alignment: start;
-            AppButton {
-                label: root.page-count > 1 ? ("下载全部 " + root.page-count) : "下载";
-                icon: "downloads";
-                kind: ButtonKind.Secondary;
-                clicked => { root.download-all(); }
-            }
-            if root.kind == 2 : AppButton {
-                label: "导出动图 GIF";
-                icon: "play";
-                kind: ButtonKind.Secondary;
-                enabled: !root.busy;
-                clicked => { root.export-ugoira(); }
-            }
-        }
-
-        AppButton {
-            label: "在浏览器中打开";
-            icon: "open";
-            kind: ButtonKind.Subtle;
-            clicked => { root.open-external(); }
-        }
-
-        if !root.authenticated : InfoBar {
-            kind: InfoKind.Warning;
-            title: "只读模式";
-            message: "收藏与关注需要先完成登录（设置 → 账户）。";
-        }
-
-        if root.kind == 2 && root.ugoira-hint != "" : InfoBar {
-            kind: InfoKind.Info;
-            title: "动图（Ugoira）";
-            message: root.ugoira-hint;
-        }
-
-        Divider { }
-
-        // ---- stats ----
-        HorizontalLayout {
-            spacing: Theme.space-4;
-            alignment: start;
-            Text { text: "浏览 " + root.views; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
-            Text { text: "收藏 " + root.bookmarks; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
-            Text { text: "赞 " + root.likes; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
-            Text { text: root.posted; color: Theme.text-tertiary; font-size: Theme.font-small; vertical-alignment: center; overflow: elide; }
-        }
-
-        if root.description != "" : Text {
-            text: root.description;
-            color: Theme.text-secondary;
-            font-size: Theme.font-small;
-            wrap: word-wrap;
-        }
-
-        if root.tags.length > 0 : VerticalLayout {
-            spacing: Theme.space-2;
-            Text {
-                text: "标签";
-                color: Theme.text-tertiary;
-                font-size: Theme.font-caption;
-                font-weight: Type.semibold;
-            }
-            // Two chips per row, emitted as explicit cells. A horizontal ScrollView
-            // was tried first (a strip fixed at 60px that grows a scrollbar as soon
-            // as the labels are a few pixels too wide looks like a broken control),
-            // and so was `GridLayout` (it lays every child on a single row and just
-            // overflows). Conditional children are excluded from the layout, so a
-            // row with one tag renders as one chip and never truncates.
-            VerticalLayout {
-                spacing: 6px;
-                for r in Math.ceil(root.tags.length / 2) : HorizontalLayout {
-                    spacing: 6px;
-                    alignment: start;
-
-                    if r * 2 < root.tags.length : TagChip {
-                        label: root.tags[r * 2];
-                        clicked => { root.open-tag(root.tags[r * 2]); }
-                    }
-                    if r * 2 + 1 < root.tags.length : TagChip {
-                        label: root.tags[r * 2 + 1];
-                        clicked => { root.open-tag(root.tags[r * 2 + 1]); }
-                    }
-                }
-            }
+        InfoBody {
+            title: root.title;
+            author: root.author;
+            author-id: root.author-id;
+            avatar: root.avatar;
+            avatar-state: root.avatar-state;
+            description: root.description;
+            tags: root.tags;
+            posted: root.posted;
+            kind: root.kind;
+            page-count: root.page-count;
+            views: root.views;
+            bookmarks: root.bookmarks;
+            likes: root.likes;
+            bookmarked: root.bookmarked;
+            authenticated: root.authenticated;
+            following: root.following;
+            busy: root.busy;
+            ugoira-hint: root.ugoira-hint;
+            bookmark-restrict: root.bookmark-restrict;
+            tag-cursor <=> root.tag-cursor;
+            toggle-bookmark => { root.toggle-bookmark(); }
+            open-author => { root.open-author(); }
+            open-tag(t) => { root.open-tag(t); }
+            download-page => { root.download-page(); }
+            download-all => { root.download-all(); }
+            export-ugoira => { root.export-ugoira(); }
+            open-external => { root.open-external(); }
+            follow => { root.follow(); }
+            restrict-menu-at(x, y) => { root.restrict-menu-at(x, y); }
         }
     }
 }
@@ -535,6 +689,52 @@ export component DetailPage inherits Rectangle {
     callback toggle-fullscreen();
     callback reload-image();
 
+    // ---- round nine: F1 playback, F4 bookmark visibility, U29 page stepping ----
+    // The frozen seams, all with defaults that draw exactly what the page drew
+    // before this round: `film-ready` false hides the whole playback control (no
+    // gap, no disabled ghost), `film-frame` unset leaves the still in the viewer,
+    // `bookmark-restrict` 0 is the only restriction the app could create so far,
+    // and `page-step` with no listener changes no page.
+    in property <bool> film-ready: false;
+    /// The decoded frame the film is on. Slint images carry their own size, so
+    /// "unset" is `width == 0` and the viewer keeps the still.
+    in property <image> film-frame;
+    in property <int> film-index: 0;
+    in property <int> film-count: 0;
+    /// Whether the 16 ms timer is running. Not in the plan's table because the table
+    /// lists what Rust writes, but the control cannot draw its own state without it:
+    /// a play/pause toggle that shows the same glyph in both states is not a toggle.
+    /// Rust is expected to publish it; the button also flips it optimistically, so
+    /// the demo (and the `ugoira` capture fixture) reaches the playing state offline.
+    in-out property <bool> film-playing: false;
+    callback toggle-playback();
+    /// Left/Right on a thumbnail: -1 / +1, in pages. The shell clamps it against
+    /// `pages`, which is the only place that knows how many there are.
+    callback page-step(int);
+    /// 0 public / 1 private, from the reply.
+    in property <int> bookmark-restrict: 0;
+    callback pick-restrict(int);
+    /// Roving focus cursor for the tag chips (U7).
+    in-out property <int> tag-cursor: 0;
+
+    // ---- the bookmark restriction flyout (F4) ----
+    // Painted by the page, not by the InfoPanel: the panel lives inside a clipped
+    // column in the wide layout and inside the page scroll in the narrow one, and a
+    // flyout that inherits either clip cannot be reached. The panel reports the
+    // chevron's screen position; the page subtracts its own to place the menu.
+    property <bool> restrict-open: false;
+    property <length> restrict-anchor-x: 0px;
+    property <length> restrict-anchor-y: 0px;
+
+    // ---- vertical budget (U5) ----
+    /// Height the pinned thumbnail strip consumes: 68 px when there is more than one
+    /// page, nothing when there is one (the strip is not drawn at all).
+    out property <length> strip-height: (root.state == 0 && root.pages.length > 1) ? 68px : 0px;
+    /// What is left for the scrolling body, i.e. the page box minus the toolbar, the
+    /// rule under it and the strip. The wide layout hands its viewer exactly this,
+    /// which is why the 1280 x 800 capture is unchanged.
+    out property <length> body-height: max(0px, root.height - toolbar.height - rule.height - root.strip-height);
+
     background: Theme.canvas;
 
     /// Content box width, pushed in by the shell. Reading the window width here
@@ -557,7 +757,7 @@ export component DetailPage inherits Rectangle {
     ));
 
     VerticalLayout {
-        // ---- toolbar ----
+        // ---- toolbar (outside the scroll: a document toolbar must not scroll away) ----
         //
         // This row's width is the page's width anchor, not decoration. The page
         // area is one element shared by six pages and it is sized from its
@@ -572,7 +772,7 @@ export component DetailPage inherits Rectangle {
         // does. `available-width` is the content box the shell computed
         // (window minus the navigation pane, from `src/app.rs`), so this row and
         // every row under it are exactly as wide as the page.
-        Rectangle {
+        toolbar := Rectangle {
             height: 44px;
             background: Theme.canvas;
 
@@ -616,6 +816,29 @@ export component DetailPage inherits Rectangle {
                     }
                 }
 
+                // ---- F1: playback, in the toolbar it already has ----
+                // Same IconButton as the four beside it, so the row keeps one control
+                // metric (32 px inside a 44 px row) and one focus-ring treatment. The
+                // caption is the plan's "frame 12/24": an index a user can read, not a
+                // percentage, because a ugoira's frames are not evenly spaced.
+                if root.film-ready : IconButton {
+                    icon: root.film-playing ? "pause" : "play";
+                    tip: root.film-playing ? "暂停播放" : "播放动图";
+                    active: root.film-playing;
+                    row-height: 44px;
+                    clicked => {
+                        root.film-playing = !root.film-playing;
+                        root.toggle-playback();
+                    }
+                }
+                if root.film-ready && root.film-count > 0 : Text {
+                    text: "第 " + Math.min(root.film-index + 1, root.film-count)
+                        + " / " + root.film-count + " 帧";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                }
+
                 IconButton {
                     icon: "fit";
                     tip: root.fit-mode ? "当前：适应窗口" : "当前：实际尺寸";
@@ -644,166 +867,234 @@ export component DetailPage inherits Rectangle {
             }
         }
 
-        Divider { }
+        rule := Divider { }
 
-        if root.state == 1 : Rectangle {
-            height: 96px;
-            LoadingRow {
-                y: (parent.height - self.height) / 2;
-                bar-width: 140px;
-                label: "正在载入作品…";
-            }
-        }
-
-        // Centred, not stretched. `StateView` starts its 420px description at the
-        // beginning of its content box, so a stretched block centres the heading
-        // over a left-shifted description; the paired stretch spacers centre the
-        // block itself, which keeps heading, description and button on one axis at
-        // the page centre.
-        if root.state == 3 : HorizontalLayout {
+        // ---- vertical budget, stated once (U5) ----
+        //
+        // The page is a fixed-height column. At 800 x 600 the window is 600 px tall,
+        // the shell spends 48 (top bar) + 26 (status bar) on chrome, so this page is
+        // handed 526 px. Inside it: 44 (toolbar) + 1 (rule) + 68 (thumbnail strip) =
+        // 113 px of furniture, i.e. 413 px of viewport. The narrow layout draws a
+        // viewer of min(526 * 0.55, aspect cap) = 289 px and an InfoPanel whose
+        // preferred height is its whole metadata column (~600 px for a title, a
+        // 20-line description, twelve tags and the stats): 289 + 600 = 889 px in a
+        // 413 px box. A bare `VerticalLayout` has nowhere to put the surplus — it
+        // squeezes the panel down to `min-height: 160px` and the description, the tags
+        // and the statistics are simply not on screen and not reachable.
+        //
+        // So the *body* scrolls and nothing else does: the toolbar stays where it is
+        // (a document toolbar that scrolls away is a different control), the 68 px
+        // strip stays pinned (it is the navigation for the thing being read), and
+        // `body-height` below is the exact height the wide layout gives its viewer so
+        // that the 1280 x 800 screenshot does not move by a pixel.
+        body-scroll := ScrollView {
+            vertical-stretch: 1;
             width: 100%;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
 
-            Rectangle { horizontal-stretch: 1; }
+            body := VerticalLayout {
+                // The content box, not the window: the vertical scrollbar is an
+                // overlay, so a child sized from the window would paint under it.
+                width: max(0px, body-scroll.visible-width);
 
-            StateView {
-                kind: StateKind.Error;
-                title: "无法载入作品";
-                description: root.message;
-                action-label: "重试";
-                retry => { root.retry(); }
-            }
-
-            Rectangle { horizontal-stretch: 1; }
-        }
-
-        if root.state == 0 && root.pages.length > 0 && root.wide : HorizontalLayout {
-            spacing: Theme.space-3;
-            padding: Theme.space-3;
-
-            ZoomViewer {
-                horizontal-stretch: 1;
-                page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
-                fit-mode: root.fit-mode;
-                zoom <=> root.zoom;
-                pan-x <=> root.pan-x;
-                pan-y <=> root.pan-y;
-                request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
-                request-pan(dx, dy) => { root.request-pan(dx, dy); }
-                request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
-                set-fit-mode(m) => { root.set-fit-mode(m); }
-                set-zoom(z) => { root.set-zoom(z); }
-                toggle-fullscreen => { root.toggle-fullscreen(); }
-                reload-image => { root.reload-image(); }
-            }
-
-            Rectangle {
-                width: Math.min(360px, root.available-width * 0.38);
-                border-radius: Theme.radius-lg;
-                clip: true;
-
-                InfoPanel {
-                    width: parent.width;
-                    height: parent.height;
-                    title: root.title;
-                    author: root.author;
-                    author-id: root.author-id;
-
-                    avatar: root.author-avatar;
-
-                    avatar-state: root.author-avatar-state;
-                    description: root.description;
-                    tags: root.tags;
-                    posted: root.posted;
-                    kind: root.kind;
-                    page-count: root.page-count;
-                    views: root.views;
-                    bookmarks: root.bookmarks;
-                    likes: root.likes;
-                    bookmarked: root.bookmarked;
-                    authenticated: root.authenticated;
-                    following: root.following;
-                    busy: root.busy;
-                    ugoira-hint: root.ugoira-hint;
-                    toggle-bookmark => { root.toggle-bookmark(); }
-                    open-author => { root.open-author(); }
-                    open-tag(t) => { root.open-tag(t); }
-                    download-page => { root.download-page(); }
-                    download-all => { root.download-all(); }
-                    export-ugoira => { root.export-ugoira(); }
-                    open-external => { root.open-external(); }
-                    follow => { root.follow(); }
+                if root.state == 1 : Rectangle {
+                    height: 96px;
+                    LoadingRow {
+                        y: (parent.height - self.height) / 2;
+                        bar-width: 140px;
+                        label: "正在载入作品…";
+                    }
                 }
+
+                // Centred, not stretched. `StateView` starts its 420px description at the
+                // beginning of its content box, so a stretched block centres the heading
+                // over a left-shifted description; the paired stretch spacers centre the
+                // block itself, which keeps heading, description and button on one axis at
+                // the page centre.
+                if root.state == 3 : HorizontalLayout {
+                    width: 100%;
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    StateView {
+                        kind: StateKind.Error;
+                        title: "无法载入作品";
+                        description: root.message;
+                        action-label: "重试";
+                        retry => { root.retry(); }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                if root.state == 0 && root.pages.length > 0 && root.wide : HorizontalLayout {
+                    spacing: Theme.space-3;
+                    padding: Theme.space-3;
+                    // Inside a scroll body nothing hands out leftover height, so the row
+                    // states the height it used to inherit and the viewer inside it keeps
+                    // exactly the box it has today (`body-height` - the two 12 px paddings,
+                    // with a 320 px floor so a short window still shows a usable picture
+                    // and the strip below it stays reachable).
+                    height: max(320px, root.body-height);
+
+                    ZoomViewer {
+                        horizontal-stretch: 1;
+                        frame: root.film-frame;
+                        page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
+                        fit-mode: root.fit-mode;
+                        zoom <=> root.zoom;
+                        pan-x <=> root.pan-x;
+                        pan-y <=> root.pan-y;
+                        request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
+                        request-pan(dx, dy) => { root.request-pan(dx, dy); }
+                        request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
+                        set-fit-mode(m) => { root.set-fit-mode(m); }
+                        set-zoom(z) => { root.set-zoom(z); }
+                        toggle-fullscreen => { root.toggle-fullscreen(); }
+                        reload-image => { root.reload-image(); }
+                    }
+
+                    Rectangle {
+                        width: Math.min(360px, root.available-width * 0.38);
+                        border-radius: Theme.radius-lg;
+                        clip: true;
+
+                        InfoPanel {
+                            width: parent.width;
+                            height: parent.height;
+                            title: root.title;
+                            author: root.author;
+                            author-id: root.author-id;
+
+                            avatar: root.author-avatar;
+
+                            avatar-state: root.author-avatar-state;
+                            description: root.description;
+                            tags: root.tags;
+                            posted: root.posted;
+                            kind: root.kind;
+                            page-count: root.page-count;
+                            views: root.views;
+                            bookmarks: root.bookmarks;
+                            likes: root.likes;
+                            bookmarked: root.bookmarked;
+                            authenticated: root.authenticated;
+                            following: root.following;
+                            busy: root.busy;
+                            ugoira-hint: root.ugoira-hint;
+                            bookmark-restrict: root.bookmark-restrict;
+                            tag-cursor <=> root.tag-cursor;
+                            restrict-menu-at(x, y) => {
+                                root.restrict-anchor-x = x;
+                                root.restrict-anchor-y = y;
+                                root.restrict-open = true;
+                            }
+                            toggle-bookmark => { root.toggle-bookmark(); }
+                            open-author => { root.open-author(); }
+                            open-tag(t) => { root.open-tag(t); }
+                            download-page => { root.download-page(); }
+                            download-all => { root.download-all(); }
+                            export-ugoira => { root.export-ugoira(); }
+                            open-external => { root.open-external(); }
+                            follow => { root.follow(); }
+                        }
+                    }
+                }
+
+                // Narrow layout: the viewer's height is derived from the page's own aspect
+                // ratio instead of a stretch factor. A 3:2 stretch gave a portrait artwork a
+                // 1100x430 box, so "fit" scaled it to 25% and the box was mostly empty
+                // backdrop. Sizing the box to the artwork (capped to the space available)
+                // means the embedded viewer shows the picture it was given.
+                if root.state == 0 && root.pages.length > 0 && !root.wide : VerticalLayout {
+                    ZoomViewer {
+                        // `available-width` is the content box, so the estimate subtracts the
+                        // page padding the surrounding layout adds.
+                        //
+                        // Two caps, both necessary: the aspect cap stops a 1:1.6 portrait from
+                        // being fitted at 25% inside a wide letterbox, and the height cap stops
+                        // the artwork from pushing the whole metadata column below the fold in
+                        // a short window. Whichever is smaller wins.
+                        height: Math.min(
+                            root.height * 0.55,
+                            max(200px, root.available-width - Theme.space-6) * root.viewer-aspect
+                                + Theme.space-6
+                        );
+                        page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
+                        frame: root.film-frame;
+                        fit-mode: root.fit-mode;
+                        zoom <=> root.zoom;
+                        pan-x <=> root.pan-x;
+                        pan-y <=> root.pan-y;
+                        request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
+                        request-pan(dx, dy) => { root.request-pan(dx, dy); }
+                        request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
+                        set-fit-mode(m) => { root.set-fit-mode(m); }
+                        set-zoom(z) => { root.set-zoom(z); }
+                        toggle-fullscreen => { root.toggle-fullscreen(); }
+                        reload-image => { root.reload-image(); }
+                    }
+                    // U5: the metadata column, inline. Not `InfoPanel`, and not because
+                    // the panel is wrong — because a *scroll view* here would put a
+                    // second scrollbar inside the page scroll, and because a Rectangle
+                    // whose only child is a conditional does not report a preferred
+                    // height: measured with `natural`, the panel came out 0 px tall, the
+                    // body had nothing to scroll and the description was simply clipped.
+                    // The surface is the panel's (one `layer` card, 1 px border) and the
+                    // content is the same `InfoBody` the wide layout uses.
+                    Rectangle {
+                        background: Theme.layer;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        VerticalLayout {
+                            padding: Theme.space-4;
+                            spacing: 0px;
+
+                            InfoBody {
+                                title: root.title;
+                                author: root.author;
+                                author-id: root.author-id;
+                                avatar: root.author-avatar;
+                                avatar-state: root.author-avatar-state;
+                                description: root.description;
+                                tags: root.tags;
+                                posted: root.posted;
+                                kind: root.kind;
+                                page-count: root.page-count;
+                                views: root.views;
+                                bookmarks: root.bookmarks;
+                                likes: root.likes;
+                                bookmarked: root.bookmarked;
+                                authenticated: root.authenticated;
+                                following: root.following;
+                                busy: root.busy;
+                                ugoira-hint: root.ugoira-hint;
+                                bookmark-restrict: root.bookmark-restrict;
+                                tag-cursor <=> root.tag-cursor;
+                                restrict-menu-at(x, y) => {
+                                    root.restrict-anchor-x = x;
+                                    root.restrict-anchor-y = y;
+                                    root.restrict-open = true;
+                                }
+                                toggle-bookmark => { root.toggle-bookmark(); }
+                                open-author => { root.open-author(); }
+                                open-tag(t) => { root.open-tag(t); }
+                                download-page => { root.download-page(); }
+                                download-all => { root.download-all(); }
+                                export-ugoira => { root.export-ugoira(); }
+                                open-external => { root.open-external(); }
+                                follow => { root.follow(); }
+                            }
+                        }
+                    }
+                }
+
             }
         }
-
-        // Narrow layout: the viewer's height is derived from the page's own aspect
-        // ratio instead of a stretch factor. A 3:2 stretch gave a portrait artwork a
-        // 1100x430 box, so "fit" scaled it to 25% and the box was mostly empty
-        // backdrop. Sizing the box to the artwork (capped to the space available)
-        // means the embedded viewer shows the picture it was given.
-        if root.state == 0 && root.pages.length > 0 && !root.wide : VerticalLayout {
-            ZoomViewer {
-                // `available-width` is the content box, so the estimate subtracts the
-                // page padding the surrounding layout adds.
-                //
-                // Two caps, both necessary: the aspect cap stops a 1:1.6 portrait from
-                // being fitted at 25% inside a wide letterbox, and the height cap stops
-                // the artwork from pushing the whole metadata column below the fold in
-                // a short window. Whichever is smaller wins.
-                height: Math.min(
-                    root.height * 0.55,
-                    max(200px, root.available-width - Theme.space-6) * root.viewer-aspect
-                        + Theme.space-6
-                );
-                page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
-                fit-mode: root.fit-mode;
-                zoom <=> root.zoom;
-                pan-x <=> root.pan-x;
-                pan-y <=> root.pan-y;
-                request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
-                request-pan(dx, dy) => { root.request-pan(dx, dy); }
-                request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
-                set-fit-mode(m) => { root.set-fit-mode(m); }
-                set-zoom(z) => { root.set-zoom(z); }
-                toggle-fullscreen => { root.toggle-fullscreen(); }
-                reload-image => { root.reload-image(); }
-            }
-            InfoPanel {
-                vertical-stretch: 2;
-                min-height: 160px;
-                title: root.title;
-                author: root.author;
-                author-id: root.author-id;
-
-                avatar: root.author-avatar;
-
-                avatar-state: root.author-avatar-state;
-                description: root.description;
-                tags: root.tags;
-                posted: root.posted;
-                kind: root.kind;
-                page-count: root.page-count;
-                views: root.views;
-                bookmarks: root.bookmarks;
-                likes: root.likes;
-                bookmarked: root.bookmarked;
-                authenticated: root.authenticated;
-                following: root.following;
-                busy: root.busy;
-                ugoira-hint: root.ugoira-hint;
-                toggle-bookmark => { root.toggle-bookmark(); }
-                open-author => { root.open-author(); }
-                open-tag(t) => { root.open-tag(t); }
-                download-page => { root.download-page(); }
-                download-all => { root.download-all(); }
-                export-ugoira => { root.export-ugoira(); }
-                open-external => { root.open-external(); }
-                follow => { root.follow(); }
-            }
-        }
-
         // ---- page thumbnail strip ----
-        if root.state == 0 && root.pages.length > 1 : Rectangle {
+        if root.strip-height > 0 : Rectangle {
             height: 68px;
             background: Theme.layer;
 
@@ -827,6 +1118,11 @@ export component DetailPage inherits Rectangle {
                     spacing: Theme.space-2;
                     alignment: start;
 
+                    // U29: every thumbnail is a Tab stop with Enter/Space to view it,
+                    // and Left/Right step the page through `page-step`. Two wraps of
+                    // one cell — a focus scope (declared first, so the TouchArea below
+                    // still wins the press) and the pointer target — plus a ring that is
+                    // opacity, not an `if`, so an unfocused thumb paints today's pixels.
                     for p[i] in root.pages : Rectangle {
                         width: 48px;
                         height: 48px;
@@ -843,13 +1139,97 @@ export component DetailPage inherits Rectangle {
                             image-fit: cover;
                         }
 
+                        thumb-focus := FocusScope {
+                            accessible-role: AccessibleRole.button;
+                            accessible-label: "第 " + (i + 1) + " 页，共 " + root.pages.length + " 页";
+                            accessible-action-default => { root.select-page(i); }
+                            key-pressed(e) => {
+                                if (e.text == "\n" || e.text == " ") {
+                                    root.select-page(i);
+                                    return EventResult.accept;
+                                }
+                                // U+F702 / U+F703: the arrow *character codes*. A
+                                // comparison against "LeftArrow" compiles and never
+                                // matches, which is what `uiaudit` exists to prevent.
+                                if (e.text == "\u{F702}") { root.page-step(-1); return EventResult.accept; }
+                                if (e.text == "\u{F703}") { root.page-step(1); return EventResult.accept; }
+                                EventResult.reject
+                            }
+                        }
+
                         TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.select-page(i); }
+                        }
+
+                        // Fluent's focus visual, which is two strokes and not one: 2 px of
+                        // `focus-ring` and a 1 px `layer` inside it. A single blue stroke on
+                        // a 48 px thumbnail is nearly invisible — the first camera-read of
+                        // this capture could not tell the focused strip cell from its
+                        // neighbours, and the ring a keyboard user cannot see is the same
+                        // defect as no ring. Both strokes are inside the cell's clip, so
+                        // nothing moves and no neighbour is covered.
+                        Rectangle {
+                            border-radius: Theme.radius-sm;
+                            border-width: 2px;
+                            border-color: Theme.focus-ring;
+                            background: transparent;
+                            opacity: thumb-focus.has-focus ? 1.0 : 0.0;
+                            animate opacity { duration: Theme.motion-fast; easing: ease-out; }
+
+                            Rectangle {
+                                x: 2px;
+                                y: 2px;
+                                width: parent.width - 8px;
+                                height: parent.height - 8px;
+                                border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: Theme.layer;
+                                background: transparent;
+                            }
                         }
                     }
                 }
             }
         }
+    }
+    // ---- bookmark restriction flyout (F4) ----
+    // A sibling of the page column, so nothing clips it: the wide layout's info
+    // column has `clip: true` for its rounded corners and the narrow layout lives
+    // inside the page scroll. The click-outside scrim is declared *first* because
+    // Slint hit-tests in reverse declaration order and the menu has to win its own
+    // area.
+    if root.restrict-open : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: transparent;
+
+        scrim := TouchArea {
+            clicked => { root.restrict-open = false; }
+        }
+    }
+
+    if root.restrict-open : BookmarkMenu {
+        // Right-aligned with the chevron that opened it (both are 24 px wide, the
+        // menu is 200), and clamped into the page so a 720 px window cannot push the
+        // menu half off the right edge.
+        x: Math.max(Theme.space-2, Math.min(
+            root.width - Theme.menu-width - Theme.space-2,
+            root.restrict-anchor-x - root.absolute-position.x
+                + Theme.split-chevron - Theme.menu-width));
+        y: root.restrict-anchor-y - root.absolute-position.y + Theme.space-1;
+        restrict: root.bookmark-restrict;
+        bookmarked: root.bookmarked;
+        pick(r) => {
+            root.restrict-open = false;
+            root.pick-restrict(r);
+        }
+        remove => {
+            root.restrict-open = false;
+            root.toggle-bookmark();
+        }
+        closed => { root.restrict-open = false; }
     }
 }
