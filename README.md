@@ -127,12 +127,15 @@ worse than one that says what it does not know.
    5s timer reads one registry DWORD (`AppsUseLightTheme`). It stops itself the moment a
    fixed theme is chosen. A push notification would need a raw window procedure, which
    this app does not have because it keeps the native frame.
-10. **Almost nothing is reachable from the keyboard yet.** The command bar and the
-    settings rows respond to the pointer; the navigation rail, the artwork grid,
-    the tag chips, the toggles and the segmented control are `TouchArea` only, and
-    there is no `accessible-*` attribute anywhere in `ui/`. Tab therefore cycles
-    between `AppButton`s. This is the next round, not a design choice: every
-    control needs a focus scope, a visible focus ring and a role.
+10. **The keyboard reaches the chrome and the cards, but not everything, and the page
+    does not follow it.** Measured with real Tab keystrokes at 1024×768 on `home`:
+    stops 1–13 are the command bar and the navigation rail, 15–26 are the twelve tag
+    chips, and the first `IllustCard` is stop 27, announced as a `ListItem` with a
+    2px `Theme.focus-ring` (`tools/verify-focus.ps1`, `tools/verify-a11y.ps1`, and
+    `docs/UI-NOTES.md` § 14). What is still wrong: focus does not scroll the page, so
+    past the fold a keyboard user tabs into artwork that is not on screen, and each
+    chip costs its own stop before the grid can be reached. Neither is a design
+    choice; both are round seven's items.
 11. **1920×1080 at 150% DPI was not captured.** That needs a 2880×1620 physical client
    area and this screen is 2560×1600, so `tools/verify-icons.ps1` reports the clamp and
    skips instead of measuring a truncated frame. Every other size in the matrix was
@@ -224,7 +227,8 @@ pwsh -File tools/gates.ps1 -Ui
 
 # or one at a time
 cargo fmt --all -- --check
-cargo test --workspace                       # 291 tests, 14 of them source rules
+cargo test --workspace                       # 291 tests: 14 source rules, 15 live tests
+                                            # that return early without PIXIV_LIVE_PHPSESSID
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)
@@ -232,9 +236,13 @@ $env:RUSTC_WORKSPACE_WRAPPER="C:\msys64\ucrt64\bin\clippy-driver.exe"
 cargo check --workspace --all-targets
 ```
 
-`.github/workflows/ci.yml` runs the same gates on `windows-latest` for every push:
-fmt, the test suite, `cargo clippy -- -D warnings` and a release build. The live
-suite stays inert without `PIXIV_LIVE_PHPSESSID`, so CI never talks to pixiv.net.
+`.github/workflows/ci.yml` runs the host-independent gates on every push: `cargo fmt`
+(ubuntu), `actionlint` (a container), and on `windows-latest` `cargo check` over the
+three-OS matrix, `cargo clippy -- -D warnings` and the test suite. It does **not** run
+the release build (that is `.github/workflows/build.yml`) and it does **not** run any
+`tools/*.ps1` gate: those launch the app and read its window, which a runner without an
+interactive desktop cannot do. The live suite stays inert without
+`PIXIV_LIVE_PHPSESSID`, so CI never talks to pixiv.net.
 
 ### Live tests against the real service
 

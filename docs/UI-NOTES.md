@@ -823,11 +823,18 @@ because that one was about *when* the request happened, not how big it was.
 
 ### 13f. What is still not verified here
 
-* **Tab does not reach a card.** Ten distinct stops on all eight pages against
-  `focusable` counts up to 44. Cards declare a `FocusScope` (§ 12b) and are announced
-  as `ListItem`, but nothing has ever focused one - not a capture, not a keystroke
-  walk. This is the next round's first item, and it is § 12a's shape again: the
-  semantic exists, the way to reach it does not.
+* ~~**Tab does not reach a card.**~~ **Wrong, and measured wrong in round seven.**
+  Ten distinct stops on all eight pages against `focusable` counts up to 44 was true
+  only because `verify-a11y.ps1` walks `-TabSteps 10` and the budget pins
+  `minTabStops` to the same 10: the sample and the assertion were the same number.
+  A walk of 45 steps on `home` reaches **45** distinct stops — 13 chrome, 12 tag
+  chips, and the first `IllustCard` at **27**. So the semantic was reachable all
+  along and § 12b was right. What round seven found in its place is worse for a
+  keyboard user: the page never scrolls to the focused card, so from stop 27 on the
+  reported rectangle is clipped to the viewport's bottom edge (physical y = 1499 at
+  1024×768 @150 %) and nothing visible has focus. Recorded in
+  `docs/OPTIMIZATION-PLAN-R7.md` U3/G5; the fix and its gate are that round's
+  Phase 2.
 * **A populated download queue.** Unchanged from § 12i: the state mapping is tested,
   the rows are patched in place, and no capture shows real rows.
 * **Hover.** Unchanged from § 10. `verify-focus.ps1` moves focus with real keys; a
