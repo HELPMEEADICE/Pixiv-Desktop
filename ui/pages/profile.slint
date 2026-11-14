@@ -46,6 +46,24 @@ export component ProfilePage inherits Rectangle {
     in property <bool> loading-more: false;
     in property <string> count-label: "";
 
+    /// How many placeholder columns to draw while the first page is in flight.
+    ///
+    /// The same derivation home.slint:126 and gallery.slint:120 use: the resolved
+    /// grid answers whenever there is one, and otherwise the arithmetic
+    /// `layout::column_count` itself uses — (usable + gap) / (card + gap), floored,
+    /// at least one. A literal four only fits one window size; at the 720 px minimum
+    /// the body is 618 px and four columns need 829 px in a stream whose horizontal
+    /// scrollbar is `always-off`, so the fourth placeholder was sliced off.
+    ///
+    /// This reads the measured content box, which `PageScroll` derives from the
+    /// viewport, so it cannot feed back into itself. `wide` above deliberately does
+    /// not read it: the header's own layout would make layout depend on layout.
+    property <float> skeleton-columns: root.columns.length > 0
+        ? root.columns.length
+        : Math.max(1.0, Math.floor(
+            (page.body-width + Theme.card-gap)
+                / Math.max(1px, root.card-width + Theme.card-gap)));
+
     in-out property <length> scroll-y: 0px;
     /// Content box is wide enough for the two-column header. Pushed from Rust,
     /// which is the only owner of the measured width - deriving it here from
@@ -294,7 +312,7 @@ export component ProfilePage inherits Rectangle {
             spacing: Theme.card-gap;
             alignment: start;
             height: 320px;
-            for n in [0, 1, 2, 3] : VerticalLayout {
+            for n in root.skeleton-columns : VerticalLayout {
                 spacing: Theme.card-gap;
                 width: root.card-width;
                 alignment: start;

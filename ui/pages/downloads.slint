@@ -133,9 +133,14 @@ component TaskRow inherits Rectangle {
                     : root.entry.state == 2 ? Theme.success-subtle
                     : root.entry.state == 4 ? Theme.layer-sunken
                     : Theme.accent-subtle;
+                // State 4 is the cancelled task, and its ink was text-tertiary on
+                // layer-sunken: #6e6e6e on #ececee measures 4.32:1 in light mode,
+                // under the 4.5:1 AA floor for an 11 px label (dark measures
+                // 7.32:1, so this was light-only). text-secondary on the same
+                // surface measures 5.58:1. Measured, not eyeballed.
                 ink: root.entry.state == 3 ? Theme.danger
                     : root.entry.state == 2 ? Theme.success
-                    : root.entry.state == 4 ? Theme.text-tertiary
+                    : root.entry.state == 4 ? Theme.text-secondary
                     : Theme.accent-ink;
             }
         }

@@ -107,6 +107,22 @@ export component GalleryPage inherits Rectangle {
     in property <string> recommend-users-message: "";
     callback open-user(string);
 
+    /// How many placeholder columns to draw.
+    ///
+    /// A literal four was drawn here, and at the 720 px minimum window the body is
+    /// 618 px wide with `card-width` resolved to 195.33 px: 4 x 195.33 + 3 x 16 =
+    /// 829 px in a stream whose `horizontal-scrollbar-policy` is `always-off`
+    /// (components.slint:1190) - a clip, not a scroll, so the fourth placeholder
+    /// was sliced off and unreachable. The resolved grid answers whenever it
+    /// exists; while the first page is in flight there is no grid, so the count
+    /// falls back to the arithmetic `layout::column_count` uses -
+    /// (usable + gap) / (card + gap), floored, at least one.
+    property <float> skeleton-columns: root.columns.length > 0
+        ? root.columns.length
+        : Math.max(1.0, Math.floor(
+            (page.body-width + Theme.card-gap)
+                / Math.max(1px, root.card-width + Theme.card-gap)));
+
     background: Theme.canvas;
 
     page := PageScroll {
@@ -261,6 +277,46 @@ export component GalleryPage inherits Rectangle {
             }
         }
 
+        // A failed /ajax/discovery/users request used to draw nothing at all: the
+        // only branch above requires state == 0 and a non-empty list, so the whole
+        // artist band disappeared with no text and no way to retry - and the
+        // message the shell fills (main.slint:812) was read by no page. This branch
+        // is the band's error state, worded and retried exactly as the page's other
+        // bands are: root.retry() is grid-retry, which on Discovery re-requests the
+        // users alongside the works (src/app/callbacks/feed.rs:55).
+        if root.recommend-users-state == 3 : VerticalLayout {
+            spacing: Theme.space-2;
+
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+
+                Text {
+                    text: "推荐画师";
+                    color: Theme.text;
+                    font-size: Theme.font-small;
+                    font-weight: Type.semibold;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.recommend-users-message;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                AppButton {
+                    label: "重试";
+                    icon: "refresh";
+                    kind: ButtonKind.Subtle;
+                    compact: true;
+                    row-height: Theme.control-height-sm;
+                    clicked => { root.retry(); }
+                }
+            }
+        }
+
         Divider { }
 
         // ---------------- loading skeleton ----------------
@@ -269,7 +325,7 @@ export component GalleryPage inherits Rectangle {
             alignment: start;
             height: 420px;
 
-            for n in [0, 1, 2, 3] : VerticalLayout {
+            for n in root.skeleton-columns : VerticalLayout {
                 spacing: Theme.card-gap;
                 width: root.card-width;
                 alignment: start;

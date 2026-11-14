@@ -111,6 +111,24 @@ export component HomePage inherits Rectangle {
     callback action();
     callback retry();
 
+    /// How many placeholder columns to draw.
+    ///
+    /// A literal four was drawn here, and at the 720 px minimum window the pane
+    /// is already compact: the body is 618 px wide and `card-width` resolves to
+    /// 195.33 px, so 4 x 195.33 + 3 x 16 = 829 px went into a 618 px box whose
+    /// stream has `horizontal-scrollbar-policy: always-off` — a clip, not a
+    /// scroll, so the fourth placeholder was sliced off and unreachable. The
+    /// resolved grid answers whenever there is one (it is the only thing that
+    /// knows); while the first page is still in flight there is no grid, so the
+    /// count falls back to the arithmetic `layout::column_count` uses —
+    /// (usable + gap) / (card + gap), floored, at least one — instead of a
+    /// constant that is only right at one window size.
+    property <float> skeleton-columns: root.columns.length > 0
+        ? root.columns.length
+        : Math.max(1.0, Math.floor(
+            (page.body-width + Theme.card-gap)
+                / Math.max(1px, root.card-width + Theme.card-gap)));
+
     background: Theme.canvas;
 
     page := PageScroll {
@@ -254,7 +272,7 @@ export component HomePage inherits Rectangle {
             spacing: Theme.card-gap;
             alignment: start;
             height: 380px;
-            for n in [0, 1, 2, 3] : VerticalLayout {
+            for n in root.skeleton-columns : VerticalLayout {
                 spacing: Theme.card-gap;
                 width: root.card-width;
                 alignment: start;
@@ -337,6 +355,46 @@ export component HomePage inherits Rectangle {
                             toggle-bookmark => { root.toggle-bookmark(it.id); }
                         }
                     }
+                }
+            }
+
+            // Two states the band used to answer with silence: `2` is BAND_EMPTY
+            // (what demo mode sets, src/app/feed/home.rs:411, and what an empty
+            // payload resolves to, :505) and `3` is BAND_ERROR, which only ever
+            // reached the header note. Both follow the artists band twelve lines
+            // below: one 40 px line carrying the band's own message, so the band
+            // does not collapse to a bare heading.
+            if root.latest-state == 2 : Text {
+                height: 40px;
+                text: root.latest-message;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-small;
+                vertical-alignment: center;
+            }
+
+            // The error line carries its own retry inside the band. BandHeader's
+            // `show-retry` button calls the same root.refresh(), so the two
+            // affordances cannot disagree about what "retry" means.
+            if root.latest-state == 3 : HorizontalLayout {
+                height: 40px;
+                spacing: Theme.space-2;
+                alignment: start;
+
+                Text {
+                    text: root.latest-message;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-small;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                AppButton {
+                    label: "重试";
+                    icon: "refresh";
+                    kind: ButtonKind.Subtle;
+                    compact: true;
+                    row-height: 40px;
+                    clicked => { root.refresh(); }
                 }
             }
         }

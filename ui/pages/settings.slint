@@ -220,6 +220,9 @@ export component SettingsPage inherits Rectangle {
                     spacing: Theme.space-2;
                     alignment: start;
                     SegmentedControl {
+                        // Without a label the group announced as an unnamed radio
+                        // group; the switch below had the same gap.
+                        label: "主题";
                         items: ["跟随系统", "浅色", "深色"];
                         current: Theme.mode == ThemeMode.System ? 0
                             : (Theme.mode == ThemeMode.Light ? 1 : 2);
@@ -333,6 +336,7 @@ export component SettingsPage inherits Rectangle {
                 available-width: page.body-width;
                 hint: "使用本地生成的示例数据，作品标题带 [DEMO] 前缀，完全离线";
                 ToggleSwitch {
+                    label: "演示模式";
                     checked: root.demo-mode;
                     toggled(v) => { root.toggle-demo(v); }
                 }

@@ -250,6 +250,11 @@ mod tests {
                 4.5,
                 "hint text on an input / sunken row",
             ),
+            // The cancelled-download badge paired text-tertiary with layer-sunken:
+            // 4.32:1, under AA for an 11 px label, and the table above measured only
+            // canvas, layer and layer-alt, so nothing failed. The row now carries
+            // text-secondary (5.58:1); the pair below is what pins it.
+            ("text-secondary", "layer-sunken", 4.5, "ink on a sunken row"),
             // Filled controls: the *fill* token, not the decoration accent.
             ("on-accent", "accent-fill", 4.5, "label on a primary button"),
             // Text and glyphs on the accent wash (nav selection, chips, badges).
@@ -890,6 +895,134 @@ mod tests {
             "these components take clicks but expose no accessible-role, so a screen reader \
              never sees them: \n{}",
             offenders.join("\n")
+        );
+    }
+
+    /// Rule: a component that draws text on `Theme.accent-fill` inks it with `on-accent`.
+    ///
+    /// The theme states the pair and its measurement in the doc comment of
+    /// `accent-fill`: white on the dark value `#4cb0f5` is 2.38:1, `on-accent` on it
+    /// is 8.01:1. The ranking badge painted the literal `#ffffff` on that fill for a
+    /// whole round and this file could not see it: `#ffffff` is a legitimate
+    /// artwork-overlay ink (the type badge on a cover), so it sits in the allowlist,
+    /// and the pair was never in the WCAG table above. This rule asks the question
+    /// the table cannot: if a component fills a surface with the accent, what colour
+    /// does it put on top?
+    #[test]
+    fn text_drawn_on_the_accent_fill_uses_the_ink_token() {
+        let source = read(&ui_dir().join("components.slint"));
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for (index, line) in source.lines().enumerate() {
+            let Some(component) = declared_component(line) else {
+                continue;
+            };
+            let body = component_body(&source, index);
+            // A *surface*, not any mention: `accent-fill` is also a border and a
+            // focused-ring colour, and asking about every mention flagged five
+            // components that ink nothing on it (TextField sets it as its focus
+            // border, NavItem as its selection bar). The question is what sits on
+            // the fill.
+            let mut fills_with_accent = false;
+            let mut draws_text = false;
+            let mut literal_ink = false;
+            for line_index in component_range(&source, index) {
+                let text = source.lines().nth(line_index).unwrap_or("");
+                let code = text.split("//").next().unwrap_or("");
+                if code.contains("background:") && code.contains("Theme.accent-fill") {
+                    fills_with_accent = true;
+                }
+                if code.contains("Text {") {
+                    draws_text = true;
+                }
+                // The decidable half: ink written as a literal on a surface the
+                // theme owns. A token is a judgement this rule cannot make (it
+                // would flag NavItem's selection bar, which carries no text at
+                // all); a hex literal on an accent-filled component is the defect
+                // this rule exists for.
+                let writes_ink = code.contains("color:") || code.contains("ink:");
+                if writes_ink && code.contains("#") {
+                    literal_ink = true;
+                }
+            }
+            if !fills_with_accent || !draws_text || !literal_ink {
+                continue;
+            }
+            checked += 1;
+            if !body.contains("Theme.on-accent") {
+                offenders.push(format!("components.slint:{}: {component}", index + 1));
+            }
+        }
+        assert!(
+            checked > 0,
+            "expected at least one component to fill a surface with the accent and draw text \
+             on it; a rule that checks nothing is not a rule"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these components draw text on the accent fill without on-accent ink: {:?}",
+            offenders
+        );
+    }
+
+    /// Rule: an interactive component is reachable from the keyboard.
+    ///
+    /// The rule above proves a click target is *named*; it says nothing about
+    /// whether Tab can reach it, and two controls could not be reached at all.
+    /// `ToggleSwitch` and `SegmentedControl` declared no `FocusScope`, and Slint
+    /// focuses nothing else, so the demo-mode switch and the three-way theme
+    /// selector were pointer-only in a shell whose other primitives walk cleanly.
+    /// `TextField` is the one exception by construction: a `TextInput` is natively
+    /// focusable, so its body contains `TextInput` and needs no scope.
+    #[test]
+    fn every_interactive_component_can_take_focus() {
+        const INTERACTIVE: [&str; 10] = [
+            "AppButton",
+            "IconButton",
+            "NavItem",
+            "TagChip",
+            "TextField",
+            "ToggleSwitch",
+            "SegmentedControl",
+            "IllustCard",
+            "UserCard",
+            "BookmarkPill",
+        ];
+        let source = read(&ui_dir().join("components.slint"));
+        let mut offenders = Vec::new();
+        let mut seen = 0;
+        for (index, line) in source.lines().enumerate() {
+            let Some(ident) = declared_component(line) else {
+                continue;
+            };
+            if !INTERACTIVE.contains(&ident.as_str()) {
+                continue;
+            }
+            seen += 1;
+            // `BookmarkPill` is the one interactive component with no scope, and
+            // deliberately so: it is a per-card shortcut, and one Tab stop per card
+            // would make a 40-item grid 80 stops before roving focus exists (round
+            // eight phase 2 lists it as U11). The same action already has a
+            // keyboard path — the detail page's InfoPanel bookmark button — so no
+            // user is locked out of the capability. The exception goes when roving
+            // focus lands, not before.
+            if ident == "BookmarkPill" {
+                continue;
+            }
+            let body = component_body(&source, index);
+            if !body.contains("FocusScope") && !body.contains("TextInput") {
+                offenders.push(format!("components.slint:{}: {ident}", index + 1));
+            }
+        }
+        assert_eq!(
+            seen,
+            INTERACTIVE.len(),
+            "keep this list in step with every_interactive_component_declares_a_role"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these components cannot be reached from the keyboard: {:?}",
+            offenders
         );
     }
 

@@ -79,11 +79,44 @@ export component ZoomViewer inherits Rectangle {
         image-fit: fill;
     }
 
+    ta := TouchArea {
+        scroll-event(e) => {
+            root.request-zoom(ta.mouse-x / 1px, ta.mouse-y / 1px, e.delta-y / 1px,
+                root.width / 1px, root.height / 1px);
+            EventResult.accept
+        }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.last-x = ta.mouse-x / 1px;
+                root.last-y = ta.mouse-y / 1px;
+            }
+            EventResult.accept
+        }
+        moved => {
+            if (ta.pressed && !root.fit-mode) {
+                root.request-pan((ta.mouse-x / 1px) - root.last-x, (ta.mouse-y / 1px) - root.last-y);
+            }
+            root.last-x = ta.mouse-x / 1px;
+            root.last-y = ta.mouse-y / 1px;
+        }
+        double-clicked => {
+            root.request-toggle-zoom(ta.mouse-x / 1px, ta.mouse-y / 1px);
+        }
+        mouse-cursor: root.fit-mode ? MouseCursor.default : MouseCursor.grab;
+    }
+
     // Non-image states must never look like a broken image.
     // `width: 100%` plus paired stretch spacers is what actually centres these
     // blocks: a layout's own `alignment` only orders children, it does not centre
     // a fixed-width child, and a bare layout inside a Rectangle shrinks to its
     // preferred width and hugs the left edge.
+    //
+    // Declared *after* the viewer's `ta`, because Slint hit-tests in reverse
+    // declaration order — the law components.slint:386 and main.slint:1130 record.
+    // While these two blocks sat above `ta`, the full-size TouchArea won every
+    // press and 「重新载入」 could not be clicked at all: the only retry affordance
+    // in the page was dead. Painting is unchanged, because `ta` draws nothing and
+    // moving a transparent element past it cannot move a pixel.
     if root.page.failed : VerticalLayout {
         width: 100%;
         alignment: center;
@@ -133,32 +166,6 @@ export component ZoomViewer inherits Rectangle {
         }
     }
 
-    ta := TouchArea {
-        scroll-event(e) => {
-            root.request-zoom(ta.mouse-x / 1px, ta.mouse-y / 1px, e.delta-y / 1px,
-                root.width / 1px, root.height / 1px);
-            EventResult.accept
-        }
-        pointer-event(e) => {
-            if (e.kind == PointerEventKind.down) {
-                root.last-x = ta.mouse-x / 1px;
-                root.last-y = ta.mouse-y / 1px;
-            }
-            EventResult.accept
-        }
-        moved => {
-            if (ta.pressed && !root.fit-mode) {
-                root.request-pan((ta.mouse-x / 1px) - root.last-x, (ta.mouse-y / 1px) - root.last-y);
-            }
-            root.last-x = ta.mouse-x / 1px;
-            root.last-y = ta.mouse-y / 1px;
-        }
-        double-clicked => {
-            root.request-toggle-zoom(ta.mouse-x / 1px, ta.mouse-y / 1px);
-        }
-        mouse-cursor: root.fit-mode ? MouseCursor.default : MouseCursor.grab;
-    }
-
     // Floating control bar, as in WinUI's media surfaces. Width is explicit:
     // a child Rectangle without one fills its parent, which turned this pill into
     // a full-width strip across the middle of the image.
@@ -175,6 +182,16 @@ export component ZoomViewer inherits Rectangle {
         drop-shadow-color: Theme.shadow-2;
         drop-shadow-offset-y: 2px;
 
+        // Same defect as the 44 px toolbar above, one metric smaller. The pill is
+        // 36 px (Theme.control-height-lg) and each button is a fixed 28 px child of
+        // a horizontal layout, so the cross axis puts it at the start: wash and
+        // glyph centred on y=14 in a 36 px pill whose centre line is y=18 — 4 px
+        // high, both before and after this comment. `row-height: 36px` makes the
+        // element claim the pill's height and centre its own 28 px square
+        // (IconButton draws wash at (36-28)/2 = 4 and glyph at (36-16)/2 = 10, so
+        // both land on 18). The pill's own metric — 36 px tall, 1 px border,
+        // width from `controls.preferred-width` — is untouched: IconButton's width
+        // stays `size`, so the pill is exactly as wide as it was.
         controls := HorizontalLayout {
             padding-left: Theme.space-1;
             padding-right: Theme.space-1;
@@ -186,6 +203,7 @@ export component ZoomViewer inherits Rectangle {
                 tip: "适应窗口";
                 active: root.fit-mode;
                 size: 28px;
+                row-height: 36px;
                 clicked => { root.set-fit-mode(true); root.set-zoom(1.0); }
             }
             IconButton {
@@ -193,12 +211,14 @@ export component ZoomViewer inherits Rectangle {
                 tip: "实际尺寸";
                 active: !root.fit-mode;
                 size: 28px;
+                row-height: 36px;
                 clicked => { root.set-fit-mode(false); root.set-zoom(1.0); }
             }
             IconButton {
                 icon: "zoom-out";
                 tip: "缩小";
                 size: 28px;
+                row-height: 36px;
                 clicked => { root.set-zoom(Math.max(0.2, root.zoom * 0.8)); }
             }
             Text {
@@ -213,12 +233,14 @@ export component ZoomViewer inherits Rectangle {
                 icon: "zoom-in";
                 tip: "放大";
                 size: 28px;
+                row-height: 36px;
                 clicked => { root.set-zoom(Math.min(8.0, root.zoom * 1.25)); }
             }
             IconButton {
                 icon: "fullscreen";
                 tip: "全屏 (F11)";
                 size: 28px;
+                row-height: 36px;
                 clicked => { root.toggle-fullscreen(); }
             }
         }
@@ -343,6 +365,9 @@ export component InfoPanel inherits Rectangle {
                     label: root.following ? "已关注" : "关注";
                     icon: "artist";
                     compact: true;
+                    // compact is 26 px; without the row height the button is placed
+                    // 9 px above the centre line of the 44 px author row.
+                    row-height: 44px;
                     kind: root.following ? ButtonKind.Primary : ButtonKind.Secondary;
                     enabled: root.authenticated && !root.busy;
                     clicked => { root.follow(); }
@@ -573,16 +598,32 @@ export component DetailPage inherits Rectangle {
                     horizontal-stretch: 1;
                 }
 
-                if root.page-count > 1 : Badge {
-                    label: (root.current-page + 1) + " / " + root.page-count;
-                    fill: Theme.layer-alt;
-                    ink: Theme.text-secondary;
+                // The badge is 18 px in a 44 px row and a fixed-size child of a
+                // horizontal layout is aligned to the start of the cross axis
+                // (i-slint-core-1.18.1/layout.rs:1373-1382), so it sat 13 px above
+                // the row's centre line. A wrapper that claims the row height and
+                // centres the 18 px chip is the shape downloads.slint:120 already
+                // uses for its status badge; the chip itself keeps its metrics.
+                if root.page-count > 1 : Rectangle {
+                    width: page-badge.width;
+                    height: 100%;
+
+                    page-badge := Badge {
+                        y: (parent.height - self.height) / 2;
+                        label: (root.current-page + 1) + " / " + root.page-count;
+                        fill: Theme.layer-alt;
+                        ink: Theme.text-secondary;
+                    }
                 }
 
                 IconButton {
                     icon: "fit";
                     tip: root.fit-mode ? "当前：适应窗口" : "当前：实际尺寸";
                     active: root.fit-mode;
+                    // Same 44 px as the back button above it: without row-height a
+                    // fixed 32 px child sits at the padding edge of the 44 px row,
+                    // 12 px above its centre line.
+                    row-height: 44px;
                     clicked => {
                         root.set-fit-mode(!root.fit-mode);
                         root.set-zoom(1.0);
@@ -591,11 +632,13 @@ export component DetailPage inherits Rectangle {
                 IconButton {
                     icon: "open";
                     tip: "在浏览器中打开";
+                    row-height: 44px;
                     clicked => { root.open-external(); }
                 }
                 IconButton {
                     icon: "refresh";
                     tip: "重新载入";
+                    row-height: 44px;
                     clicked => { root.retry(); }
                 }
             }
@@ -770,8 +813,17 @@ export component DetailPage inherits Rectangle {
                 vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
 
+                // Two bands, not one, exactly as gallery.slint:183 does for its tag
+                // strip. With padding: Theme.space-2 the 48 px thumbs occupied
+                // 8..56 and the 14 px overlay bar 54..68, so the bar was painted
+                // over the last 2 px of every thumbnail. Theme.space-1 on top puts
+                // the thumbs at 4..52 and leaves the bar's band 54..68 to itself.
+                // The strip height (68 px) and the thumbnail size (48 px) are
+                // unchanged, which is what keeps this out of U5's vertical budget.
                 HorizontalLayout {
-                    padding: Theme.space-2;
+                    padding-top: Theme.space-1;
+                    padding-left: Theme.space-2;
+                    padding-bottom: Theme.space-2;
                     spacing: Theme.space-2;
                     alignment: start;
 

@@ -404,6 +404,16 @@ export component AppWindow inherits Window {
         else { root.focus-nav-item(index); }
     }
 
+    /// The command bar's account affordance is reachable two ways now: the
+    /// pointer (TouchArea) and Tab + Space/Enter (FocusScope). One function so
+    /// the two cannot drift - "signed in: your own page, signed out: the
+    /// sign-in flow" is a decision, and a decision kept in two places is a
+    /// decision that will disagree with itself.
+    public function open-account() {
+        if (root.authenticated) { root.open-profile(""); }
+        else { root.navigate(Destination.Settings); }
+    }
+
     public function focus-nav-item(index: int) {
         if (index == 0) { nav-home.take-focus(); }
         else if (index == 1) { nav-discovery.take-focus(); }
@@ -577,17 +587,39 @@ export component AppWindow inherits Window {
                                 : "登";
                         }
 
+                        // Keyboard first, pointer second: the project's own law
+                        // (components.slint:386, main.slint:1130) is that the last
+                        // declared input element wins the hit test, so the scope is
+                        // declared above the touch area and the transparent area
+                        // stays last. The ring is opacity, not an `if`: the
+                        // unfocused state paints exactly the pixels it painted
+                        // before, so no baseline moves.
+                        avatar-focus := FocusScope {
+                            key-pressed(e) => {
+                                if (e.text == "\n" || e.text == " ") {
+                                    root.open-account();
+                                    return EventResult.accept;
+                                }
+                                EventResult.reject
+                            }
+                        }
+
+                        Rectangle {
+                            border-radius: Theme.radius-sm;
+                            border-width: 2px;
+                            border-color: Theme.focus-ring;
+                            background: transparent;
+                            opacity: avatar-focus.has-focus ? 1.0 : 0.0;
+                            animate opacity { duration: Theme.motion-fast; easing: ease-out; }
+                        }
+
                         avatar-area := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => {
-                                // Signed in: your own page. Otherwise the only
-                                // useful destination is the sign-in flow.
-                                if (root.authenticated) {
-                                    root.open-profile("");
-                                } else {
-                                    root.navigate(Destination.Settings);
-                                }
-                            }
+                            accessible-role: AccessibleRole.button;
+                            accessible-label: root.authenticated
+                                ? "我的主页" : "未登录，打开设置以登录";
+                            accessible-action-default => { root.open-account(); }
+                            clicked => { root.open-account(); }
                         }
                         // Published, not drawn here: `y: Theme.topbar-height + 6px`
                         // put this bubble under the page, which is painted after

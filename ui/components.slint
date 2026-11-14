@@ -564,6 +564,32 @@ export component ToggleSwitch inherits Rectangle {
         animate x { duration: Theme.motion-fast; easing: ease-out; }
     }
 
+    // Keyboard. A rectangle is not a Tab stop — only a `FocusScope` is — so this
+    // switch could not be reached without a pointer at all. Space/Enter does what
+    // `accessible-action-default` already does. The ring is the same 2 px
+    // Theme.focus-ring stroke every other control draws, on the 40x20 track, and
+    // it rests at opacity 0 so an unfocused switch paints exactly the pixels it
+    // painted before it was focusable.
+    Rectangle {
+        border-radius: Theme.radius-pill;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        background: transparent;
+        opacity: key_focus.has-focus ? 1.0 : 0.0;
+        animate opacity { duration: Theme.motion-fast; easing: ease-out; }
+    }
+
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (root.enabled && (e.text == "\n" || e.text == " ")) {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+    }
+
     ta := TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
@@ -603,6 +629,34 @@ export component SegmentedControl inherits Rectangle {
     border-color: Theme.border;
     opacity: root.enabled ? 1.0 : 0.45;
 
+    // Keyboard: one Tab stop for the group, then Left/Right walk the segments the
+    // way WinUI's radio group does, and Space/Enter re-selects the current one.
+    // The arrows are key *character codes*, not names: U+F702 is Left, U+F703 is
+    // Right. Declared before the layout, because the segments' touch areas come
+    // later and must stay on top of it.
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (!root.enabled) {
+                return EventResult.reject;
+            }
+            if (e.text == "\u{F702}" && root.items.length > 0) {
+                root.current = root.current <= 0 ? root.items.length - 1 : root.current - 1;
+                root.selected(root.current);
+                return EventResult.accept;
+            }
+            if (e.text == "\u{F703}" && root.items.length > 0) {
+                root.current = root.current >= root.items.length - 1 ? 0 : root.current + 1;
+                root.selected(root.current);
+                return EventResult.accept;
+            }
+            if (e.text == "\n" || e.text == " ") {
+                root.selected(root.current);
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+    }
+
     row := HorizontalLayout {
         padding: 2px;
         spacing: 2px;
@@ -639,6 +693,17 @@ export component SegmentedControl inherits Rectangle {
                 }
             }
         }
+    }
+
+    // Same ring, same fade as AppButton's: opacity, not an `if`. Declared after
+    // the layout so it paints over the segments it belongs to.
+    Rectangle {
+        border-radius: Theme.radius-sm;
+        border-width: 2px;
+        border-color: Theme.focus-ring;
+        background: transparent;
+        opacity: key_focus.has-focus ? 1.0 : 0.0;
+        animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 }
 
@@ -925,7 +990,11 @@ export component InfoBar inherits Rectangle {
     callback dismissed();
 
     visible: root.title != "" || root.message != "";
-    height: body.preferred-height + Theme.space-2 * 2;
+    // One padding, not two. `body` already declares padding-top/bottom of
+    // Theme.space-2, and a layout's preferred-height *includes* its own padding,
+    // so the second `Theme.space-2 * 2` made every bar 16 px taller than its
+    // content with all of the slack under the last line.
+    height: body.preferred-height;
     border-radius: Theme.radius-sm;
     border-width: 1px;
     border-color: (root.kind == InfoKind.Error) ? Theme.danger
@@ -1533,7 +1602,13 @@ export component IllustCard inherits Rectangle {
                     y: 0px;
                     height: parent.height;
                     text: "#" + root.item.rank;
-                    color: #ffffff;
+                    // `on-accent`, not `#ffffff`: on `accent-fill` the two are not
+                    // interchangeable. Dark accent-fill is #4cb0f5, where white
+                    // measures 2.38:1 and on-accent (#101010) measures 8.01:1 — the
+                    // pair those tokens exist for. The literal stays only on the
+                    // #000000a6 fallback, which is an artwork overlay and must not
+                    // follow the theme.
+                    color: root.item.rank <= 3 ? Theme.on-accent : #ffffff;
                     font-size: Theme.font-caption;
                     font-weight: Type.semibold;
                     vertical-alignment: center;
@@ -1876,6 +1951,13 @@ export component UserCard inherits Rectangle {
 
     VerticalLayout {
         padding: Theme.space-3;
+        // The 96 px preview is placed at `parent.width - 96px` and nothing used to
+        // reserve it, so at the default 210 px tile the text column spanned 12-198
+        // over a preview at 114-210: 84 px of every name, handle and comment was
+        // painted on the artwork at half opacity. Reserving the preview plus one
+        // gutter keeps the two columns apart without changing the tile's width or
+        // Theme.artist-strip-height.
+        padding-right: Theme.space-3 + 96px;
         spacing: Theme.space-2;
 
         HorizontalLayout {
