@@ -8,6 +8,9 @@ impl App {
             app.epoch += 1;
             app.reached_end = false;
             app.page_cursor = 1;
+            // A reload is a different set of works: the ids the selection named
+            // referred to the page that just went away (F2).
+            app.selection_reset();
             // Covers requested for the feed we are leaving no longer belong to
             // any visible page; let the new feed re-plan them.
             app.loader.reset();
@@ -365,6 +368,7 @@ impl App {
             app.loader.reset();
             app.home = HomeBands::loading();
             app.feed_owner = None;
+            app.selection_reset();
             app.items.clear();
             app.columns.clear();
             app.index.clear();

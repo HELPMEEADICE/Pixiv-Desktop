@@ -11,25 +11,7 @@ pub(crate) fn install(app: &Shared) {
                 let app = shared.borrow();
                 app.suggest_resolve(word.as_str()).trim().to_string()
             };
-            if word.is_empty() {
-                let app = shared.borrow();
-                app.notify(2, "请输入关键词");
-                return;
-            }
-            {
-                let mut app = shared.borrow_mut();
-                app.suggest_close();
-                app.search_word = word.clone();
-                app.feed_owner = None;
-                let _ = app.store.push_search(&word);
-                // The list the empty state renders has to include what was just
-                // searched for; `refresh_chrome` runs again on navigate but the
-                // store write and the read are ordered here so the chip appears
-                // without a second navigation.
-                app.reload_recent_searches();
-                app.ui().set_search_text(word.clone().into());
-            }
-            App::navigate(&shared, Destination::Search);
+            App::submit_search(&shared, &word);
         });
     }
 
@@ -56,17 +38,8 @@ pub(crate) fn install(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_suggest_chosen(move |tag| {
-            let tag = tag.to_string();
-            {
-                let mut app = shared.borrow_mut();
-                app.suggest_close();
-                app.search_word = tag.clone();
-                app.feed_owner = None;
-                let _ = app.store.push_search(&tag);
-                app.reload_recent_searches();
-                app.ui().set_search_text(tag.clone().into());
-            }
-            App::navigate(&shared, Destination::Search);
+            // One implementation of "run this word", shared with the palette.
+            App::submit_search(&shared, tag.as_str());
         });
     }
 

@@ -1,11 +1,15 @@
 use super::*;
 
 mod avatars;
+mod batch;
 mod discovery;
+pub(crate) mod fixture;
 mod home;
+mod reconcile;
 mod search;
+mod selection;
 
-pub(crate) use self::{discovery::*, search::*};
+pub(crate) use self::{discovery::*, reconcile::start_reconcile, search::*};
 
 impl App {
     // ------------------------------------------------------------- feed
@@ -76,6 +80,11 @@ impl App {
             FeedUpdate::Extend { from } => self.append_columns(from),
             FeedUpdate::Rebuild => self.rebuild_columns(),
         }
+        // The capture fixtures are start-up state and are applied here, once the
+        // grid actually holds rows: a selection needs cards to select, and the
+        // suggestion panel would be closed again by the navigation that reaches
+        // this page.
+        self.apply_fixtures();
     }
 }
 
@@ -198,6 +207,7 @@ impl App {
                 .map(|(row, item_index)| {
                     let illust = &self.items[*item_index];
                     let mut item = illust_to_item(illust, self.rank_of(illust));
+                    self.mark_selected(&mut item);
                     let key = illust.id.to_string();
                     if let Some(image) = self.covers.get(&key) {
                         item.cover = image.clone();
@@ -275,6 +285,7 @@ impl App {
                 layout::clamped_aspect(illust.width, illust.height),
             );
             let mut item = illust_to_item(illust, self.rank_of(illust));
+            self.mark_selected(&mut item);
             let key = illust.id.to_string();
             if let Some(image) = self.covers.get(&key) {
                 item.cover = image.clone();

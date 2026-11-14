@@ -14,6 +14,14 @@ pub(crate) struct SuggestState {
     pub(crate) timer: slint::Timer,
     /// Focus-state rows: the server's own recommended tags, plus local history.
     pub(crate) base: Vec<Suggestion>,
+    /// The model the panel is bound to: one for the life of the process, patched
+    /// in place.
+    ///
+    /// It has to be the same model every publish, because the U6 auto-scroll is
+    /// driven by "this row *became* active" - a row that is created already
+    /// active never emits that change, so a rebuilt model would leave the cursor
+    /// off screen and the panel's scroll position at zero.
+    pub(crate) rows_model: Rc<VecModel<SuggestionItem>>,
 }
 
 impl Default for SuggestState {
@@ -27,6 +35,7 @@ impl Default for SuggestState {
             note: String::new(),
             timer: slint::Timer::default(),
             base: Vec::new(),
+            rows_model: Rc::new(VecModel::default()),
         }
     }
 }
@@ -56,10 +65,52 @@ impl App {
                 active: index as i32 == self.suggest.active,
             })
             .collect();
-        ui.set_suggestions(ModelRc::from(Rc::new(VecModel::from(rows))));
+        sync_suggestion_rows(&self.suggest.rows_model, rows);
+        // The same model every time: Slint keeps the row elements it is not told
+        // to drop, which is what lets a row report that it just became active.
+        ui.set_suggestions(ModelRc::from(self.suggest.rows_model.clone()));
         ui.set_suggest_visible(self.suggest.visible);
         ui.set_suggest_note(self.suggest.note.clone().into());
     }
+}
+
+/// Patch `model` so it holds `next`, touching only the rows that differ.
+///
+/// Returns how many rows were written. Fields are compared one by one rather than
+/// through PartialEq on a generated Slint struct, for the same reason
+/// `sync_download_rows` does it: a field added to the struct cannot silently make
+/// every row compare equal and stop the panel from updating.
+pub(crate) fn sync_suggestion_rows(
+    model: &VecModel<SuggestionItem>,
+    next: Vec<SuggestionItem>,
+) -> usize {
+    let mut touched = 0;
+    while model.row_count() > next.len() {
+        model.remove(model.row_count() - 1);
+        touched += 1;
+    }
+    for (index, row) in next.into_iter().enumerate() {
+        match model.row_data(index) {
+            Some(current) if same_suggestion_row(&current, &row) => {}
+            Some(_) => {
+                model.set_row_data(index, row);
+                touched += 1;
+            }
+            None => {
+                model.push(row);
+                touched += 1;
+            }
+        }
+    }
+    touched
+}
+
+fn same_suggestion_row(a: &SuggestionItem, b: &SuggestionItem) -> bool {
+    a.tag == b.tag
+        && a.label == b.label
+        && a.count == b.count
+        && a.local == b.local
+        && a.active == b.active
 }
 
 impl App {
@@ -220,5 +271,135 @@ impl App {
             return row.tag.clone();
         }
         typed.to_string()
+    }
+}
+
+impl App {
+    /// PIXIV_DESKTOP_FIXTURE=suggestion: the panel, with rows in it.
+    ///
+    /// U6's fix - a ScrollView and a cursor row that scrolls itself into view -
+    /// had no visual evidence, because the demo data source produces no
+    /// suggestion rows at all (publish_suggestions clears the model on an empty
+    /// query). Twelve fixed tags and a ninth-row cursor make the state
+    /// photographable without a single network request.
+    pub(crate) fn suggest_fixture(&mut self) {
+        const TAGS: [&str; 12] = [
+            "桜",
+            "メカ",
+            "和服",
+            "厚塗り",
+            "女の子",
+            "魔法",
+            "猫",
+            "瞳",
+            "空",
+            "背景",
+            "雨",
+            "オリジナル",
+        ];
+        self.suggest.rows = TAGS
+            .into_iter()
+            .map(|tag| Suggestion {
+                tag: tag.to_string(),
+                translated: None,
+                illust_count: None,
+                popularity: None,
+                source: pixiv_types::domain::SuggestionSource::Pixiv,
+            })
+            .collect();
+        self.suggest.visible = true;
+        self.suggest.note.clear();
+        self.suggest.active = -1;
+        self.publish_suggestions();
+
+        // The cursor is set one frame later, on purpose: a row that is created
+        // already active never emits the change that the panel turns into a
+        // scroll position, so publishing it active straight away would leave the
+        // panel unscrolled and prove nothing about U6's auto-scroll.
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(400),
+            || {
+                on_ui(|shared| {
+                    let Ok(mut app) = shared.try_borrow_mut() else {
+                        return;
+                    };
+                    if !app.suggest.visible || app.suggest.rows.len() < 9 {
+                        return;
+                    }
+                    app.suggest.active = 8;
+                    app.publish_suggestions();
+                });
+            },
+        );
+        std::mem::forget(timer);
+    }
+}
+
+impl App {
+    /// Run a search the way the search box does, from any entry point.
+    ///
+    /// The palette's search row and the search field must not be two behaviours:
+    /// the word is recorded in the local history, the feed owner is cleared so the
+    /// page reloads instead of reusing what it had, and the box shows what was
+    /// searched for.
+    pub(crate) fn submit_search(shared: &Shared, word: &str) {
+        let word = word.trim().to_string();
+        if word.is_empty() {
+            shared.borrow().notify(2, "请输入关键词");
+            return;
+        }
+        {
+            let mut app = shared.borrow_mut();
+            app.suggest_close();
+            app.search_word = word.clone();
+            app.feed_owner = None;
+            let _ = app.store.push_search(&word);
+            // A history change: the chips are published from the cache now, so the
+            // store write has to refresh it here (plan §2.3 R16).
+            app.reload_recent_searches();
+            app.ui().set_search_text(word.clone().into());
+        }
+        App::navigate(shared, Destination::Search);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(tag: &str, active: bool) -> SuggestionItem {
+        SuggestionItem {
+            tag: tag.into(),
+            label: tag.into(),
+            count: "".into(),
+            local: false,
+            active,
+        }
+    }
+
+    /// One cursor move writes one row. A rebuilt model would recreate every row,
+    /// and a recreated row never reports that it just became active - which is
+    /// exactly the event U6's auto-scroll listens for.
+    #[test]
+    fn the_panel_model_is_patched_not_rebuilt() {
+        let model = slint::VecModel::from(vec![item("a", false), item("b", false)]);
+        assert_eq!(
+            sync_suggestion_rows(&model, vec![item("a", false), item("b", false)]),
+            0,
+            "nothing changed, nothing is written"
+        );
+        assert_eq!(
+            sync_suggestion_rows(&model, vec![item("a", false), item("b", true)]),
+            1,
+            "the cursor moved: one row"
+        );
+        assert!(model.row_data(1).unwrap().active);
+
+        // A shorter list shrinks the tail, then patches what is left.
+        assert_eq!(sync_suggestion_rows(&model, vec![item("a", true)]), 2);
+        assert_eq!(model.row_count(), 1);
+        assert!(model.row_data(0).unwrap().active);
     }
 }

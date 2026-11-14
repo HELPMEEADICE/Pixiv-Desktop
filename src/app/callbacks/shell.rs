@@ -31,13 +31,25 @@ pub(crate) fn install(app: &Shared) {
         let shared = app.clone();
         ui.on_shell_shortcut(move |action| match action.as_str() {
             "escape" => {
-                let (page, suggesting) = {
-                    let app = shared.borrow();
-                    (app.page, app.suggest.visible)
-                };
+                // Most modal surface wins: the palette is closed inside Slint before
+                // this is reached, so what is left is the suggestion panel, then an
+                // active selection, then the page's own idea of Back.
+                let mut app = shared.borrow_mut();
+                // The page owns `selection-mode` and has already written it, so
+                // the mode is read back before Escape is allowed to act on it.
+                app.reconcile_shell_state();
+                let page = app.page;
+                let suggesting = app.suggest.visible;
+                let selecting = app.selection.active;
                 if suggesting {
-                    shared.borrow_mut().suggest_close();
+                    app.suggest_close();
+                } else if selecting {
+                    // Escape clears and exits, which is what a selection mode means
+                    // everywhere this shell borrows from.
+                    drop(app);
+                    App::exit_selection(&shared);
                 } else if page == Destination::Detail {
+                    drop(app);
                     App::travel(&shared, true);
                 }
             }
