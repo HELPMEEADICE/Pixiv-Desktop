@@ -1166,6 +1166,123 @@ and a click on the rail; and the settings capture's cache figure, until it has a
 
 ---
 
+## 16. Round nine: five surfaces, eighteen declarations, and a gate that counted the wrong thing
+
+### 16a. The gate could not tell "exists" from "reached" — and my own hypothesis was wrong
+
+The plan for this round claimed the accessibility walk ended early because its stop
+identity was a `(Name, Type)` pair: two controls sharing a name would repeat a pair and
+read as a cycle. Replaying the pair-only rule against a recorded walk reproduced every
+count exactly — 51, 38, 71, 21, 24, 14, 18, 26 — so the hypothesis was false and the
+plan was corrected (`3b908a2`).
+
+What the walk *could* not see was that three controls per page were focusable and never
+reached at all. `TextField` published its role and label from the outer frame while the
+focusable node was the `TextInput` inside it, so the tree carried two Edits with the same
+name and the second could never be Tabbed to. The account affordance published its role
+on the `TouchArea` while the focusable node was the `FocusScope` beside it. The settings
+session field had the same shape. In total: seventeen failures across eight pages, none
+of which any earlier gate could name, because no gate compared what the tree says is
+focusable with what the walk reached.
+
+The guard is now `Compare-StopCoverage` in `tools/walk-lib.ps1`: identity is
+`(Name, Type, rectangle)`, then a second pass on the pair alone so a card that scrolls
+when it takes focus is not called unreachable for moving — and the pair pass cannot hide
+a duplicate, because the exact pass has already spent one visit per rectangle.
+
+### 16b. U5: the detail page's vertical budget, written down
+
+At a 600 px window the shell spends 48 (top bar) + 26 (status bar), leaving 526. The
+page's furniture is 44 (toolbar) + 1 (rule) + 68 (thumbnail strip) = 113, so the body
+gets 413. The narrow layout draws a viewer of `min(526 × 0.55, aspect cap)` = 289 px and
+a metadata column whose intrinsic height is about 600: 889 px of content in a 413 px box.
+That is the peephole: description, tags and the stats row were unreachable, and the
+column below them was empty canvas.
+
+Only the body scrolls now; the toolbar and the strip stay. `body-height` is exposed so
+the wide layout can size the viewer from the space actually left (1260 × 800: 613, viewer
+589 — pixel-identical to before), and the narrow layout uses a shared `InfoBody` card
+instead of an `InfoPanel` that scrolls inside a page that scrolls. Two Slint limits made
+this the shape it is: a ternary cannot mix a length and `100%`, and `min-height:
+natural ? page.body-height : 160px` is a binding loop (`content-height → body.height →
+page.body-height → min-height`).
+
+At 1024×768 the page takes the narrow layout (`available-width = 792 < 900`), which is why
+that baseline moves by 22 %: the metadata is a card now and the page grows an overlay
+scrollbar. The poster area is 0 % different and the wide layout is pixel-identical — that
+is the evidence that the shift is U5 and not a gutter.
+
+### 16c. U6: the sign of a scroll offset, and why the bug had never been visible
+
+The panel scrolled its content *down*: `became-active` wrote a positive `content-y`, so
+the ninth row was pushed 213 px below the panel instead of being brought into view. In
+this shell the negative direction is downward — `PageScroll.scrolled => root.scrolled(
+root.scroll-y)` stores a negative offset. It is a negative offset now, clamped on both
+sides: the lower bound is the content's own overflow (so a short list never leaves a
+negative residue) and the upper bound is zero. The arithmetic is 34 px per row, 5 px of
+body padding, 64 px of lookahead.
+
+The reason this could not be seen for eight rounds is worth more than the fix: the
+suggestion model was rebuilt on every publish, so the row elements were new each time and
+the panel's `changed is-active` handler never fired. Patching the model in place (the
+same shape `download_rows` already uses) is what makes an active row observable at all.
+
+### 16d. A 32 px control that moved every page below it
+
+The select-mode command went into a header row whose height came from a 20 px title. A
+32 px button made the row 32 px, and every pixel of the masonry below it moved down ten
+logical px: the visual gate reported discovery 20.87 % over, rows 107..1112, every row
+about 1113 px wide — a page-shaped diff, not a control-shaped one. It is a 26 px compact
+pill now, sharing one cell with the count label in a zero-height cell so the row height
+is the title's again. Re-measured: 0.08 % (1378 px) on discovery, 1415 on ranking, 1342 on
+bookmarks, and all of it inside rows 106..127 — the header row itself.
+
+### 16e. What the round built
+
+Five surfaces the shell said it did not have: playback in the ugoira viewer (decoded once
+at the drawn width, 64 MB budget, frames derived from a monotonic clock); multi-select
+with batch download and batch bookmark on every grid page; the `Ctrl+P` palette with a
+parser for artwork and user URLs; bookmark visibility with a split button and re-tagging;
+and a download queue that pauses, resumes and reports throughput and an ETA per row.
+
+One trade-off, taken deliberately: roving focus inside a chip row is not expressible in
+Slint 1.18. A `FocusScope` with `enabled: false` still reports `IsKeyboardFocusable`, so
+the walk saw seven chips it could not reach. Every chip is a real stop now — more Tab
+presses, but reachable, and the reason is written on `TagChip` rather than discovered
+again next round.
+
+### 16f. The pixel gate has five states it never had
+
+U6 is the argument for this: a panel nothing photographed was wrong for eight rounds.
+`PIXIV_DESKTOP_FIXTURE` — named in three plans and implemented in none — now puts the
+shell in a named state (ugoira, selection, palette, suggestion, downloads), `tools/
+fixture.ps1` maps a value to a page and the captures it owes, and an unknown value exits
+77 rather than passing. `verify-visual.ps1` captures those states as ordinary pages, so
+the round's baselines are 30, ten of them new.
+
+### 16g. What the new guards can and cannot decide
+
+The coverage assertion decides reachability; it cannot decide whether a control is worth
+reaching, and it counts `Button`, `ListItem` and `Edit` — eight to ten `CheckBox` nodes per
+page are focusable and still not walked, which is recorded here rather than asserted. The
+budget is a ratchet, and one floor was lowered by hand once: settings `minFocusable`
+20 → 19, because the duplicate Edit node is gone and a floor above what the tree can
+produce is unsatisfiable rather than a guard.
+
+### 16h. What is still not verified here
+
+Focus-follow scrolling is not wired: the seam exists (`IllustCard.gained-focus` →
+`card-focused(id)` → the window), but the offset needs the card's content-space y, which
+only the page can compute, and a shared component for that is next round's first item —
+README limit 10 still says focus does not scroll. Whether Windows delivers `Ctrl`/
+`Shift` inside `TouchArea.pointer-event` was never measured; the page's own toggle is
+why the feature does not depend on the answer. A real screen reader reading this tree;
+an IME composing inside the palette; batch download and batch bookmark against a live
+account (only the cap, the de-duplication and the summary are tested); and Range resume,
+which this round deliberately does not implement.
+
+---
+
 ## Appendix: round-one limits (kept for the record)
 
 ### Not verified in round one

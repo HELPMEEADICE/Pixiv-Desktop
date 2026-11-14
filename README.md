@@ -66,7 +66,11 @@ not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
 | Image pipeline: priority queue, single-flight, memory LRU + disk tier, generated fallbacks | **Implemented** |
 | Local SQLite: search history, view history, settings, download records — and a History page that reads them back | **Implemented** |
 | Download queue: bounded concurrency, filename templates, cancel / retry, duplicate detection, atomic writes | **Implemented** |
-| Ugoira decode + timing + GIF export | **Implemented** (library + tests; see limits) |
+| Ugoira decode + timing + **in-app playback** + GIF export | **Implemented** — the viewer plays the film from a monotonic clock under a 64 MB budget, and GIF export still exists |
+| Multi-select on every grid page, with batch download and batch bookmark | **Implemented** — Ctrl/Shift-click or the page's own toggle, a 50-work cap, and a summary that names what was skipped |
+| Command palette (`Ctrl+P`): pages, actions, recent views, and a pasted artwork or user URL | **Implemented** — one parser for `/artworks/1234`, `/en/artworks/1234`, `id=`, a bare id, `/users/5678` and `@name` |
+| Bookmark visibility (public / private) with a split button and re-tagging | **Implemented** — the state is always the server's reply |
+| Download queue: pause / resume per row or all, throughput and a per-row ETA | **Implemented** — a resumed row restarts its body (see limits) |
 | Session login via system browser + `PHPSESSID` | **Implemented** |
 | Bookmark / follow mutations | **Implemented** and verified against a live account — see [`docs/NETWORK-TEST-REPORT.md`](docs/NETWORK-TEST-REPORT.md) row 8 |
 | Novel reader | **Placeholder** (structured page, opens the official page) |
@@ -111,10 +115,13 @@ worse than one that says what it does not know.
 5. **Native folder picker — implemented** (`SHBrowseForFolderW`, the resizable shell
    dialog). The chosen directory is persisted and applies to the next task immediately;
    `DownloadManager::set_directory()` exists, so no restart is needed.
-6. **Ugoira — static preview plus GIF export.** The detail page shows ugoira works as
-   still frames and offers **导出动图 GIF**, which fetches the archive, rebuilds the film
-   with `crates/pixiv-ugoira` and writes a GIF next to your other downloads. In-app
-   animated playback is still not wired into the viewer.
+6. **Ugoira — playback in the viewer, and GIF export.** The detail page decodes the
+   archive once at the width it draws (`UgoiraFilm::scaled_to_width`), publishes it
+   under a 64 MB budget that thins frames by stride and says so when it does, and
+   advances it from a monotonic clock rather than by counting ticks — a late frame
+   repaints the frame that should be on screen instead of slowing the film down.
+   **导出动图 GIF** still writes the film next to your other downloads. The demo
+   catalogue carries a 24-frame film so the state can be captured and tested offline.
 7. Ugoira export writes **animated GIF only** (WebP animation encoding is not in the
    `image` crate).
 8. **The layout is measured, not assumed.** Slint reports the content box it actually
@@ -129,19 +136,33 @@ worse than one that says what it does not know.
    5s timer reads one registry DWORD (`AppsUseLightTheme`). It stops itself the moment a
    fixed theme is chosen. A push notification would need a raw window procedure, which
    this app does not have because it keeps the native frame.
-10. **The keyboard reaches the chrome and the cards, but not everything, and the page
-    does not follow it.** Measured with real Tab keystrokes at 1024×768 on `home`:
-    stops 1–13 are the command bar and the navigation rail, 15–26 are the twelve tag
-    chips, and the first `IllustCard` is stop 27, announced as a `ListItem` with a
-    2px `Theme.focus-ring` (`tools/verify-focus.ps1`, `tools/verify-a11y.ps1`, and
-    `docs/UI-NOTES.md` § 14). What is still wrong: focus does not scroll the page, so
-    past the fold a keyboard user tabs into artwork that is not on screen, and each
-    chip costs its own stop before the grid can be reached. Neither is a design
-    choice; both are round seven's items.
+10. **The keyboard reaches every control, and the page still does not follow it.**
+    Round nine added a coverage assertion — every focusable `Button`, `ListItem` and
+    `Edit` must be walked by Tab or the page fails — and it promptly found three
+    controls per page that were focusable and unreachable (a duplicated search field,
+    the account button, the session field). All eight pages now walk every one of them
+    (`reached == required` on each). What is still wrong: focus does not scroll the
+    page, so past the fold a keyboard user tabs into artwork that is not on screen.
+    The seam exists (`IllustCard.gained-focus` → `card-focused(id)`) and the offset
+    needs the card's content-space position, which only the page can compute; that
+    component is next round's first item. Chips are real stops now — roving focus is
+    not expressible in Slint 1.18, because a `FocusScope` with `enabled: false` still
+    reports itself focusable — so a chip row costs one stop per chip.
 11. **1920×1080 at 150% DPI was not captured.** That needs a 2880×1620 physical client
    area and this screen is 2560×1600, so `tools/verify-icons.ps1` reports the clamp and
    skips instead of measuring a truncated frame. Every other size in the matrix was
    measured.
+12. **A resumed download starts its body again.** Pause frees the row's permit
+   immediately (the in-flight request is abandoned through the same cancellation a
+   cancel uses) and holds the row at its place in the queue, but nothing resumes over
+   HTTP Range: the body is fetched again from byte zero. That is why a resumed row
+   restarts rather than continues, and why a pause costs bandwidth on a metered
+   connection.
+13. **Batch actions need a session.** Batch bookmark is a sequence of real
+   `set_bookmark` calls and batch download a sequence of page lookups; without a signed-in
+   session the first reports `Unauthorized` per row and the second falls back to each
+   work's largest image. The cap, the de-duplication and the summary are unit-tested;
+   the network path has not been run against a live account for batches.
 
 ---
 
@@ -374,6 +395,12 @@ API observations: [`docs/API-NOTES.md`](docs/API-NOTES.md)
 | `Alt+←` / `Alt+→` | Back / forward through page history |
 | `Ctrl+1` … `Ctrl+7` | Home, Discover, Ranking, Bookmarks, History, Downloads, Settings (`Ctrl+,` also works for Settings) |
 | `Ctrl+R` | Refresh the page in front of you: the feed on a feed page, the work on the detail page, the queue on downloads |
+| `Ctrl+P` | Command palette: go to a page, run an action, or open a pasted artwork / user id or URL |
+| `Ctrl+A` | Select every loaded work, while the grid is in selection mode |
+| `Esc` | Close the topmost surface: the suggestion panel, then selection, then the detail page |
+| `←` / `→` | In the viewer: previous / next page (with the thumbnail strip focused as well) |
+| `Space` | On a ugoira work: play / pause the film |
+| `Ctrl+click` / `Shift+click` | On a card: toggle it into the selection / select the range from the last one |
 | wheel | Zoom the viewer, anchored at the cursor |
 | double-click | Toggle zoom at the cursor |
 | `F` | Fit to window |
