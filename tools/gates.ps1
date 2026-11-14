@@ -20,8 +20,21 @@
 # artifacts to produce and therefore always actually lints. A deliberate
 # bool_comparison probe proved the wrapper reports real lints.
 #
+# Why a path gate runs before anything is compiled: F8. A directory literally
+# named %SystemDrive% sat in this repository root, holding seven files under
+# %SystemDrive%\ProgramData\Microsoft\Windows\Caches\ - a path some tool wrote
+# from an unexpanded variable, and nothing noticed for six rounds. .gitignore
+# learned the rule only after a human read "?? %SystemDrive%/" in git status,
+# which is one round too late: a path that looks like a variable and is not one
+# has never been a legitimate artefact. The gate is narrow on purpose - one
+# question, does any path in the worktree contain a '%'. It can decide that the
+# class is absent right now. It cannot decide whether a path is tracked, who
+# wrote it, or whether a '%' is legitimate somewhere unsuspected: '%' is legal
+# in a Windows filename, so this is a hygiene rule for *this* tree, not a claim
+# about anyone else's.
+#
 # Usage:
-#   pwsh -File tools/gates.ps1                 # fmt, test, lint, release build
+#   pwsh -File tools/gates.ps1                 # paths, fmt, test, lint, release build
 #   pwsh -File tools/gates.ps1 -SkipBuild      # the fast loop
 #   pwsh -File tools/gates.ps1 -Lint Clippy    # force the toolchain clippy
 #   pwsh -File tools/gates.ps1 -Ui             # also run the measured UI gates
@@ -30,6 +43,27 @@
 # reads the UI Automation tree, presses real Tab keys and captures the screen. On
 # a CI runner without a session it cannot work, and a gate that fails for a reason
 # unrelated to the change is worse than a gate that is not run there.
+#
+# What the two later UI gates can and cannot decide, in the same terms as the
+# others (docs/UI-NOTES.md 12h):
+#   * tools/verify-focus.ps1 - measures that a Tab stop is *visible*. It presses
+#     real Tab keys and, for every stop on three pages, reads the stop's UI
+#     Automation rectangle and counts pixels of the colour ui/theme.slint declares
+#     for focus inside it. It can decide that a reached stop draws the 2px
+#     Theme.focus-ring that components.slint declares - the thing UI-NOTES 12a
+#     fixed and nothing guarded. Measured limit, not a design choice: the ten
+#     stops it walks are the command bar and the rail on every page, so it proves
+#     the chrome and does not yet reach a card. It cannot decide that a ring reads
+#     well or that the Tab *order* is sensible.
+#   * tools/verify-dpi.ps1 - the scale ladder. It can decide that the app starts
+#     at 100/125/150/200 %, that the shell invariant holds at each, and that the
+#     cover decode target never falls below the physical card size at that scale.
+#     It cannot judge rendering quality: the pixels above 150 % still land on the
+#     same 2560 physical pixels of this display.
+#
+# Exit code 77 from a gate means "this host cannot run this gate" - no desktop, no
+# window, UI Automation unavailable - and is reported as SKIP, neither PASS nor
+# FAIL, so the summary stays honest in both directions.
 param(
     [ValidateSet("Auto", "Driver", "Clippy", "Off")]
     [string]$Lint = "Auto",
@@ -53,14 +87,78 @@ function Invoke-Gate {
     & $Body
     $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
     $watch.Stop()
+    # 77 is the documented "cannot run here" code (see the header). It is a
+    # third verdict rather than a pass so that a host which silently stops
+    # running a gate cannot look like a host that passed it.
+    $verdict = if ($code -eq 0) { "PASS" } elseif ($code -eq 77) { "SKIP" } else { "FAIL" }
     $script:results += [pscustomobject]@{
         Gate    = $Name
         Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
-        Verdict = if ($code -eq 0) { "PASS" } else { "FAIL" }
+        Verdict = $verdict
     }
-    if ($code -ne 0) { $script:failed = $true }
+    if ($verdict -eq "FAIL") { $script:failed = $true }
     return $code
 }
+
+<#
+  Walk the worktree and report every path whose name contains a literal percent sign.
+
+  The walk prunes two trees and says why: "target" is build output this repository
+  generates itself (a dependency fixture may legitimately carry a percent sign), and
+  ".git" is not part of the worktree a commit would add.
+
+  A match stops the descent: the offender reported is then the top of the tree that
+  was written wrong, not the forty files inside it.
+#>
+function Find-PercentPaths {
+    param([string]$Root, [string[]]$Prune = @("target", ".git"))
+    $hits = New-Object System.Collections.Generic.List[string]
+    $dirs = 0
+    $files = 0
+    $queue = New-Object System.Collections.Generic.Queue[string]
+    $queue.Enqueue($Root)
+    while ($queue.Count -gt 0) {
+        $dir = $queue.Dequeue()
+        try {
+            $entries = [System.IO.Directory]::EnumerateFileSystemEntries($dir)
+        }
+        catch {
+            continue   # an unreadable directory cannot hide a path this tree owns
+        }
+        foreach ($entry in $entries) {
+            $name = [System.IO.Path]::GetFileName($entry)
+            if ($name.Contains('%')) { $hits.Add($entry); continue }
+            if ([System.IO.Directory]::Exists($entry)) {
+                if ($Prune -contains $name) { continue }
+                $dirs++
+                $queue.Enqueue($entry)
+            }
+            else {
+                $files++
+            }
+        }
+    }
+    return [pscustomobject]@{ Hits = $hits; Dirs = $dirs; Files = $files }
+}
+
+# ---- 0. worktree hygiene: no path was written from an unexpanded variable.
+# First, because it is one directory walk and this is the kind of mistake that
+# should stop a run before a compiler is started at all. ----
+Invoke-Gate "worktree paths contain no literal percent sign (F8)" {
+    $scan = Find-PercentPaths -Root (Get-Location).Path
+    if ($scan.Hits.Count -eq 0) {
+        Write-Host ("  {0} directories, {1} files: no percent sign in any path" -f $scan.Dirs, $scan.Files)
+        $global:LASTEXITCODE = 0
+    }
+    else {
+        $rootPrefix = (Get-Location).Path + [System.IO.Path]::DirectorySeparatorChar
+        $scan.Hits | Select-Object -First 20 | ForEach-Object {
+            Write-Host ("  FAIL {0}" -f $_.Replace($rootPrefix, "")) -ForegroundColor Red
+        }
+        Write-Host ("  {0} path(s) read as an unexpanded variable; rename or remove them" -f $scan.Hits.Count) -ForegroundColor Red
+        $global:LASTEXITCODE = 1
+    }
+} | Out-Null
 
 # ---- 1. formatting: cheap, and the only gate that is fixed mechanically ----
 Invoke-Gate "cargo fmt --check" { cargo fmt --all -- --check 2>&1 | Out-Host } | Out-Null
@@ -125,6 +223,16 @@ if (-not $failed -and $Ui) {
             pwsh -File tools/verify-visual.ps1 2>&1 | Select-Object -Last 30 | Out-Host
         } | Out-Null
     }
+    if (-not $failed) {
+        Invoke-Gate "tools/verify-focus.ps1" {
+            pwsh -File tools/verify-focus.ps1 2>&1 | Select-Object -Last 40 | Out-Host
+        } | Out-Null
+    }
+    if (-not $failed) {
+        Invoke-Gate "tools/verify-dpi.ps1" {
+            pwsh -File tools/verify-dpi.ps1 2>&1 | Select-Object -Last 40 | Out-Host
+        } | Out-Null
+    }
 }
 
 # ---- 5. the shipped artefact. Last, because it is by far the slowest. ----
@@ -137,7 +245,10 @@ if (-not $failed -and -not $SkipBuild) {
 Write-Host ""
 $results | Format-Table -AutoSize | Out-String -Width 120 | Write-Host
 $total = ($results | Measure-Object -Property Seconds -Sum).Sum
-$bad = @($results | Where-Object { $_.Verdict -ne "PASS" })
+# A SKIP is not a failure and must not read as a pass either: 77 says this host
+# cannot run the gate, so both counts are printed.
+$bad = @($results | Where-Object { $_.Verdict -eq "FAIL" })
+$skipped = @($results | Where-Object { $_.Verdict -eq "SKIP" })
 $colour = if ($bad.Count) { "Red" } else { "Green" }
-Write-Host ("{0} gates, {1} failed, {2:N1}s total" -f $results.Count, $bad.Count, $total) -ForegroundColor $colour
+Write-Host ("{0} gates, {1} failed, {2} skipped (exit 77 = cannot run on this host), {3:N1}s total" -f $results.Count, $bad.Count, $skipped.Count, $total) -ForegroundColor $colour
 if ($bad.Count) { exit 1 }

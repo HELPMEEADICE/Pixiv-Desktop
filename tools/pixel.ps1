@@ -154,6 +154,108 @@ function Get-InkBox {
     }
 }
 
+
+<#
+  Count pixels within -Tolerance of an absolute colour inside a region, and
+  report how many there are and where they are.
+
+  Get-InkBox cannot answer this: it compares every pixel against a reference
+  pixel sampled outside the region, which finds "something was drawn here", not
+  "this specific colour was drawn here". A focus ring has to be matched by its
+  own value, because the surface under it changes with the theme.
+#>
+function Get-ColorBox {
+    param(
+        $Map,
+        [Parameter(Mandatory)][int]$R,
+        [Parameter(Mandatory)][int]$G,
+        [Parameter(Mandatory)][int]$B,
+        [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y,
+        [Parameter(Mandatory)][int]$W, [Parameter(Mandatory)][int]$H,
+        [int]$Tolerance = 10
+    )
+    $bytes = $Map.Bytes
+    $stride = $Map.Stride
+    $x0 = [math]::Max(0, $X)
+    $y0 = [math]::Max(0, $Y)
+    $x1 = [math]::Min($Map.Width - 1, $X + $W - 1)
+    $y1 = [math]::Min($Map.Height - 1, $Y + $H - 1)
+    if ($x1 -lt $x0 -or $y1 -lt $y0) { return $null }
+    $count = 0
+    $minX = [int]::MaxValue; $minY = [int]::MaxValue; $maxX = -1; $maxY = -1
+    for ($row = $y0; $row -le $y1; $row++) {
+        $base = $row * $stride
+        for ($col = $x0; $col -le $x1; $col++) {
+            $o = $base + $col * 4
+            if ([math]::Abs($bytes[$o + 2] - $R) -gt $Tolerance) { continue }
+            if ([math]::Abs($bytes[$o + 1] - $G) -gt $Tolerance) { continue }
+            if ([math]::Abs($bytes[$o] - $B) -gt $Tolerance) { continue }
+            $count++
+            if ($col -lt $minX) { $minX = $col }
+            if ($col -gt $maxX) { $maxX = $col }
+            if ($row -lt $minY) { $minY = $row }
+            if ($row -gt $maxY) { $maxY = $row }
+        }
+    }
+    if ($count -eq 0) { return $null }
+    return [pscustomobject]@{
+        Count = $count
+        X     = $minX
+        Y     = $minY
+        W     = $maxX - $minX + 1
+        H     = $maxY - $minY + 1
+    }
+}
+
+<#
+  The most frequent colour in a region.
+
+  A dimmed stroke has to be matched as a blend of its own colour with whatever is
+  under it, and "whatever is under it" cannot be sampled from one guessed pixel:
+  a rounded corner, a 1px rule or a neighbour's border can be exactly there. The
+  mode of the region is the surface, because a 2px stroke is never the majority
+  of the box it outlines.
+#>
+function Get-DominantColor {
+    param(
+        $Map,
+        [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y,
+        [Parameter(Mandatory)][int]$W, [Parameter(Mandatory)][int]$H,
+        [int]$Sample = 1
+    )
+    # The step and the bitmap's row stride must not be the same name: PowerShell
+    # variables are case-insensitive, so "$Stride = $Map.Stride" silently replaced
+    # the sampling step with a row stride of 6232 and made the histogram nonsense.
+    $bytes = $Map.Bytes
+    $rowStride = $Map.Stride
+    $x0 = [math]::Max(0, $X)
+    $y0 = [math]::Max(0, $Y)
+    $x1 = [math]::Min($Map.Width - 1, $X + $W - 1)
+    $y1 = [math]::Min($Map.Height - 1, $Y + $H - 1)
+    if ($x1 -lt $x0 -or $y1 -lt $y0) { return $null }
+    $hist = @{}
+    for ($row = $y0; $row -le $y1; $row += $Sample) {
+        $base = $row * $rowStride
+        for ($col = $x0; $col -le $x1; $col += $Sample) {
+            $o = $base + $col * 4
+            $key = ([int]$bytes[$o + 2] -shl 16) -bor ([int]$bytes[$o + 1] -shl 8) -bor [int]$bytes[$o]
+            if ($hist.ContainsKey($key)) { $hist[$key]++ } else { $hist[$key] = 1 }
+        }
+    }
+    $best = $null
+    $bestCount = -1
+    foreach ($entry in $hist.GetEnumerator()) {
+        if ($entry.Value -gt $bestCount) { $bestCount = $entry.Value; $best = $entry.Key }
+    }
+    if ($null -eq $best) { return $null }
+    return [pscustomobject]@{
+        R     = ($best -shr 16) -band 0xFF
+        G     = ($best -shr 8) -band 0xFF
+        B     = $best -band 0xFF
+        Count = $bestCount
+    }
+}
+
 <# Colour at a point, for diagnostics. #>
 function Get-Pixel {
     param($Map, [int]$X, [int]$Y)

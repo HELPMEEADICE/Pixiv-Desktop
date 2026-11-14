@@ -110,6 +110,39 @@ function Save-Shot {
   return $path
 }
 
+<#
+  Copy the window rectangle - the frame included - and return where it landed on
+  screen.
+
+  Save-Shot writes a fixed directory and crops to the client area, which is right
+  for baselines and wrong for coordinate mapping: a UI Automation bounding
+  rectangle is in *screen* pixels, so a window-rect capture turns it into a bitmap
+  coordinate with one subtraction and no knowledge of the frame width.
+#>
+function Save-WindowShot {
+  param([Parameter(Mandatory)][string]$Path, [IntPtr]$Handle = [IntPtr]::Zero)
+  if ($Handle -eq [IntPtr]::Zero) { $Handle = Get-AppWindow }
+  if ($null -eq $Handle -or $Handle -eq [IntPtr]::Zero) { throw "pixiv-desktop window not found" }
+  $rect = New-Object Gui+RECT
+  [void][Gui]::GetWindowRect($Handle, [ref]$rect)
+  $w = $rect.Right - $rect.Left
+  $h = $rect.Bottom - $rect.Top
+  if ($w -le 0 -or $h -le 0) { throw "window has no rectangle" }
+  $dir = Split-Path -Parent $Path
+  if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+  $bmp = New-Object System.Drawing.Bitmap($w, $h)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $src = [Gui]::GetDC([IntPtr]::Zero)
+  $dst = $g.GetHdc()
+  [void][Gui]::BitBlt($dst, 0, 0, $w, $h, $src, $rect.Left, $rect.Top, 0x00CC0020)
+  $g.ReleaseHdc($dst)
+  [void][Gui]::ReleaseDC([IntPtr]::Zero, $src)
+  $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+  $g.Dispose()
+  $bmp.Dispose()
+  return [pscustomobject]@{ Left = $rect.Left; Top = $rect.Top; Width = $w; Height = $h; Path = $Path }
+}
+
 function Wait-ForName {
   param([string]$Pattern, [int]$TimeoutSec = 30)
   $deadline = (Get-Date).AddSeconds($TimeoutSec)
