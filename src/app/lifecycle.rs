@@ -160,6 +160,32 @@ impl App {
         // One row model for the life of the process: `push_downloads` patches it
         // rather than swapping it.
         let download_rows = Rc::new(VecModel::<DownloadRow>::default());
+        // Same rule for the recent-search chips: one model, patched when the
+        // history changes, published on every navigation without a store read.
+        let recent_searches = Rc::new(VecModel::<slint::SharedString>::default());
+        // One store read at startup fills the cache `refresh_chrome` publishes from;
+        // after this the words are re-read only when the history changes.
+        let recent_words = store.search_history(8).unwrap_or_default();
+        recent_searches.set_vec(
+            recent_words
+                .iter()
+                .cloned()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>(),
+        );
+
+        // `record_view` takes the store mutex and scans MAX(seq); on the frame
+        // thread that was a visible cost per opened work. One bounded queue, one
+        // consumer, so the rows are still written in the order they were seen.
+        let (view_queue, mut view_rx) = tokio::sync::mpsc::channel::<HistoryEntry>(VIEW_QUEUE);
+        {
+            let store = store.clone();
+            rt.spawn(async move {
+                while let Some(entry) = view_rx.recv().await {
+                    let _ = store.record_view(&entry);
+                }
+            });
+        }
 
         // `PIXIV_DESKTOP_DEMO=1` forces the demo data source, for the capture
         // harness. Two properties are needed and both fall out of ignoring the
@@ -194,6 +220,7 @@ impl App {
             ui.set_authenticated(session.is_authenticated());
             ui.set_session_user(session.user_name.clone().unwrap_or_default().into());
             ui.set_download_rows(ModelRc::from(download_rows.clone()));
+            ui.set_recent_searches(ModelRc::from(recent_searches.clone()));
             ui.set_download_directory(download_dir.display().to_string().into());
             ui.set_download_template(template.clone().into());
             ui.set_template_input(template.into());
@@ -224,9 +251,10 @@ impl App {
             download_dir,
             page: Destination::Home,
             route: Route::plain(Destination::Home),
-            history: History::new(32),
+            history: History::new(HISTORY_LIMIT),
             feed_owner: None,
-            scroll: Vec::new(),
+            scroll: HashMap::new(),
+            scroll_order: VecDeque::new(),
             measured_width: 0.0,
             geometry: GridGeometry::for_width(858.0),
             items: Vec::new(),
@@ -250,6 +278,9 @@ impl App {
             author_avatars: HashMap::new(),
             author_avatar_lookup: HashSet::new(),
             account_avatar: None,
+            recent_words,
+            recent_searches,
+            view_queue,
             detail: None,
             detail_author_avatar_url: None,
             detail_pages: Vec::new(),

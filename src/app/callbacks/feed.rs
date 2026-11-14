@@ -20,6 +20,9 @@ pub(crate) fn install(app: &Shared) {
                 app.search_word = tag.clone();
                 app.feed_owner = None;
                 let _ = app.store.push_search(&tag);
+                // A history change: the chips are published from the cache now, so
+                // the store write has to refresh it here (plan §2.3 R16).
+                app.reload_recent_searches();
             }
             App::navigate(&shared, Destination::Search);
         });

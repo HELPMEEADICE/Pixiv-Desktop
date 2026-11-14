@@ -13,6 +13,21 @@ impl App {
 }
 
 impl App {
+    /// Hand one view to the store without blocking the frame.
+    ///
+    /// The queue is bounded and single-consumed: rows are written in the order they
+    /// were opened, because a history page ordered by anything else would be a
+    /// different history. A full queue means the database is 64 rows behind and the
+    /// newest view is dropped - `record_view` is an upsert by illustration id, so the
+    /// next view of the same work still lands (plan §2.3 R16).
+    pub(crate) fn record_view(&self, entry: HistoryEntry) {
+        if self.view_queue.try_send(entry).is_err() {
+            tracing::debug!("view-history queue is full; dropping one row");
+        }
+    }
+}
+
+impl App {
     /// Load one work into the detail page.
     ///
     /// push_history is false when the route is already on the stack (Back and
@@ -33,8 +48,11 @@ impl App {
             app.page = Destination::Detail;
             app.detail_epoch += 1;
             let epoch = app.detail_epoch;
+            // Opening a work leaves the page behind it exactly the way a fresh
+            // navigation does, tooltip included: this is the third exit path and it
+            // had the same missing reset (plan §2.3 R20).
+            app.leave_page(target);
             let ui = app.ui();
-            ui.set_page(Destination::Detail);
             ui.set_detail_state(1);
             ui.set_detail_pages(ModelRc::default());
             ui.set_detail_page_index(0);
@@ -198,7 +216,9 @@ impl App {
         // History page would show cards that can never load. The two modes stay
         // separate, which is the whole point of the demo badge.
         if self.mode == Mode::Real {
-            let _ = self.store.record_view(&HistoryEntry {
+            // Queued, not written here: `record_view` takes the store mutex and
+            // scans MAX(seq) on the thread that paints (plan §2.3 R16).
+            self.record_view(HistoryEntry {
                 illust_id: illust.id.to_string(),
                 title: illust.title.clone(),
                 author: illust.author.name.clone(),

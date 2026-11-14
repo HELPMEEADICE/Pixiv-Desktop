@@ -6,9 +6,16 @@ pub(crate) struct ProfileState {
     pub(crate) profile: UserProfile,
     /// Every work id, newest first.
     pub(crate) ids: Vec<Id>,
-    /// How many ids have been requested so far.
+    /// How many ids have been requested and answered so far.
     pub(crate) loaded: usize,
     pub(crate) works: Vec<Illust>,
+    /// Why the id list could not be read, when it could not.
+    ///
+    /// An empty `ids` has two very different meanings and the page used to collapse
+    /// them: "this account has published nothing" and "the request for its works
+    /// failed" both rendered as 这个用户还没有公开作品。 (plan §2.3 R18). The message
+    /// is kept here so `publish_profile` can say which one it is.
+    pub(crate) ids_error: Option<String>,
 }
 
 impl App {
@@ -20,7 +27,8 @@ impl App {
             let mut app = shared.borrow_mut();
             let route = app.route;
             let target = route.user_id().map(Id).or(app.session.user_id);
-            app.epoch += 1;
+            // One bump per load. This incremented twice, which was harmless for the
+            // epoch comparison and made the counter describe nothing (plan §2.3 R20).
             app.epoch += 1;
             let epoch = app.epoch;
             app.profile = None;
@@ -59,17 +67,14 @@ impl App {
         };
 
         let Some(target) = target else {
-            let app = shared.borrow_mut();
-            app.ui().set_profile_state(BAND_ERROR);
-            app.ui()
-                .set_profile_message("没有可显示的用户：链接里没有用户 ID，也没有登录账号".into());
+            let mut app = shared.borrow_mut();
+            app.fail_profile("没有可显示的用户：链接里没有用户 ID，也没有登录账号");
             return;
         };
 
         let Some(client) = client else {
-            let app = shared.borrow_mut();
-            app.ui().set_profile_state(BAND_ERROR);
-            app.ui().set_profile_message("没有可用的网络客户端".into());
+            let mut app = shared.borrow_mut();
+            app.fail_profile("没有可用的网络客户端");
             return;
         };
 
@@ -81,24 +86,33 @@ impl App {
                 Err(error) => {
                     let message = error.to_string();
                     on_ui(move |shared| {
-                        let Ok(app) = shared.try_borrow_mut() else {
+                        let Ok(mut app) = shared.try_borrow_mut() else {
                             return;
                         };
                         if app.epoch != epoch || app.route != route {
                             return;
                         }
-                        app.ui().set_profile_state(BAND_ERROR);
-                        app.ui().set_profile_message(message.clone().into());
-                        app.ui().set_grid_state(BAND_ERROR);
-                        app.ui().set_grid_state_title("无法载入用户主页".into());
-                        app.ui().set_grid_message(message.into());
+                        app.fail_profile(&message);
                     });
                     return;
                 }
             };
-            let ids = ids.unwrap_or_default();
+            // A failed id list is not an empty account. `unwrap_or_default` turned
+            // the error into "no works", which the page then rendered as a statement
+            // about the artist (plan §2.3 R18). Keep the Result and carry the real
+            // message to the page.
+            let (ids, ids_error) = match ids {
+                Ok(ids) => (ids, None),
+                Err(error) => (Vec::new(), Some(error.to_string())),
+            };
             let first: Vec<Id> = ids.iter().take(PROFILE_PAGE).copied().collect();
-            let works = client.user_works(target, &first).await.unwrap_or_default();
+            // Nothing to ask for when the id list itself failed: an empty request
+            // would answer "no works" and overwrite the reason with a second lie.
+            let works = if ids_error.is_some() {
+                Vec::new()
+            } else {
+                client.user_works(target, &first).await.unwrap_or_default()
+            };
 
             on_ui(move |shared| {
                 let Ok(mut app) = shared.try_borrow_mut() else {
@@ -122,11 +136,22 @@ impl App {
                     ids,
                     loaded: first.len(),
                     works: works.clone(),
+                    ids_error,
                 };
                 app.profile = Some(state);
                 app.feed_owner = Some(route);
                 app.publish_profile();
-                app.render_feed(works, false);
+                if let Some(message) = app
+                    .profile
+                    .as_ref()
+                    .and_then(|state| state.ids_error.clone())
+                {
+                    // The header loaded, the works did not: say so on both bands
+                    // instead of leaving the grid on a skeleton with no way back.
+                    app.fail_profile_works(&message);
+                } else {
+                    app.render_feed(works, false);
+                }
                 app.publish_profile();
                 app.spawn_avatars(avatar_urls);
                 app.spawn_profile_background();
@@ -178,6 +203,35 @@ impl App {
                 app.ui().set_profile_background(image);
             });
         });
+    }
+}
+
+impl App {
+    /// A user page that could not be loaded at all.
+    ///
+    /// Both bands, not just the header: the works grid used to stay on
+    /// `BAND_LOADING`, which is a skeleton with no retry and no explanation (plan
+    /// §2.3 R20). The header band draws its own retry at state 3
+    /// (`ui/pages/profile.slint:306-317`) and Ctrl+R reaches the same reload through
+    /// `grid-retry`, so the grid takes no action label of its own: the grid-action
+    /// slot navigates to Settings, and that is not a retry.
+    pub(crate) fn fail_profile(&mut self, message: &str) {
+        self.fail_profile_works(message);
+        let ui = self.ui();
+        ui.set_profile_state(BAND_ERROR);
+        ui.set_profile_message(message.into());
+    }
+
+    /// The works half of the same failure, in the page's own words.
+    pub(crate) fn fail_profile_works(&mut self, message: &str) {
+        let ui = self.ui();
+        ui.set_grid_state(BAND_ERROR);
+        ui.set_grid_state_title("无法载入用户主页".into());
+        ui.set_grid_message(message.into());
+        ui.set_grid_action_label("".into());
+        ui.set_grid_columns(ModelRc::default());
+        self.columns.clear();
+        self.index.clear();
     }
 }
 
@@ -256,11 +310,13 @@ impl App {
             BAND_OK
         });
         if state.works.is_empty() {
+            // Three cases, not two: a failed request for the id list must not be
+            // dressed up as a statement about the account (plan §2.3 R18).
             ui.set_profile_message(
-                if total == 0 {
-                    "这个用户还没有公开作品。"
-                } else {
-                    "作品载入失败，点击重试。"
+                match (state.ids_error.as_deref(), total) {
+                    (Some(message), _) => message.to_string(),
+                    (None, 0) => "这个用户还没有公开作品。".to_string(),
+                    (None, _) => "作品载入失败，点击重试。".to_string(),
                 }
                 .into(),
             );
@@ -271,6 +327,9 @@ impl App {
 impl App {
     pub(crate) fn profile_empty_state(&self) -> i32 {
         match self.profile.as_ref() {
+            // An empty list that came from a failed request is an error, not an
+            // empty account: the retry affordance has to be there (plan §2.3 R18).
+            Some(state) if state.ids_error.is_some() => BAND_ERROR,
             Some(state) if state.ids.is_empty() => BAND_EMPTY,
             Some(_) => BAND_ERROR,
             None => BAND_LOADING,
@@ -315,7 +374,11 @@ impl App {
             return;
         };
         rt.spawn(async move {
-            let works = client.user_works(target, &next).await.unwrap_or_default();
+            let requested = next.len();
+            let outcome = client
+                .user_works(target, &next)
+                .await
+                .map_err(|error| error.to_string());
             on_ui(move |shared| {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
@@ -325,27 +388,79 @@ impl App {
                 if app.epoch != epoch || app.page != Destination::UserProfile {
                     return;
                 }
-                let urls: Vec<String> = works
-                    .iter()
-                    .filter_map(|illust| illust.author.avatar.clone())
-                    .collect();
-                let requested = next.len();
-                let (exhausted, all_works) = {
+                let urls: Vec<String> = outcome
+                    .as_ref()
+                    .map(|works| {
+                        works
+                            .iter()
+                            .filter_map(|illust| illust.author.avatar.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let applied = {
                     let Some(state) = app.profile.as_mut() else {
                         return;
                     };
-                    state.loaded += requested;
-                    pixiv_types::domain::append_unique(&mut state.works, works);
-                    (state.loaded >= state.ids.len(), state.works.clone())
+                    apply_profile_more(state, requested, outcome)
                 };
-                if exhausted {
+                if applied.exhausted {
                     app.reached_end = true;
                 }
                 app.publish_profile();
-                app.render_feed(all_works, false);
+                match applied.error {
+                    Some(message) => app.notify(3, format!("加载更多失败：{message}")),
+                    // Only the rows this page added, appended: `self.items` already
+                    // holds everything above them, and handing over the whole list
+                    // with append = false rebuilt every column (plan §2.3 R10).
+                    None => app.render_feed(applied.added, true),
+                }
                 app.spawn_avatars(urls);
             });
         });
+    }
+}
+
+/// What one "load more" attempt did to the page state.
+pub(crate) struct MoreApplied {
+    /// The rows this attempt actually added, in feed order.
+    pub(crate) added: Vec<Illust>,
+    /// True when the end of the id list has been reached.
+    pub(crate) exhausted: bool,
+    /// The server's message, when the page did not come back.
+    pub(crate) error: Option<String>,
+}
+
+/// Apply one "load more" answer to a user page.
+///
+/// The cursor only moves on success, and only by the slice that was *answered*.
+/// `state.loaded += requested` used to run on both branches, so one failed page
+/// marked that slice of the artist's works as fetched for the rest of the session:
+/// the page silently under-reported and the missing rows could never be requested
+/// again (plan §2.3 R19). A successful page consumes every id it asked about - a
+/// work the server returns nothing for (private, deleted) is answered too, and
+/// re-requesting that slice would repeat the same page forever - while a failed
+/// one consumes nothing, so the next attempt asks for exactly the same slice.
+pub(crate) fn apply_profile_more(
+    state: &mut ProfileState,
+    requested: usize,
+    outcome: Result<Vec<Illust>, String>,
+) -> MoreApplied {
+    match outcome {
+        Ok(works) => {
+            let before = state.works.len();
+            pixiv_types::domain::append_unique(&mut state.works, works);
+            state.loaded = (state.loaded + requested).min(state.ids.len());
+            MoreApplied {
+                added: state.works[before..].to_vec(),
+                exhausted: state.loaded >= state.ids.len(),
+                error: None,
+            }
+        }
+        Err(message) => MoreApplied {
+            added: Vec::new(),
+            exhausted: false,
+            error: Some(message),
+        },
     }
 }
 
@@ -402,5 +517,80 @@ impl App {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work(id: u64) -> Illust {
+        history_illust(&pixiv_store::HistoryEntry {
+            illust_id: id.to_string(),
+            title: format!("w{id}"),
+            author: "a".into(),
+            thumb_url: format!("https://i.pximg.net/{id}_p0_master1200.jpg"),
+            viewed_at: 0,
+        })
+    }
+
+    /// 48 ids, the first 24 already shown.
+    fn page_state() -> ProfileState {
+        ProfileState {
+            user: Id(7),
+            profile: UserProfile::default(),
+            ids: (1..=48).map(Id).collect(),
+            loaded: 24,
+            works: (1..=24).map(work).collect(),
+            ids_error: None,
+        }
+    }
+
+    /// The cursor must not move when the page never arrived.
+    ///
+    /// `state.loaded += requested` ran on both branches, so one failed "load more"
+    /// marked that slice of the artist's works as already fetched and the page
+    /// under-reported them for the rest of the session (plan §2.3 R19).
+    #[test]
+    fn a_failed_load_more_does_not_move_the_cursor() {
+        let mut state = page_state();
+        let applied = apply_profile_more(&mut state, 24, Err("network".to_string()));
+
+        assert_eq!(state.loaded, 24, "the same slice is asked for again");
+        assert_eq!(state.works.len(), 24, "nothing was appended");
+        assert!(applied.added.is_empty());
+        assert!(!applied.exhausted);
+        assert_eq!(applied.error.as_deref(), Some("network"));
+
+        // And the retry does ask for exactly the slice that failed.
+        let next: Vec<Id> = state
+            .ids
+            .iter()
+            .skip(state.loaded)
+            .take(24)
+            .copied()
+            .collect();
+        assert_eq!(next.first().map(|id| id.get()), Some(25));
+    }
+
+    /// A page that arrived advances the cursor by the slice it answered, and hands
+    /// back only the rows it added - the shape `render_feed(.., true)` needs.
+    #[test]
+    fn a_page_that_arrived_advances_the_cursor_and_returns_only_new_rows() {
+        let mut state = page_state();
+        // 23 new works, and one the page already showed.
+        let mut page: Vec<Illust> = (25..=47).map(work).collect();
+        page.push(work(3));
+        let applied = apply_profile_more(&mut state, 24, Ok(page));
+
+        assert_eq!(state.loaded, 48, "the answered slice is consumed");
+        assert_eq!(state.works.len(), 47, "the duplicate is not appended twice");
+        assert_eq!(applied.added.len(), 23, "only the new rows are handed over");
+        assert_eq!(
+            applied.added.first().map(|illust| illust.id.get()),
+            Some(25)
+        );
+        assert!(applied.exhausted, "the id list is now fully shown");
+        assert!(applied.error.is_none());
     }
 }

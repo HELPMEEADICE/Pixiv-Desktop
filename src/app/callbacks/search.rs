@@ -26,7 +26,7 @@ pub(crate) fn install(app: &Shared) {
                 // searched for; `refresh_chrome` runs again on navigate but the
                 // store write and the read are ordered here so the chip appears
                 // without a second navigation.
-                app.refresh_recent_searches();
+                app.reload_recent_searches();
                 app.ui().set_search_text(word.clone().into());
             }
             App::navigate(&shared, Destination::Search);
@@ -63,7 +63,7 @@ pub(crate) fn install(app: &Shared) {
                 app.search_word = tag.clone();
                 app.feed_owner = None;
                 let _ = app.store.push_search(&tag);
-                app.refresh_recent_searches();
+                app.reload_recent_searches();
                 app.ui().set_search_text(tag.clone().into());
             }
             App::navigate(&shared, Destination::Search);

@@ -5,14 +5,24 @@ pub(crate) fn install(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_download_choose_directory(move || {
-            if let Some(ui) = shared.borrow().ui.upgrade().as_ref() {
-                let _ = ui; // keep the handle alive across the modal dialog
-            }
-            let mut app = shared.borrow_mut();
+            // `pick_folder` is a modal Win32 dialog that pumps its own message loop
+            // while the main window stays enabled, so no borrow of `App` may be alive
+            // across it: a click that lands during the loop would be a
+            // BorrowMutError panic. Take nothing, ask, then borrow and apply
+            // (plan §2.3 R12).
+            //
+            // The window handle is held for the duration of the loop, which is what
+            // the old code was doing with a live `App` borrow; holding the handle is
+            // not holding the borrow.
+            let _window = shared.borrow().ui.upgrade();
             let Some(dir) = crate::picker::pick_folder("选择下载保存目录") else {
                 return;
             };
-            if std::fs::create_dir_all(&dir).is_err() {
+            let created = std::fs::create_dir_all(&dir).is_ok();
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            if !created {
                 app.notify(3, "无法使用该目录");
                 return;
             }

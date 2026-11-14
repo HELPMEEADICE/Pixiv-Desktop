@@ -76,6 +76,62 @@ impl App {
     }
 }
 
+/// The same one-row patch for a band of cards, which carries the author avatar
+/// per row (`IllustItem.author-avatar-url`).
+///
+/// The home "latest" band used to be refreshed only as a side effect of
+/// `publish_home` running for an artist's face; with arrivals patched instead of
+/// re-published, the band is patched too rather than left on a placeholder.
+pub(crate) fn patch_card_avatar_row(
+    model: &ModelRc<IllustItem>,
+    works: &[Illust],
+    url: &str,
+    image: &slint::Image,
+) -> usize {
+    let mut patched = 0;
+    for (row, illust) in works.iter().enumerate() {
+        if illust.author.avatar.as_deref() != Some(url) {
+            continue;
+        }
+        let Some(mut item) = model.row_data(row) else {
+            continue;
+        };
+        item.author_avatar = image.clone();
+        item.author_avatar_state = BAND_OK;
+        model.set_row_data(row, item);
+        patched += 1;
+    }
+    patched
+}
+/// Point the row that owns `url` at the face that just arrived.
+///
+/// Returns how many rows were written. The model is patched in place, so its
+/// identity and the order of its rows are unchanged - which is the whole
+/// difference between this and re-running `publish_home` for one face
+/// (plan §2.3 R15). A row whose `avatar-url` does not match belongs to somebody
+/// else and is left alone.
+pub(crate) fn patch_avatar_row(
+    model: &ModelRc<RecommendUserItem>,
+    users: &[RecommendUser],
+    url: &str,
+    image: &slint::Image,
+) -> usize {
+    let mut patched = 0;
+    for (row, user) in users.iter().enumerate() {
+        if user.avatar.as_deref() != Some(url) {
+            continue;
+        }
+        let Some(mut item) = model.row_data(row) else {
+            continue;
+        };
+        item.avatar = image.clone();
+        item.avatar_state = BAND_OK;
+        model.set_row_data(row, item);
+        patched += 1;
+    }
+    patched
+}
+
 impl App {
     // ------------------------------------------------------------- avatars
 
@@ -154,21 +210,23 @@ impl App {
             ui.set_account_avatar_state(BAND_OK);
         }
 
-        if self
-            .home
-            .artists
-            .iter()
-            .any(|user| user.avatar.as_deref() == Some(url))
-        {
-            self.publish_home();
-        }
-        if self
-            .discovery
-            .users
-            .iter()
-            .any(|user| user.avatar.as_deref() == Some(url))
-        {
-            self.publish_discovery_users();
+        // The two user bands are patched, not re-published. Rebuilding them made
+        // one arrival re-create every row of the band - a home load with 40 faces
+        // rebuilt every row 40 times - because `publish_home` and
+        // `publish_discovery_users` each build a new VecModel per call. Only the
+        // row that owns this URL is written, the way `apply_cover` does it
+        // (plan §2.3 R15). A band that is republished for another reason (a new
+        // payload from `load_home` / `load_discovery`) still goes through those
+        // functions; no arrival path does any more.
+        if let Some(image) = self.avatars.get(url).cloned() {
+            let model = self.ui().get_home_artists();
+            patch_avatar_row(&model, &self.home.artists, url, &image);
+            let model = self.ui().get_discovery_users();
+            patch_avatar_row(&model, &self.discovery.users, url, &image);
+            // The home "latest" band is a row of cards, and it used to be refreshed
+            // only as a side effect of `publish_home` running for an artist's face.
+            let model = self.ui().get_home_latest();
+            patch_card_avatar_row(&model, &self.home.latest, url, &image);
         }
         if self
             .profile
@@ -373,6 +431,116 @@ mod tests {
         assert_eq!(order.len(), avatars.len(), "the order tracks the map");
     }
 
+    /// The same rule for a band of cards: one row, same model, same order.
+    #[test]
+    fn an_avatar_arrival_patches_one_card_row() {
+        let url = "https://i.pximg.net/face.jpg";
+        let mut works: Vec<Illust> = (1..=3).map(|id| work_with_face(id, Some(url))).collect();
+        works[1].author.avatar = Some("https://i.pximg.net/other.jpg".to_string());
+        let rows: Vec<IllustItem> = works
+            .iter()
+            .map(|illust| IllustItem {
+                id: illust.id.to_string().into(),
+                title: "".into(),
+                author: "".into(),
+                author_id: "".into(),
+                cover: slint::Image::default(),
+                kind: 0,
+                page_count: 1,
+                bookmarked: false,
+                rank: 0,
+                width: 0,
+                height: 0,
+                state: 0,
+                author_avatar: slint::Image::default(),
+                author_avatar_url: illust.author.avatar.clone().unwrap_or_default().into(),
+                author_avatar_state: BAND_LOADING,
+            })
+            .collect();
+        let model = Rc::new(VecModel::from(rows));
+        let published = ModelRc::from(model.clone());
+
+        assert_eq!(patch_card_avatar_row(&published, &works, url, &face()), 2);
+        assert_eq!(model.row_count(), 3, "no row is added or dropped");
+        assert_eq!(model.row_data(0).unwrap().author_avatar_state, BAND_OK);
+        assert_eq!(model.row_data(1).unwrap().author_avatar_state, BAND_LOADING);
+        assert_eq!(model.row_data(2).unwrap().author_avatar_state, BAND_OK);
+    }
+
+    fn work_with_face(id: u64, avatar: Option<&str>) -> Illust {
+        let mut illust = history_illust(&pixiv_store::HistoryEntry {
+            illust_id: format!("{id}0"),
+            title: format!("w{id}"),
+            author: "a".into(),
+            thumb_url: "https://i.pximg.net/c.jpg".into(),
+            viewed_at: 0,
+        });
+        illust.author.avatar = avatar.map(str::to_string);
+        illust
+    }
+    fn user(id: u64, avatar: Option<&str>) -> RecommendUser {
+        RecommendUser {
+            id: Id(id),
+            name: format!("u{id}"),
+            account: format!("a{id}"),
+            comment: String::new(),
+            avatar: avatar.map(str::to_string),
+            background: None,
+            previews: Vec::new(),
+            is_followed: false,
+            is_premium: false,
+        }
+    }
+
+    /// One arrival patches one row: the model keeps its identity, its length and
+    /// its order, and only the row that owns the URL changes.
+    ///
+    /// Re-publishing rebuilt the band - a new VecModel for every row on every
+    /// arrival, so a home load with 40 faces re-created every row 40 times
+    /// (plan §2.3 R15).
+    #[test]
+    fn an_avatar_arrival_patches_one_row_and_keeps_the_model() {
+        let users = vec![
+            user(1, Some("https://i.pximg.net/a.jpg")),
+            user(2, Some("https://i.pximg.net/b.jpg")),
+            user(3, None),
+        ];
+        let rows: Vec<RecommendUserItem> = users
+            .iter()
+            .map(|user| RecommendUserItem {
+                id: user.id.to_string().into(),
+                name: user.name.clone().into(),
+                account: user.account.clone().into(),
+                comment: "".into(),
+                avatar: slint::Image::default(),
+                avatar_url: user.avatar.clone().unwrap_or_default().into(),
+                preview: slint::Image::default(),
+                followed: false,
+                premium: false,
+                avatar_state: BAND_LOADING,
+            })
+            .collect();
+        let model = Rc::new(VecModel::from(rows));
+        let published = ModelRc::from(model.clone());
+
+        assert_eq!(
+            patch_avatar_row(&published, &users, "https://i.pximg.net/b.jpg", &face()),
+            1
+        );
+        // Same model, same row count, same order.
+        assert_eq!(model.row_count(), 3);
+        assert_eq!(model.row_data(1).unwrap().id.to_string(), "2");
+        // Exactly one row changed: the second one now holds the face and reports OK.
+        assert_eq!(model.row_data(1).unwrap().avatar_state, BAND_OK);
+        assert_eq!(model.row_data(0).unwrap().avatar_state, BAND_LOADING);
+        assert_eq!(model.row_data(2).unwrap().avatar_state, BAND_LOADING);
+
+        // A URL no row owns writes nothing at all.
+        assert_eq!(
+            patch_avatar_row(&published, &users, "https://i.pximg.net/none.jpg", &face()),
+            0
+        );
+    }
     /// Re-inserting a URL that is already held must not duplicate its slot in
     /// the order, or one re-decode would keep two entries alive.
     #[test]

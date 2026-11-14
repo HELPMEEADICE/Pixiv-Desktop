@@ -586,8 +586,12 @@ impl App {
                             .iter()
                             .filter_map(|w| w.author.avatar.clone())
                             .collect();
-                        let added =
-                            pixiv_types::domain::append_unique(&mut app.home.works, feed.works);
+                        // Only the rows this batch added. The whole accumulated
+                        // list used to be cloned and handed over with append =
+                        // false, which bought nothing (the clone) and disabled the
+                        // extend path (the flag) - plan §2.3 R11.
+                        let batch = merge_page(&mut app.home.works, feed.works);
+                        let added = batch.len();
                         app.home.batches += 1;
                         if added == 0 {
                             app.home.empty_batches += 1;
@@ -599,8 +603,10 @@ impl App {
                             app.reached_end = true;
                         }
                         if added > 0 {
-                            let works = app.home.works.clone();
-                            app.render_feed(works, false);
+                            // The batch, appended. `self.items` already holds the
+                            // rest of the grid, so the clone of the whole list is
+                            // gone and only the new rows are laid out.
+                            app.render_feed(batch, true);
                         }
                         app.spawn_avatars(urls);
                         app.publish_home();

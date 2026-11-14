@@ -37,7 +37,7 @@ use slint::{
     invoke_from_event_loop,
 };
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -59,7 +59,7 @@ use pixiv_types::{Id, PixivError};
 
 use crate::images::{COVER_CONCURRENCY, CoverLoader};
 use crate::layout::{self, GridGeometry};
-use crate::route::{History, Route, RouteHistory};
+use crate::route::{History, Route, RouteHistory, RouteParam};
 use crate::{
     AppWindow, Destination, DownloadRow, IllustItem, ProfileStatItem, RecommendTagItem,
     RecommendUserItem, SuggestionItem, Theme, ThemeMode, Tip, ViewerPage,
@@ -105,7 +105,12 @@ pub(crate) struct App {
     /// whose content is still loaded does not re-fetch (and therefore does not
     /// lose the scroll position).
     feed_owner: Option<Route>,
-    scroll: Vec<(Route, f32)>,
+    /// Where each route was left. A map, because this is read on every scroll
+    /// delta and written once per navigation (plan §2.3 R14).
+    scroll: HashMap<ScrollKey, f32>,
+    /// Touch order for `scroll`, oldest first, so the table stays bounded: the
+    /// entry that has sat untouched longest is the deepest Back entry.
+    scroll_order: VecDeque<ScrollKey>,
 
     // responsive geometry, fed by what Slint measured
     measured_width: f32,
@@ -146,6 +151,20 @@ pub(crate) struct App {
     author_avatar_lookup: HashSet<u64>,
     /// Avatar URL of the signed-in account, once known.
     account_avatar: Option<String>,
+    /// The recent search words, cached.
+    ///
+    /// `refresh_chrome` runs on every navigation and used to re-read them from the
+    /// database each time: `search_history` takes the store mutex and prepares a
+    /// statement on the thread that paints (plan §2.3 R16). The words are refreshed
+    /// when the history actually changes - a search, a clear - and published from
+    /// here the rest of the time.
+    recent_words: Vec<String>,
+    /// The model those words are published into. One model for the life of the
+    /// process, patched in place, so a navigation does not allocate a new one.
+    recent_searches: Rc<VecModel<slint::SharedString>>,
+    /// Ordered, bounded queue for `record_view`. The store write runs on the
+    /// runtime, in submission order, never on the UI thread.
+    view_queue: tokio::sync::mpsc::Sender<HistoryEntry>,
 
     // detail
     /// The download queue's model, created once and patched in place. Replacing
@@ -167,10 +186,23 @@ pub(crate) struct App {
     theme_timer: slint::Timer,
 }
 
+/// How many routes Back/Forward can hold. Named because the scroll table is sized
+/// from it: two stacks plus the page on screen.
+const HISTORY_LIMIT: usize = 32;
+/// How many scroll offsets the app keeps. Two history stacks plus the current
+/// route, so nothing the user can navigate back to is evicted before the history
+/// itself has forgotten it.
+const SCROLL_KEEP: usize = HISTORY_LIMIT * 2 + 1;
+
 /// How many decoded covers the feed keeps across a reload. `ImageCache` is the
 /// real cache (memory LRU + disk); this map only exists so a column rebuild can
 /// paint instantly instead of flashing empty, so the top of the feed is enough.
 const COVERS_KEEP: usize = 512;
+/// How many view-history rows may wait for the store before the newest is dropped.
+///
+/// The consumer drains this in milliseconds; a queue this deep means the database
+/// has stopped answering, and a frame must not wait for it (plan §2.3 R16).
+const VIEW_QUEUE: usize = 64;
 /// How many faces to keep before dropping the lot. One re-fetch is a cache hit:
 /// `ImageCache` still holds the bytes, and every row already on screen holds its
 /// own `Image` copy, so clearing this map never blanks a visible avatar.
@@ -227,22 +259,36 @@ impl App {
             app.remember_scroll(current, scroll);
             app.route = route;
             app.page = route.page;
-            app.page_cursor = 1;
-            app.loading_more = false;
-            app.suggest_close();
-            let ui = app.ui();
-            // A tooltip belongs to the page it was raised on. Navigating can
-            // destroy the hovered control (a cancelled row, a reloaded feed), and
-            // nothing would ever clear the bubble afterwards: `changed` in Slint
-            // only watches a bare property of the enclosing element, so the reset
-            // cannot live in the UI.
-            ui.global::<Tip>().set_visible(false);
-            ui.set_page(route.page);
-            ui.set_grid_loading_more(false);
-            ui.set_ranking_filter(ranking_index(app.ranking_kind));
-            ui.set_search_word(app.search_word.clone().into());
+            app.leave_page(route);
         }
         App::load_page(shared, false);
+    }
+}
+
+impl App {
+    /// Everything that belongs to the page being left, in one place.
+    ///
+    /// There are two ways to leave a page - a fresh navigation (`go`) and
+    /// Back/Forward (`travel`) - and the resets had already drifted: the tooltip
+    /// was cleared in `go` only, so Back and Forward could leave a bubble floating
+    /// over a control that no longer exists (plan §2.3 R20). The caller has already
+    /// moved `route` and `page` to `next` when this runs.
+    fn leave_page(&mut self, next: Route) {
+        self.page_cursor = 1;
+        self.loading_more = false;
+        self.suggest_close();
+        let ui = self.ui();
+        // A tooltip belongs to the page it was raised on. Navigating can destroy
+        // the hovered control (a cancelled row, a reloaded feed), and nothing would
+        // ever clear the bubble afterwards: `changed` in Slint only watches a bare
+        // property of the enclosing element, so the reset cannot live in the UI.
+        ui.global::<Tip>().set_visible(false);
+        ui.set_page(next.page);
+        ui.set_grid_loading_more(false);
+        // Both properties describe the page on screen, so they are re-stated on
+        // every arrival rather than only on a fresh navigation.
+        ui.set_ranking_filter(ranking_index(self.ranking_kind));
+        ui.set_search_word(self.search_word.clone().into());
     }
 }
 
@@ -297,35 +343,97 @@ impl App {
             app.remember_scroll(current, scroll);
             app.route = target;
             app.page = target.page;
-            app.page_cursor = 1;
-            app.loading_more = false;
-            app.suggest_close();
-            let ui = app.ui();
-            ui.set_page(target.page);
-            ui.set_grid_loading_more(false);
-            ui.set_search_word(app.search_word.clone().into());
+            // The same resets a fresh navigation runs, tooltip included: Back and
+            // Forward leave a page exactly the way `go` does (plan §2.3 R20).
+            app.leave_page(target);
         }
         // Restoring rather than resetting: Back must land where you left off.
         App::load_page(shared, true);
     }
 }
 
-impl App {
-    fn remember_scroll(&mut self, route: Route, offset: f32) {
-        if let Some(slot) = self.scroll.iter_mut().find(|(r, _)| *r == route) {
-            slot.1 = offset;
-        } else {
-            self.scroll.push((route, offset));
+/// One route as a hashable key.
+///
+/// Slint generates `Destination` as `PartialEq` only (no `Eq`, no `Hash`), so the
+/// page and its parameter are packed here rather than in `src/route.rs`, which is
+/// not this module. The discriminant is stable within one build and is only ever
+/// compared to another key from this same table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct ScrollKey {
+    page: u32,
+    param: u8,
+    id: u64,
+}
+
+impl ScrollKey {
+    fn of(route: Route) -> Self {
+        // `RouteParam` is not hashable either, so the three cases become a tag and
+        // an id: `None` carries no id and is the only case that uses tag 0.
+        let (param, id) = match route.param {
+            RouteParam::None => (0, 0),
+            RouteParam::Illust(id) => (1, id),
+            RouteParam::User(id) => (2, id),
+        };
+        Self {
+            page: route.page as u32,
+            param,
+            id,
         }
     }
 }
 
+/// Store one offset and keep the table bounded, youngest last.
+///
+/// Returns how many entries fell off. A key that is stored again moves to the
+/// young end instead of gaining a second slot, so what has not been touched for
+/// longest is evicted first - and that is the deepest Back entry, which is the one
+/// the 32-deep history forgets first.
+fn store_scroll(
+    scroll: &mut HashMap<ScrollKey, f32>,
+    order: &mut VecDeque<ScrollKey>,
+    key: ScrollKey,
+    offset: f32,
+    keep: usize,
+) -> usize {
+    scroll.insert(key, offset);
+    order.retain(|known| *known != key);
+    order.push_back(key);
+    let mut dropped = 0;
+    while scroll.len() > keep.max(1) {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        scroll.remove(&oldest);
+        dropped += 1;
+    }
+    dropped
+}
+
 impl App {
+    /// Store where one route was left.
+    ///
+    /// A map, not a `Vec` scanned on every scroll delta: `feed.rs:44-45` calls
+    /// this once per scroll event and `App::go` stores one entry per route ever
+    /// visited, so the table grew for the whole session and every scroll paid for
+    /// it (plan §2.3 R14).
+    fn remember_scroll(&mut self, route: Route, offset: f32) {
+        let keep = SCROLL_KEEP;
+        store_scroll(
+            &mut self.scroll,
+            &mut self.scroll_order,
+            ScrollKey::of(route),
+            offset,
+            keep,
+        );
+    }
+}
+
+impl App {
+    /// Where one route was left, or the top of the page when it was never left.
     fn stored_scroll(&self, route: Route) -> f32 {
         self.scroll
-            .iter()
-            .find(|(r, _)| *r == route)
-            .map(|(_, offset)| *offset)
+            .get(&ScrollKey::of(route))
+            .copied()
             .unwrap_or(0.0)
     }
 }
@@ -518,6 +626,47 @@ mod tests {
         assert_eq!(running, one_pass);
     }
 
+    /// Recall one offset, and keep the table bounded.
+    ///
+    /// The table was a `Vec` scanned linearly and appended once per route ever
+    /// visited; a session of opening artworks grew it without bound and every
+    /// scroll delta paid for the scan (plan §2.3 R14). A map with a touch order
+    /// recalls the same number and drops what the history can no longer reach.
+    #[test]
+    fn the_scroll_table_recalls_an_offset_and_stays_bounded() {
+        use crate::route::Route;
+        use std::collections::{HashMap, VecDeque};
+
+        let mut scroll: HashMap<super::ScrollKey, f32> = HashMap::new();
+        let mut order: VecDeque<super::ScrollKey> = VecDeque::new();
+        let home = super::ScrollKey::of(Route::plain(crate::Destination::Home));
+        let first = super::ScrollKey::of(Route::user(11));
+        let second = super::ScrollKey::of(Route::user(22));
+        // Two profiles are two keys, which is what makes Back restore the right
+        // one of them.
+        assert_ne!(first, second);
+
+        super::store_scroll(&mut scroll, &mut order, home, 120.0, 3);
+        super::store_scroll(&mut scroll, &mut order, first, 64.0, 3);
+        assert_eq!(scroll.get(&home).copied(), Some(120.0));
+
+        // Storing the same route again updates it in place.
+        super::store_scroll(&mut scroll, &mut order, home, 90.0, 3);
+        assert_eq!(scroll.len(), 2);
+        assert_eq!(order.len(), 2);
+        assert_eq!(scroll.get(&home).copied(), Some(90.0));
+
+        // Bounded: the entry that has sat untouched longest goes first, which is
+        // the deepest Back entry.
+        assert_eq!(
+            super::store_scroll(&mut scroll, &mut order, second, 8.0, 2),
+            1
+        );
+        assert_eq!(scroll.len(), 2);
+        assert!(!scroll.contains_key(&first), "the oldest offset is evicted");
+        assert_eq!(scroll.get(&home).copied(), Some(90.0));
+        assert_eq!(scroll.get(&second).copied(), Some(8.0));
+    }
     #[test]
     fn cover_pruning_keeps_the_top_of_the_feed() {
         let mut covers = std::collections::HashMap::new();

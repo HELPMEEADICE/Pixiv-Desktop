@@ -42,21 +42,26 @@ pub(crate) fn verify_stored_session(app: &Shared) {
     };
 
     rt.spawn(async move {
-        let outcome = client.account().await;
+        // The Session is built and sealed *here*, on the runtime: DPAPI, a file
+        // create, a write and an fsync used to run inside the UI closure, on the
+        // thread that paints (plan §2.3 R17). The closure only adopts what came back.
+        let outcome = client.account().await.map(|account| {
+            let refreshed = Session {
+                phpsessid: stored.phpsessid.clone(),
+                user_id: Some(account.id),
+                user_name: Some(account.name.clone()),
+                csrf_token: account.csrf_token.clone(),
+            };
+            let _ = crate::session::save(&data_dir, &refreshed);
+            (account, refreshed)
+        });
         on_ui(move |shared| {
             let Ok(mut app) = shared.try_borrow_mut() else {
                 return;
             };
             match outcome {
-                Ok(account) => {
-                    let refreshed = Session {
-                        phpsessid: stored.phpsessid.clone(),
-                        user_id: Some(account.id),
-                        user_name: Some(account.name.clone()),
-                        csrf_token: account.csrf_token.clone(),
-                    };
+                Ok((account, refreshed)) => {
                     client.set_session(refreshed.clone());
-                    let _ = crate::session::save(&data_dir, &refreshed);
                     app.session = refreshed;
                     app.mode = Mode::Real;
                     app.account_avatar = account.avatar.clone();
@@ -157,22 +162,42 @@ impl App {
         ui.set_session_user(self.session.user_name.clone().unwrap_or_default().into());
         ui.set_status_text(self.status_line().into());
         ui.set_cache_summary(self.cache_summary().into());
-        self.refresh_recent_searches();
+        // Published from the cache, not re-read: `refresh_chrome` runs on every
+        // navigation and `search_history` takes the store mutex and prepares a
+        // statement (plan §2.3 R16).
+        self.publish_recent_searches();
     }
 }
 
 impl App {
-    /// Push the stored search history into the UI.
+    /// Re-read the stored search history, then publish it.
     ///
     /// The app has always written every submitted keyword to `search_history` and
     /// never read it back, so the table grew and the user could not reach any of it.
     /// The empty-search state renders these as chips that re-run the search.
-    pub(crate) fn refresh_recent_searches(&self) {
-        let words = self.store.search_history(8).unwrap_or_default();
-        let labels: Vec<slint::SharedString> =
-            words.into_iter().map(slint::SharedString::from).collect();
+    ///
+    /// Called when the history actually changes - a submitted or picked search, a
+    /// cleared history - never on a plain navigation.
+    pub(crate) fn reload_recent_searches(&mut self) {
+        self.recent_words = self.store.search_history(8).unwrap_or_default();
+        self.publish_recent_searches();
+    }
+}
+
+impl App {
+    /// Push the cached words into the UI. No store access, so it is cheap enough
+    /// for every `refresh_chrome`.
+    pub(crate) fn publish_recent_searches(&self) {
+        let labels: Vec<slint::SharedString> = self
+            .recent_words
+            .iter()
+            .cloned()
+            .map(slint::SharedString::from)
+            .collect();
+        // The same model every time: Slint keeps the items it is not told to drop.
+        self.recent_searches.set_vec(labels);
         self.ui()
-            .set_recent_searches(ModelRc::from(Rc::new(VecModel::from(labels))));
+            .set_recent_searches(ModelRc::from(self.recent_searches.clone()));
     }
 }
 
@@ -252,24 +277,30 @@ impl App {
         let rt = self.rt.clone();
         let data_dir = self.data_dir.clone();
         rt.spawn(async move {
-            let outcome = client.account().await;
+            // Built and sealed on the runtime: the DPAPI seal, the file create, the
+            // write and the fsync were all running inside the UI closure below, on the
+            // thread that paints (plan §2.3 R17). The closure receives the finished
+            // Session and does nothing but adopt it.
+            let outcome = client.account().await.map(|account| {
+                let verified = Session {
+                    phpsessid: Some(cookie),
+                    user_id: Some(account.id),
+                    user_name: Some(account.name.clone()),
+                    csrf_token: account.csrf_token.clone(),
+                };
+                let _ = crate::session::save(&data_dir, &verified);
+                (account, verified)
+            });
             on_ui(move |shared| {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
                 };
                 app.ui().set_busy(false);
                 match outcome {
-                    Ok(account) => {
-                        let verified = Session {
-                            phpsessid: Some(cookie),
-                            user_id: Some(account.id),
-                            user_name: Some(account.name.clone()),
-                            csrf_token: account.csrf_token.clone(),
-                        };
+                    Ok((account, verified)) => {
                         // The probe client and the stored session must agree, or
                         // later mutations would run without a CSRF token.
                         client.set_session(verified.clone());
-                        let _ = crate::session::save(&data_dir, &verified);
                         app.session = verified;
                         app.client = Some(client);
                         app.mode = Mode::Real;

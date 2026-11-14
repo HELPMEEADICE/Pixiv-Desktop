@@ -54,13 +54,14 @@ impl App {
         }
         all.extend(items);
         self.items = all;
-        if !append {
-            // A feed replacement is the one moment the set of live works is known
-            // exactly, so it is also the only collection point that needs no timer
-            // and no second opinion about what is on screen.
-            let ids = self.items.iter().map(|illust| illust.id.to_string());
-            prune_covers(&mut self.covers, ids, COVERS_KEEP);
-        }
+        // Both paths prune. Pruning only inside `if !append` meant an endlessly
+        // appended feed kept one decoded texture per work ever shown, outside the
+        // 192 MiB cache budget, because `prune_covers` had exactly this one call
+        // site and a feed that is extended is never replaced (plan §2.3 R13).
+        // `keep` is counted from the top of the feed, so what a column rebuild can
+        // paint without waiting is exactly what survives.
+        let ids = self.items.iter().map(|illust| illust.id.to_string());
+        prune_covers(&mut self.covers, ids, COVERS_KEEP);
         // A new page extends the columns it finds. Rebuilding them re-ran the
         // balancer over the whole feed, so every card above silently moved to a
         // different column - the opposite of what `layout::distribute` is documented
@@ -116,6 +117,22 @@ pub(crate) fn plan_feed_update(
     } else {
         FeedUpdate::Rebuild
     }
+}
+
+/// Merge one fetched page into the list a page keeps, and return only the rows
+/// that were new.
+///
+/// Two paged feeds keep their own copy of what they have shown - the home grid
+/// (`home.works`) and a user's page (`profile.works`) - and both used to hand the
+/// whole accumulated list to `render_feed(.., false)`: an extra full clone, a
+/// fresh `distribute`, and `already = 0`, so `plan_feed_update` chose Rebuild
+/// every time even after round seven made Extend reachable (plan §2.3 R10/R11).
+/// The caller passes what this returns with `append = true`, which is one `Vec`
+/// of the new rows and no rebuild.
+pub(crate) fn merge_page(all: &mut Vec<Illust>, page: Vec<Illust>) -> Vec<Illust> {
+    let before = all.len();
+    pixiv_types::domain::append_unique(all, page);
+    all[before..].to_vec()
 }
 
 /// Push one card into the shortest column, returning the row it landed on.
@@ -774,6 +791,99 @@ mod tests {
             columns.iter().map(|model| model.row_count()).sum::<usize>(),
             48
         );
+    }
+
+    /// Pruning the cover map is not a column operation: the models keep their
+    /// identity, their rows and their order (plan §2.3 R13).
+    #[test]
+    fn pruning_covers_leaves_the_column_models_alone() {
+        let columns = columns(2);
+        let mut heights = vec![0.0_f32; 2];
+        place_in_columns(&columns, &mut heights, card("a"), 100.0);
+        place_in_columns(&columns, &mut heights, card("b"), 100.0);
+        let published: Vec<Rc<VecModel<IllustItem>>> = columns.clone();
+
+        let mut covers = HashMap::new();
+        covers.insert("a".to_string(), slint::Image::default());
+        covers.insert("pruned".to_string(), slint::Image::default());
+        // The append path prunes too now; the model above must survive it.
+        assert_eq!(
+            prune_covers(&mut covers, std::iter::once("a".to_string()), COVERS_KEEP),
+            1
+        );
+
+        for (index, before) in published.iter().enumerate() {
+            assert!(
+                Rc::ptr_eq(before, &columns[index]),
+                "column {index} was replaced by a maintenance pass"
+            );
+        }
+        assert_eq!(columns[0].row_data(0).unwrap().id.to_string(), "a");
+        assert_eq!(columns[1].row_data(0).unwrap().id.to_string(), "b");
+    }
+    fn work(id: u64) -> Illust {
+        history_illust(&pixiv_store::HistoryEntry {
+            illust_id: id.to_string(),
+            title: format!("w{id}"),
+            author: "a".into(),
+            thumb_url: format!("https://i.pximg.net/{id}_p0_master1200.jpg"),
+            viewed_at: 0,
+        })
+    }
+
+    /// Both "load more" paths must reach the append branch.
+    ///
+    /// The defect was not in `plan_feed_update` but in its callers: the profile
+    /// page handed `render_feed` the *whole* accumulated list with `append =
+    /// false`, and the home grid did the same after an extra full clone. `already`
+    /// was therefore 0 by construction and every batch rebuilt every column (plan
+    /// §2.3 R10/R11). This walks the real chain - merge the fetched page, take what
+    /// is on screen, plan the update - and asserts the shape the call sites now use.
+    #[test]
+    fn a_second_page_of_works_reaches_the_append_branch() {
+        // What the first page left: 24 rows in `profile.works`, the same 24 in
+        // `self.items` (render_feed set it), and 4 column models on screen.
+        let mut kept: Vec<Illust> = (1..=24).map(work).collect();
+        let mut on_screen: Vec<Illust> = (1..=24).map(work).collect();
+        let heights = vec![100.0_f32; 4];
+        let columns = columns(4);
+
+        // The second page arrives: one row is a duplicate the feed already shows.
+        let mut page: Vec<Illust> = (24..=47).map(work).collect();
+        page.push(work(1));
+        let batch = merge_page(&mut kept, page);
+
+        // Only the new rows are handed over, never the accumulated list: the
+        // second page repeats two ids the feed already shows.
+        assert_eq!(batch.len(), 23, "the batch is what the page added");
+        assert_eq!(kept.len(), 47);
+        assert_eq!(batch.first().map(|illust| illust.id.get()), Some(25));
+
+        // The call the sites make: render_feed(batch, true).
+        let (already, taken) = take_existing(&mut on_screen);
+        assert_eq!(already, 24, "the page that is already on screen is counted");
+        assert!(taken.len() == 24 && on_screen.is_empty());
+        assert_eq!(
+            plan_feed_update(true, already, columns.len(), 4, heights.len()),
+            FeedUpdate::Extend { from: 24 }
+        );
+        // What the two callers used to do: the whole list, with append = false.
+        // `already` is 0 on that branch by construction, so the decision was
+        // Rebuild no matter what the page already showed.
+        assert_eq!(
+            plan_feed_update(false, 0, columns.len(), 4, heights.len()),
+            FeedUpdate::Rebuild
+        );
+    }
+
+    /// Appending is the one path that can see the same work twice, and the feed
+    /// must not grow a duplicate row for it.
+    #[test]
+    fn a_page_that_adds_nothing_hands_over_no_rows() {
+        let mut kept: Vec<Illust> = (1..=3).map(work).collect();
+        let batch = merge_page(&mut kept, vec![work(2), work(3)]);
+        assert!(batch.is_empty());
+        assert_eq!(kept.len(), 3);
     }
 
     /// A column count that changed under the feed invalidates the buckets and

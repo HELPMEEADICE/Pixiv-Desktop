@@ -114,12 +114,17 @@ pub(crate) fn install(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_clear_history(move || {
+            let (views, searches) = {
+                let mut app = shared.borrow_mut();
+                let views = app.store.clear_view_history();
+                let searches = app.store.clear_search_history();
+                // The chips on the empty-search state read this table; leaving them
+                // on screen after "已清除" would be a lie. This is a history change,
+                // so the cache is refreshed here rather than on the next navigation.
+                app.reload_recent_searches();
+                (views, searches)
+            };
             let app = shared.borrow();
-            let views = app.store.clear_view_history();
-            let searches = app.store.clear_search_history();
-            // The chips on the empty-search state read this table; leaving them on
-            // screen after "已清除" would be a lie.
-            app.refresh_recent_searches();
             if views.is_ok() && searches.is_ok() {
                 app.notify(1, "已清除浏览历史与搜索历史");
             } else {
@@ -141,11 +146,19 @@ pub(crate) fn install(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_choose_directory(move || {
-            let mut app = shared.borrow_mut();
+            // Same rule as the downloads page: the modal dialog pumps the message
+            // loop with the main window still enabled, so the borrow starts after
+            // it returns (plan §2.3 R12). The window itself is held across the loop,
+            // which is all the old code was buying with a borrow.
+            let _window = shared.borrow().ui.upgrade();
             let Some(dir) = crate::picker::pick_folder("选择下载保存目录") else {
                 return;
             };
-            if let Err(error) = std::fs::create_dir_all(&dir) {
+            let created = std::fs::create_dir_all(&dir);
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            if let Err(error) = created {
                 app.notify(3, format!("无法使用该目录：{error}"));
                 return;
             }

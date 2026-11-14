@@ -49,6 +49,9 @@ pub(crate) fn install(app: &Shared) {
                 app.search_word = tag.clone();
                 app.feed_owner = None;
                 let _ = app.store.push_search(&tag);
+                // Same rule as the tag chip on a card: the store write is a history
+                // change, so the cached words are refreshed here (plan §2.3 R16).
+                app.reload_recent_searches();
             }
             App::navigate(&shared, Destination::Search);
         });
