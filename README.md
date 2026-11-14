@@ -35,7 +35,7 @@ technology can reach are **measured, not reviewed**:
 `tools/verify-icons.ps1` finds glyph ink centres in a real capture and fails if any
 of them drifts from its row; `tools/verify-visual.ps1` diffs 20 forced-demo
 captures against tracked baselines; `tools/verify-a11y.ps1` reads the UI
-Automation tree (roles, names, invokable patterns) and walks ten Tab stops with
+Automation tree (roles, names, invokable patterns) and walks Tab until focus cycles with
 real keystrokes; `tools/verify-focus.ps1` captures what those keystrokes produce and
 measures the 2px focus ring at each stop, reading the colour out of `ui/theme.slint`
 rather than restating it; `tools/verify-dpi.ps1` runs the scale ladder at 100/125/150/200%
@@ -185,23 +185,28 @@ pwsh -File tools/verify-icons.ps1         # add -Size 800x600 / -Dark
 # both its content and its error state) diffed against tracked baselines. The
 # script forces PIXIV_DESKTOP_DEMO=1, which is what makes a baseline both
 # deterministic and free of the signed-in user's own feed. Re-baseline with
-# -Update after a deliberate visual change, and read the diff before committing.
+# -Update after a deliberate visual change, and read the diff before committing. A
+# capture must clear both a 0.02 % and a 96-pixel ceiling, and a capture that was
+# skipped because the host scale differs is not a pass (the run exits 77).
 pwsh -File tools/verify-visual.ps1
 
 # accessibility: reads the UI Automation tree the way a screen reader does
-# (roles, names, invokable patterns) and then walks ten Tab stops with real
-# keystrokes, asserting the numbers pinned in tools/a11y-budget.json.
+# (roles, names, invokable patterns) and then walks Tab until focus cycles - one full
+# cycle, not a fixed sample - asserting the numbers pinned in tools/a11y-budget.json.
 pwsh -File tools/verify-a11y.ps1          # -Report to measure without failing
 
 # ...and what those keystrokes produce on screen: presses Tab across three pages,
 # reads each focused element's rect from UI Automation and counts pixels of the
-# focus ring. Captures are additive, so an existing baseline is never overwritten.
+# focus ring. Its captures are harness output under docs/screenshots/baseline/focus-*
+# and are untracked: the file it measures is always the fresh one in target/focus.
 pwsh -File tools/verify-focus.ps1          # -MinPixels to force the failure path
 
 # the DPI ladder, both halves: four real scale factors measured from the app's own
 # trace, and a numeric sweep (1060 points, 168-300 logical px, 1/1.25/1.5/2x) that
-# fails any row whose decode target is below the drawn card. Exits 77 (SKIP) when
-# the app cannot start at all - a gate that cannot run here did not fail.
+# fails any row whose decode target is below the drawn card. Reads the two constants
+# out of src/images.rs by name (a mirror that cannot be parsed exits 77 rather than
+# guessing). Exits 77 (SKIP) when the app cannot start at all, or when fewer scales
+# were measured than requested - a gate that cannot run here did not fail.
 pwsh -File tools/verify-dpi.ps1
 ```
 
@@ -229,8 +234,9 @@ pwsh -File tools/gates.ps1 -Ui
 
 # or one at a time
 cargo fmt --all -- --check
-cargo test --workspace                       # 291 tests: 14 source rules, 15 live tests
-                                            # that return early without PIXIV_LIVE_PHPSESSID
+cargo test --workspace --locked              # 327 tests: 17 uiaudit rules, 15 live tests
+                                            # that return early without PIXIV_LIVE_PHPSESSID,
+                                            # so a green run is 312 passes and 15 no-ops
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)

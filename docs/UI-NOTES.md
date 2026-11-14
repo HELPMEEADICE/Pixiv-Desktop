@@ -532,7 +532,8 @@ component instantiated eight times), so it reports the delta to the window, whic
 is where the order is declared. Slint 1.18 has no modulo operator and no locals in
 a function body, hence the two-comparison wrap.
 
-**After**, per page: invokable 16–34, focusable 18–44, **10 distinct Tab stops**,
+**After**, per page: invokable 16–34, focusable 18–44, **10 distinct Tab stops** (round
+five's sample size; round eight §15 measured 14–71 once the walk stopped at a cycle),
 and the tree carries `Button` / `ListItem` / `CheckBox` / `Group`. Tab out of the
 command bar goes back → forward → search → theme → 首页 → 发现 → 排行榜 → 搜索 →
 收藏 → 浏览历史.
@@ -900,12 +901,14 @@ produced `src\app\mod.rs:201:13: error: unused variable: unused_probe`, the gate
 `FAIL`, exit 1; with the line removed the gate passed with the file byte-identical
 (sha256 65976320F652BB7D1A5C87FF6443C8C259E49C1E0EC41D99006C1AB64D869546).
 
-`tools/selftest-gates.ps1` is the re-runnable half: five cases over a read-only copy of one
-tracked baseline - `match` (positive control), `shift` (a one-pixel move must be SHIFT),
-`erase` (200×200 of pixels must be DIFF), `skip` (nothing compared must be exit 77), and a
-static `lint` case that reads `gates.ps1` for the declaration and the filter. Removing the
-three fixes and re-running the same file flips three of the five cases to FAIL, which is
-what makes it a guard rather than a rerun.
+`tools/selftest-gates.ps1` is the re-runnable half: it ran five cases over a read-only copy
+of one tracked baseline - `match` (positive control), `shift` (a one-pixel move must be
+SHIFT), `erase` (200×200 of pixels must be DIFF), `skip` (nothing compared must be exit 77),
+and a static `lint` case that reads `gates.ps1` for the declaration and the filter. Removing
+the three fixes and re-running the same file flips three of the five cases to FAIL, which is
+what makes it a guard rather than a rerun. Round eight §15 added three cases (`blob`, the
+144-pixel rectangle a percentage budget cannot see; `capture`, a failed capture; `noscale`,
+a sidecar with no scale) and wired the file into `tools/gates.ps1`, which had never run it.
 
 ### 14d. What those gates were hiding
 
@@ -991,6 +994,175 @@ pixel questions; a two-pixel move is caught by the ordinary comparison instead, 
 * **Hover has no gate yet**, although it is now measurable: § 14d's pill pair was taken with
   `tools/drive.ps1` by hand and would make a cheap gate.
 * A real screen reader reading the tree § 12a produced; the Linux and macOS input paths.
+
+---
+
+## 15. Round eight: gates that could not fail, or could not run
+
+Round seven closed its plan believing five gates could not decide. Four were still open at the
+start of round eight, one of them could not *run* at all, and `tools/gates.ps1 -Ui` exited 1 on
+a tree that had no red test. That gate - the DPI ladder - is the one an earlier round told the
+reader to consult about a 100 % host.
+
+### 15a. Eleven gates, and the entry point that ran four of them
+
+The DPI gate did not measure the app: it measured a PowerShell re-implementation of
+`images::target_width`, and the only link to the Rust was two regexes over `src/images.rs`. Those
+regexes stopped matching (`div_ceil(TIER_STEP) * TIER_STEP`, then `tier_up(physical).clamp(...)`),
+so `verify-dpi.ps1` threw at line 78 before measuring anything. It now reads the two constants
+*by name* - `Read-ImagesConstant` - the way the file already read layout constants, and exits 77
+when a piece cannot be parsed instead of throwing. A gate that cannot be built is a gate that
+cannot run, which is a third verdict, not a crash.
+
+That was the visible half. The rest:
+
+* A **failed capture was invisible** - `shot.ps1`'s exit code was discarded and `target/visual/
+  current` was never cleared, so the gate diffed the previous run's PNG and reported *today's*
+  render as matching it. `-Exe target\debug\nope.exe` printed twenty `OK` rows and exited 0.
+* A **partial skip was a clean run**: 1 judged + 19 skipped exited 0, which on a 100 % or 125 %
+  host is the normal outcome.
+* The **diff budget** admitted 354 pixels at 1536x1152 and the message said "0.02 %". There is
+  now an absolute pixel ceiling beside the percentage, and `selftest-gates.ps1` carries the case
+  the percentage cannot see: a 12x12 rectangle, 144 px, 0.0057 % - `under the 0.02 % budget but
+  over the 96-pixel ceiling`.
+* **Zero checks was a pass** (`verify-layout.ps1` printed "0 checks, 0 not OK" and exited 0), and
+  a **partial DPI ladder** claimed the ladder held. Both are 77 now.
+* The **accessibility gate passed without its budget** and fell back to the 1/2/3 floors for a
+  page absent from it. Both fail now, naming the page.
+* The **Tab walk stopped at its own sample size** and then pinned that sample as the requirement.
+  It now walks until the (Name, Type) pair repeats and writes the count it measured:
+  home 10→51, discovery 10→38, ranking 10→71, search 10→21, bookmarks 10→24, history 10→14,
+  downloads 10→18, settings 10→23. `-Update` only ratchets *up*, so following the fix
+  instructions on a degraded build can no longer record the degradation as the floor.
+* Three verifiers - `verify-icons`, `verify-layout`, `selftest-gates` - were invoked by nothing
+  while the README described all three as gates, and the file named "one entry point for every
+  gate" ran four of seven. It runs twelve rows now, `--locked` matches CI's three cargo jobs, and
+  the negative experiment for the comparator's pixel ceiling was re-run against a copy of the old
+  comparator: the 144 px blob passes it (`exit=0 … over= 0.0057%`) and fails the new one.
+
+`tools/gates.ps1 -Ui` at the end of this round: **12 gates, 0 failed, 0 skipped, 680.9 s, exit 0**
+- and it includes the DPI gate, which had not run for a round.
+
+### 15b. Twelve UI defects, one of them a button that could not be clicked
+
+Every one of these was provable from the declarations; none was visible in a capture of the
+page's resting state.
+
+* **The detail page's 「重新载入」 was dead.** The failure block was declared *before* the viewer's
+  full-size `TouchArea`, and Slint hit-tests in reverse declaration order - the law this file
+  states three times elsewhere. The block now sits after the hit surface, before the floating
+  controls, and only the two state overlays moved.
+* **The ranking badge's digits were 2.38:1 in dark mode**: `#ffffff` on `accent-fill`. The theme
+  states the number and the pair; the ink is `on-accent` now (8.01:1), and the literal survives
+  only on the `#000000a6` overlay it must not follow.
+* **Four controls in the 44 px detail toolbar sat 6-13 px above its centre line**, and five 28 px
+  buttons sat 4 px above the centre of the 36 px floating pill: a fixed-size child of a layout is
+  aligned to the start of the cross axis, which is the law `downloads.slint` already documents.
+  `row-height` claims the row height and the control centres itself.
+* **`UserCard`'s text ran under its own preview** - 84 px of every name, handle and comment
+  painted on artwork at half opacity. The column reserves it now.
+* **The demo switch and the theme selector were not Tab stops at all**: neither declared a
+  `FocusScope`, and Slint focuses nothing else. They also announced as an unnamed switch and an
+  unnamed radio group because neither call site passed `label:`. Both take focus, both are named,
+  and the ring is opacity so the resting pixels do not move.
+* **The account affordance in the command bar** - the only path to your own page, and, signed
+  out, to the sign-in flow - was a bare `TouchArea` with no role and no scope. One `open-account()`
+  function now serves the pointer and Tab+Space/Enter, so the two cannot disagree.
+* **The cancelled download badge was 4.32:1** (`text-tertiary` on `layer-sunken`); it is
+  `text-secondary` (5.58:1) and the pair is in the WCAG table, which had measured `text-tertiary`
+  against `canvas`, `layer` and `layer-alt` only.
+* **The 最新作品 band drew nothing in its empty state**, `recommend-users-message` was plumbed and
+  never read (a failed artist request made the whole band vanish), the skeleton always drew four
+  columns at a 3-column window (`4 x 195.33 + 3 x 16 = 829 px` into 618 px with the horizontal
+  scrollbar off), `InfoBar` counted its body's padding twice, and the thumbnail strip put its
+  scrollbar on 2 px of the thumbnails.
+
+### 15c. Three guards, and the one exception
+
+`uiaudit` gained two rules and the WCAG table gained one pair. Both rules were proved against the
+defect they describe: planting `color: #ffffff` back into the badge made
+`text_drawn_on_the_accent_fill_uses_the_ink_token` fail and name `components.slint:1459:
+IllustCard`; `every_interactive_component_can_take_focus` failed on its first run and named
+`BookmarkPill`, which is the one interactive component still without a scope.
+
+That one is an exception with a reason rather than a hole: a Tab stop per card would make a
+40-item grid 80 stops *before* roving focus exists, and the same action already has a keyboard
+path on the detail page. The exception is written inside the rule, next to the item in phase 2
+that removes the need for it.
+
+The accent rule began as "any mention of `accent-fill` plus any `Text`", which flagged five
+components that ink nothing on it (`TextField` sets it as a focus border, `NavItem` as a selection
+bar). Narrowed twice - to a `background:` fill, then to a *literal* ink on that fill - it is the
+rule that can fail on the defect and only on the defect.
+
+### 15d. `record_view`, the append path, and a temp file two writers could share
+
+Round seven made `plan_feed_update` able to extend instead of rebuild, and closed it at the
+generic pager. Two callers were never converted: the profile's "load more" cloned the whole
+accumulated list and passed `append = false`, and the home feed did the same with an extra clone.
+Both reach the extend branch now. The same audit found a `RefCell` borrow of `App` held across
+the modal folder picker - and `picker.rs` passes a null owner, so the main window stays clickable
+while the dialog pumps messages - covers that were pruned only when the feed was replaced, a
+scroll table that scanned linearly and grew one entry per route ever visited, avatar arrivals
+that rebuilt whole bands, a DPAPI seal plus fsync run on the painting thread, and two failure
+paths that reported a network error as "this artist has no public works".
+
+In the crates: the download's `.part` name was a function of the destination alone, so two pages
+rendering one filename wrote the same temp file and both renamed it - the published file could be
+two images interleaved. It is per task now, the write fsyncs before the rename, a zero-length
+destination is a miss instead of "already downloaded", the disk tier's temp is per writer, a
+cancelled task releases its semaphore permit immediately (`select!` on the fetch), POST retries
+only replay a 429/503 that names a wait, `enforce_budget` subtracts what it deleted instead of
+storing a total, `seq` has a covering index, and remote image bytes are decoded under
+`image::Limits` (32 MiB body, 16384 px edge, 256 MiB of pixels) instead of unbounded.
+
+### 15e. The re-baseline, and what it named
+
+Seven of twenty captures moved. Each is explained, and each explanation is a fix, not a wobble:
+
+| Capture | Pixels | Why |
+| --- | --- | --- |
+| settings (light) | 242 319 (13.69 %) | `InfoBar` lost its second padding, so every card below it moved up 16 px |
+| settings (dark) | 226 774 (12.82 %) | the same |
+| detail (light) | 3 304 (0.19 %) | toolbar row heights, the strip's own band, the pill's five buttons |
+| detail (dark) | 3 435 (0.19 %) | the same |
+| detail-error (light) | 1 272 (0.07 %) | the same two rows, seen through the error state |
+| detail-error (dark) | 1 283 (0.07 %) | the same |
+| ranking (dark) | 501 (0.03 %) | the badge's ink, `#ffffff` → `on-accent` (light is unchanged: `on-accent` *is* white there) |
+
+One thing the comparison found that is not a fix: **the settings capture contains a live number**.
+`缓存占用 · 磁盘 403 MB` in the old baseline reads `432 MB` now, because the disk tier grew while
+the round ran. A tracked baseline that depends on the local cache is a baseline that will drift
+on a host doing nothing. Recorded here rather than papered over; the fix is a fixture seam of the
+same shape as §2.2's `U13`, and it is scheduled with it.
+
+### 15f. What the new guards cannot decide
+
+* The Tab walk stops when a `(Name, Type)` pair repeats, so two distinct stops with one name end
+  the walk early: the count is a **lower bound** on real stops, not an element census. It is also
+  why four pages report *more* stops than UI Automation calls focusable (Slint `FocusScope`s are
+  not marked `IsKeyboardFocusable`) and four report *fewer* (UIA marks nodes Tab never lands on).
+  Both directions are measured; neither is a bug in the gate.
+* The accent-ink rule sees a *literal*. A token ink on an accent-filled surface can still be the
+  wrong token, and no static rule here can decide that.
+* `gates.ps1` still short-circuits at the first FAIL, so a run with one failure prints a partial
+  table. Splitting the jobs is why the first failure names itself; printing every row regardless
+  is a separate change.
+* The 最新作品 band's empty and error states, and the discovery artist band's error state, have no
+  capture - the pixel gate only sees the states the demo catalogue reaches.
+* `verify-focus.ps1` still writes its captures and never compares them; they are untracked now
+  (34 files, 12 890 992 B - **52.0 %** of every tracked byte in this repository), so a normal run
+  no longer dirties the worktree, but nothing reads them either.
+* `verify-icons.ps1` still throws when `shot.ps1` writes no sidecar; only its "not measured" path
+  became 77.
+
+### 15g. What is still not verified here
+
+A real screen reader reading the tree § 12a produced; the Linux and macOS input paths; a
+pointer-driven drag gesture; whether `SegmentedControl`'s one-way binding survives its own first
+click; whether `visible: false` removes a child from a layout (two `TaskRow` buttons depend on
+it); whether R12's borrow is live or only latent, which needs one run with the folder dialog open
+and a click on the rail; and the settings capture's cache figure, until it has a fixture.
 
 ---
 
