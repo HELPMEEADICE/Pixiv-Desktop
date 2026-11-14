@@ -13,7 +13,7 @@ use std::time::Duration;
 use parking_lot::{Mutex, RwLock};
 use pixiv_types::PixivError;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::naming::download_file_name;
@@ -26,6 +26,44 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// How long the idle loop sleeps before looking at the queue again.
 const IDLE_POLL: Duration = Duration::from_millis(20);
 
+/// Per-task cancellation: a flag the write loop polls, plus a signal the
+/// in-flight request can await.
+///
+/// The flag alone was the defect: it was read only after the body had arrived, so
+/// a cancelled task sat on its semaphore permit for the whole retry budget (up to
+/// 3 x 20 s) while the request it no longer wanted finished. The signal is what
+/// lets `process` abandon the request instead of waiting for it.
+#[derive(Debug, Default)]
+struct Cancel {
+    flag: AtomicBool,
+    signal: Notify,
+}
+
+impl Cancel {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        // `notify_one` stores a permit when nobody is waiting, so the signal is
+        // never lost: a cancel that lands before the select consumes it here.
+        self.signal.notify_one();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    /// Resolve now when the task is already cancelled, otherwise on the signal.
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        self.signal.notified().await;
+    }
+}
+
 /// One queued page download.
 #[derive(Debug)]
 pub(crate) struct Record {
@@ -35,7 +73,7 @@ pub(crate) struct Record {
     bytes_done: u64,
     bytes_total: Option<u64>,
     destination: Option<PathBuf>,
-    cancel: Arc<AtomicBool>,
+    cancel: Arc<Cancel>,
 }
 
 impl Record {
@@ -64,7 +102,7 @@ struct Claim {
     id: TaskId,
     request: DownloadRequest,
     destination: PathBuf,
-    cancel: Arc<AtomicBool>,
+    cancel: Arc<Cancel>,
     /// Armed at claim time, not inside [`process`].
     ///
     /// This distinction is the whole bug: a spawned future that is dropped
@@ -133,7 +171,7 @@ impl Inner {
                 bytes_done: 0,
                 bytes_total: None,
                 destination: None,
-                cancel: Arc::new(AtomicBool::new(false)),
+                cancel: Cancel::new(),
             });
             ids.push(id);
         }
@@ -153,7 +191,7 @@ impl Inner {
         if record.state.is_terminal() {
             return false;
         }
-        record.cancel.store(true, Ordering::SeqCst);
+        record.cancel.cancel();
         if matches!(record.state, TaskState::Queued) {
             // Never started, so nothing has to unwind: mark it done right here
             // and the worker will simply never pick it up.
@@ -174,7 +212,7 @@ impl Inner {
         record.bytes_done = 0;
         record.bytes_total = None;
         record.destination = None;
-        record.cancel = Arc::new(AtomicBool::new(false));
+        record.cancel = Cancel::new();
         true
     }
 
@@ -241,7 +279,7 @@ impl Inner {
         record.bytes_done = 0;
         record.bytes_total = None;
         record.destination = None;
-        record.cancel = Arc::new(AtomicBool::new(false));
+        record.cancel = Cancel::new();
     }
 }
 
@@ -394,7 +432,7 @@ where
         cancel,
         guard: _claim,
     } = claim;
-    let cancelled = || cancel.load(Ordering::SeqCst);
+    let cancelled = || cancel.is_cancelled();
     let log = LogCtx {
         id,
         illust: request.illust_id.clone(),
@@ -406,7 +444,7 @@ where
         return;
     }
 
-    if destination.exists() {
+    if destination_is_complete(&destination) {
         tracing::debug!(task = log.id, illust = %log.illust, page = log.page, "destination exists, skipping");
         inner.finish(id, TaskState::Skipped, 0, None);
         return;
@@ -428,7 +466,23 @@ where
 
     // `fetch_bytes` returns the whole body, so there is no Content-Length to
     // report while the request is in flight; the size becomes known on arrival.
-    let body = match fetch(request.url.clone()).await {
+    //
+    // The fetch is raced against the cancellation signal, not merely checked
+    // afterwards: a task the user has abandoned must give its semaphore permit
+    // back immediately instead of holding it until the body arrives. `biased`
+    // means a cancel that lands at the same instant as the reply wins, so the
+    // outcome is the same on every run.
+    let fetched = tokio::select! {
+        biased;
+        () = cancel.cancelled() => None,
+        result = fetch(request.url.clone()) => Some(result),
+    };
+    let Some(fetched) = fetched else {
+        tracing::debug!(task = log.id, illust = %log.illust, page = log.page, "download cancelled while fetching");
+        inner.finish(id, TaskState::Cancelled, 0, None);
+        return;
+    };
+    let body = match fetched {
         Ok((bytes, _content_type)) => bytes,
         Err(PixivError::Cancelled) => {
             inner.finish(id, TaskState::Cancelled, 0, None);
@@ -452,7 +506,7 @@ where
 
     // Write beside the destination, then rename: a cancelled or interrupted
     // download can never leave a truncated file that looks complete.
-    let part = part_path(&destination);
+    let part = part_path(&destination, id);
     let mut file = match tokio::fs::File::create(&part).await {
         Ok(file) => file,
         Err(err) => {
@@ -480,7 +534,11 @@ where
         inner.set_progress(id, written, Some(total));
     }
     if interrupted.is_none() && !cancelled() {
-        if let Err(err) = file.flush().await {
+        // `sync_all` rather than `flush`: flushing only hands the bytes to the
+        // kernel, so a crash between that and the rename published a name whose
+        // data was never written. One fsync per file is the cost of the rename
+        // meaning what it claims.
+        if let Err(err) = file.sync_all().await {
             interrupted = Some(format!("写入失败：{}", short_io(&err)));
         }
     }
@@ -523,13 +581,33 @@ struct LogCtx {
     page: u32,
 }
 
-fn part_path(destination: &Path) -> PathBuf {
+/// The temp file for one task, and for that task only.
+///
+/// The name is a function of the destination *and the task id*. It used to be a
+/// function of the destination alone, and a filename template without `{page}`
+/// maps two pages of one artwork to one name — so two tasks opened the same
+/// `.part`, wrote into it concurrently, and both renamed it, which can publish
+/// two images interleaved into one file. The id makes each writer's temp its own;
+/// the rename then means "publish the file that is mine", and the last writer
+/// wins whole rather than in pieces.
+fn part_path(destination: &Path, id: TaskId) -> PathBuf {
     let mut name = destination
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".to_string());
-    name.push_str(".part");
+    name.push_str(&format!(".{id}.part"));
     destination.with_file_name(name)
+}
+
+/// Is there already a finished file at `destination`?
+///
+/// Existence is not enough. A crash between the write and the rename used to
+/// leave a zero-length destination behind, and `Path::exists` then reported that
+/// page as already downloaded for the life of the queue: the file was never
+/// retried and never written. A zero-length file is not an image, so it counts as
+/// missing and the next attempt replaces it.
+fn destination_is_complete(destination: &Path) -> bool {
+    std::fs::metadata(destination).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
 }
 
 async fn remove_part(part: &Path) {
@@ -622,6 +700,22 @@ mod tests {
         tokio::time::sleep(delay).await;
         live.fetch_sub(1, Ordering::SeqCst);
         Ok((body, Some("image/jpeg".to_string())))
+    }
+
+    /// Block until at least `count` tasks are running.
+    async fn wait_running(manager: &DownloadManager, count: usize) {
+        for _ in 0..400 {
+            let running = manager
+                .tasks()
+                .iter()
+                .filter(|task| task.state == TaskState::Running)
+                .count();
+            if running >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{count} tasks never reached Running");
     }
 
     async fn wait_terminal(manager: &DownloadManager) -> Vec<DownloadTask> {
@@ -997,12 +1091,154 @@ mod tests {
         );
     }
 
+    /// Two requests whose template renders one name must publish one of the two
+    /// bodies, whole. The `.part` name used to be a function of the destination
+    /// alone, so both tasks opened it, wrote into it and renamed it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_tasks_rendering_one_name_publish_one_whole_body() {
+        let dir = temp_dir("same-name");
+        let mut settings = config(dir.clone(), 2);
+        // No `{page}`: page 0 and page 1 both render "42.jpg".
+        settings.filename_template = "{illust_id}".to_string();
+        let manager = DownloadManager::new(settings);
+        manager.enqueue(vec![request(0), request(1)]);
+
+        // Four chunks each, so the old code interleaved them inside one temp file
+        // instead of merely racing on the rename.
+        let bodies = [vec![b'A'; 4 * 64 * 1024], vec![b'B'; 4 * 64 * 1024]];
+        let served = bodies.clone();
+        let fetch = move |url: String| {
+            let body = if url.contains("/0.jpg") {
+                served[0].clone()
+            } else {
+                served[1].clone()
+            };
+            async move { Ok::<_, PixivError>((body, None::<String>)) }
+        };
+        let runner = manager.clone();
+        let handle = tokio::spawn(async move { runner.run_with(fetch).await });
+        let tasks = wait_terminal(&manager).await;
+        handle.abort();
+
+        assert!(
+            tasks.iter().all(|t| t.state == TaskState::Completed),
+            "{tasks:?}"
+        );
+        let destination = tasks
+            .iter()
+            .filter_map(|t| t.destination.clone())
+            .next()
+            .expect("destination recorded");
+        assert_eq!(destination, dir.join("42.jpg"), "both tasks share one name");
+        let published = std::fs::read(&destination).expect("the name was published");
+        assert!(
+            published == bodies[0] || published == bodies[1],
+            "the published file must be exactly one task's body: {} bytes starting {:?}",
+            published.len(),
+            published.first()
+        );
+        // No temp file survives either task.
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".part"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A zero-length destination is a crash artefact, not a finished download:
+    /// treating it as present made the page permanently unavailable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_zero_length_destination_is_downloaded_again() {
+        let dir = temp_dir("zero-length");
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        manager.enqueue(vec![request(0)]);
+        let existing = dir.join("42_p1.jpg");
+        std::fs::write(&existing, b"").expect("seed an empty file");
+
+        let fetch =
+            move |_url: String| async move { Ok::<_, PixivError>((vec![7u8; 16], None::<String>)) };
+        let runner = manager.clone();
+        let handle = tokio::spawn(async move { runner.run_with(fetch).await });
+        let tasks = wait_terminal(&manager).await;
+        handle.abort();
+
+        assert_eq!(tasks[0].state, TaskState::Completed, "not skipped");
+        assert_eq!(std::fs::read(&existing).expect("replaced"), vec![7u8; 16]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cancelled task must give its permit back at once, not when the body it no
+    /// longer wants finally arrives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancelled_fetch_releases_its_permit_immediately() {
+        let dir = temp_dir("cancel-select");
+        let manager = DownloadManager::new(config(dir.clone(), 2));
+        let ids = manager.enqueue(vec![request(0), request(1)]);
+
+        // Both permits are held by requests that will not answer for 30 s.
+        let fetch = |_url: String| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<_, PixivError>((vec![1u8; 8], None::<String>))
+        };
+        let runner = manager.clone();
+        let handle = tokio::spawn(async move { runner.run_with(fetch).await });
+        wait_running(&manager, 2).await;
+
+        assert!(manager.cancel(ids[0]));
+        assert!(manager.cancel(ids[1]));
+        for _ in 0..200 {
+            if manager
+                .tasks()
+                .iter()
+                .all(|task| task.state == TaskState::Cancelled)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let states: Vec<TaskState> = manager.tasks().iter().map(|t| t.state.clone()).collect();
+        assert!(
+            states.iter().all(|state| *state == TaskState::Cancelled),
+            "both tasks must finish cancelled without the body arriving: {states:?}"
+        );
+
+        // The permits are free again, so a third request starts at once.
+        let third = manager.enqueue(vec![request(2)]);
+        let mut reached = false;
+        for _ in 0..100 {
+            if manager
+                .tasks()
+                .iter()
+                .any(|task| task.id == third[0] && task.state == TaskState::Running)
+            {
+                reached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        handle.abort();
+        assert!(
+            reached,
+            "a third request must reach Running promptly after both permits were cancelled"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
-    fn part_path_sits_next_to_the_destination() {
+    fn part_path_sits_next_to_the_destination_and_names_its_owner() {
         let destination = PathBuf::from("dir").join("42_p1.jpg");
         assert_eq!(
-            part_path(&destination),
-            PathBuf::from("dir").join("42_p1.jpg.part")
+            part_path(&destination, 7),
+            PathBuf::from("dir").join("42_p1.jpg.7.part")
         );
+        // Two tasks rendering one name never share a temp file.
+        assert_ne!(part_path(&destination, 7), part_path(&destination, 8));
+        assert_eq!(part_path(&destination, 7).parent(), destination.parent());
     }
 }

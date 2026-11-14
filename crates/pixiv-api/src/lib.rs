@@ -229,6 +229,43 @@ impl Failure {
     }
 }
 
+/// A failed mutation, and whether Pixiv may have applied it anyway.
+///
+/// A `POST` is not `GET`: replaying one is a second mutation, so the caller has to
+/// know whether the state it is about to describe could have moved. That is what
+/// [`Client::set_bookmark`] re-reads before it reports a failure.
+struct MutationFailure {
+    error: PixivError,
+    /// `true` when the request went out more than once, or when no reply was ever
+    /// seen. Both mean the server state is unknown.
+    possibly_applied: bool,
+}
+
+impl MutationFailure {
+    /// A rejection that proves the mutation did not happen: Pixiv answered, and
+    /// the answer was `{"error": true}` or a status that cannot have applied.
+    fn definite(error: PixivError) -> Self {
+        Self {
+            error,
+            possibly_applied: false,
+        }
+    }
+}
+
+/// May a failed `POST` be sent again?
+///
+/// Only when the server itself asked for it: a `429` or `503` that also carried a
+/// `Retry-After`. A bare transport error is never replayed. A bookmark that
+/// reached Pixiv and lost its reply is exactly the case where a second attempt
+/// changes the answer — the delete route is addressed by bookmark row id, so the
+/// replay answers "row gone" and the caller reported a failure for a mutation
+/// that had in fact succeeded.
+fn should_retry_mutation(attempt: u32, max_retries: u32, failure: &Failure) -> bool {
+    attempt < max_retries
+        && matches!(failure.status, Some(429) | Some(503))
+        && failure.retry_after.is_some()
+}
+
 /// Spacing gate shared by every clone of a [`Client`].
 ///
 /// It hands out the earliest instant each caller may start at, so concurrent
@@ -777,13 +814,20 @@ impl Client {
         restrict: BookmarkRestrict,
     ) -> Result<BookmarkState, PixivError> {
         self.require_session()?;
-        if add {
+        // Both directions are wrapped so the one failure that needs a decision —
+        // "the POST may have been applied and we never saw its reply" — can make
+        // it, instead of reporting a failure for a mutation that succeeded.
+        let mutation = if add {
             self.ensure_csrf().await?;
             let body = endpoint::bookmark_add_body(illust, restrict);
-            let reply = self.post_json(&endpoint::bookmark_add(), body).await?;
-            // A 2xx is not success on its own: these routes answer a 200
-            // envelope whose `error` flag is the authoritative verdict.
-            mapping::check_mutation(200, &reply)?;
+            match self.post_json(&endpoint::bookmark_add(), body).await {
+                // A 2xx is not success on its own: these routes answer a 200
+                // envelope whose `error` flag is the authoritative verdict.
+                Ok(reply) => {
+                    mapping::check_mutation(200, &reply).map_err(MutationFailure::definite)
+                }
+                Err(failure) => Err(failure),
+            }
         } else {
             let current = self.bookmark_state(illust).await?;
             if !current.bookmarked {
@@ -797,10 +841,30 @@ impl Client {
             };
             self.ensure_csrf().await?;
             let fields = endpoint::bookmark_delete_form(&row);
-            let reply = self
-                .post_form(&endpoint::bookmark_delete(), &fields)
-                .await?;
-            mapping::check_mutation(200, &reply)?;
+            match self.post_form(&endpoint::bookmark_delete(), &fields).await {
+                Ok(reply) => {
+                    mapping::check_mutation(200, &reply).map_err(MutationFailure::definite)
+                }
+                Err(failure) => Err(failure),
+            }
+        };
+        if let Err(failure) = mutation {
+            if failure.possibly_applied {
+                // The request was retried, or its reply was never seen. Read the
+                // server instead of guessing: if the state already says what the
+                // caller asked for, this is a success whose reply was lost.
+                if let Ok(state) = self.bookmark_state(illust).await {
+                    if state.bookmarked == add {
+                        tracing::debug!(
+                            illust = illust.0,
+                            add,
+                            "写操作报了错，但服务端状态已是目标状态；按成功处理"
+                        );
+                        return Ok(state);
+                    }
+                }
+            }
+            return Err(failure.error);
         }
         // Confirm against the server instead of trusting the POST.
         self.bookmark_state(illust).await
@@ -814,15 +878,40 @@ impl Client {
     pub async fn follow(&self, user: Id, follow: bool) -> Result<(), PixivError> {
         self.require_session()?;
         self.ensure_csrf().await?;
-        if follow {
+        let mutation = if follow {
             let fields = endpoint::follow_add_form(user, BookmarkRestrict::Public);
-            let body = self.post_form(&endpoint::follow_add(), &fields).await?;
-            mapping::check_follow_add(200, &body)
+            match self.post_form(&endpoint::follow_add(), &fields).await {
+                Ok(body) => {
+                    mapping::check_follow_add(200, &body).map_err(MutationFailure::definite)
+                }
+                Err(failure) => Err(failure),
+            }
         } else {
             let fields = endpoint::follow_remove_form(user);
-            let body = self.post_form(&endpoint::follow_remove(), &fields).await?;
-            mapping::check_follow_remove(200, &body, user)
+            match self.post_form(&endpoint::follow_remove(), &fields).await {
+                Ok(body) => mapping::check_follow_remove(200, &body, user)
+                    .map_err(MutationFailure::definite),
+                Err(failure) => Err(failure),
+            }
+        };
+        if let Err(failure) = mutation {
+            if failure.possibly_applied {
+                // Same rule as the bookmark routes: a replay or a lost reply is
+                // not a verdict, so read the server before reporting one.
+                if let Ok(current) = self.follow_state(user).await {
+                    if current == follow {
+                        tracing::debug!(
+                            user = user.0,
+                            follow,
+                            "关注写操作按失败处理，但服务端状态已是目标状态"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            return Err(failure.error);
         }
+        Ok(())
     }
 
     /// `GET /ajax/search/tags/{tag}` — translated tag metadata.
@@ -1043,13 +1132,19 @@ impl Client {
         }
     }
 
-    /// `POST` a form body, retrying retryable failures.
+    /// `POST` a form body.
     ///
-    /// Retries are limited to transport-level failures (network error, `429`,
-    /// `5xx`) plus one CSRF recovery: a `422` means the token went stale, and
-    /// refreshing it is the fix rather than a second identical request. A
-    /// `{"error": true}` answer is final and is reported as such.
-    async fn post_form(&self, url: &str, fields: &[(&str, String)]) -> Result<String, PixivError> {
+    /// Retries follow [`should_retry_mutation`] — a `429`/`503` that named a wait —
+    /// plus one CSRF recovery: a `422` means the token went stale, and refreshing
+    /// it is the fix rather than a second identical request. A `{"error": true}`
+    /// answer is final and is reported as such. Every failure says whether the
+    /// mutation might have landed, because a `POST` cannot be replayed by
+    /// assumption.
+    async fn post_form(
+        &self,
+        url: &str,
+        fields: &[(&str, String)],
+    ) -> Result<String, MutationFailure> {
         self.post_with_retry(
             url,
             endpoint::form_body(fields),
@@ -1059,41 +1154,58 @@ impl Client {
     }
 
     /// `POST` a JSON body (the bookmark routes take JSON, not a form).
-    async fn post_json(&self, url: &str, body: String) -> Result<String, PixivError> {
+    async fn post_json(&self, url: &str, body: String) -> Result<String, MutationFailure> {
         self.post_with_retry(url, body, "application/json").await
     }
 
     /// The shared `POST` retry loop.
+    ///
+    /// `sent` counts the requests that actually left this process, which is what
+    /// decides whether a failure may have been applied: one attempt whose reply was
+    /// never seen is as unknown as two attempts, and both are re-read by the caller.
     async fn post_with_retry(
         &self,
         url: &str,
         body: String,
         content_type: &'static str,
-    ) -> Result<String, PixivError> {
+    ) -> Result<String, MutationFailure> {
         let max_retries = self.inner.config.max_retries;
         let mut attempt = 0;
+        let mut sent = 0_u32;
         let mut refreshed = false;
         loop {
+            sent = sent.saturating_add(1);
             let failure = match self.attempt_post(url, body.clone(), content_type).await {
                 Ok(text) => return Ok(text),
                 Err(failure) => failure,
             };
+            // One attempt that produced no reply at all is a mutation of unknown
+            // state; two attempts prove the request reached the server at least once.
+            let possibly_applied = sent > 1 || failure.status.is_none();
             if !refreshed && failure.is_csrf_rejection() {
                 // The session token rotated out from under us. Refresh once and
                 // replay: retrying with the same token would just fail again.
                 tracing::debug!(url = %url, "CSRF 校验失败，刷新令牌后重试");
-                self.refresh_identity().await?;
+                self.refresh_identity()
+                    .await
+                    .map_err(|error| MutationFailure {
+                        error,
+                        possibly_applied,
+                    })?;
                 refreshed = true;
                 continue;
             }
-            if !mapping::should_retry(attempt, max_retries, &failure.error) {
-                return Err(failure.error);
+            if !should_retry_mutation(attempt, max_retries, &failure) {
+                return Err(MutationFailure {
+                    error: failure.error,
+                    possibly_applied,
+                });
             }
             tracing::debug!(
                 attempt,
                 url = %url,
                 error = %failure.error,
-                "重试 Pixiv 写操作"
+                "服务端要求稍后重试写操作"
             );
             tokio::time::sleep(mapping::backoff_delay(attempt, failure.retry_after)).await;
             attempt += 1;
@@ -1317,6 +1429,64 @@ mod tests {
             client.bookmarks(Id(1), false, 1).await,
             Err(PixivError::Unauthorized)
         ));
+    }
+
+    // -- mutation retries --------------------------------------------------
+
+    /// A `POST` is replayed only when the server named a wait.
+    #[test]
+    fn a_mutation_is_replayed_only_for_a_429_or_503_that_names_a_wait() {
+        let wait = Some(Duration::from_secs(2));
+        let hinted_429 =
+            Failure::with_hint(PixivError::http(429, "slow down"), wait).with_status(429);
+        let hinted_503 = Failure::with_hint(PixivError::http(503, "later"), wait).with_status(503);
+        let bare_429 =
+            Failure::with_hint(PixivError::http(429, "slow down"), None).with_status(429);
+        let bare_500 = Failure::with_hint(PixivError::http(500, "boom"), wait).with_status(500);
+        let transport = Failure::new(PixivError::Network("connection reset".to_string()));
+
+        assert!(should_retry_mutation(0, 2, &hinted_429));
+        assert!(should_retry_mutation(0, 2, &hinted_503));
+        assert!(
+            !should_retry_mutation(0, 2, &bare_429),
+            "a 429 that said nothing is not a scheduled replay"
+        );
+        assert!(!should_retry_mutation(0, 2, &bare_500));
+        assert!(
+            !should_retry_mutation(0, 2, &transport),
+            "a lost reply must not be replayed: the mutation may have landed"
+        );
+        // The attempt budget still binds.
+        assert!(!should_retry_mutation(2, 2, &hinted_503));
+    }
+
+    /// And the loop obeys it: a bare `429` is sent once, not three times.
+    #[tokio::test]
+    async fn a_bare_429_is_not_replayed() {
+        let url = "https://www.pixiv.net/ajax/illust/1/bookmarkData";
+        let client = scripted_client(&[(url, 429, "{}")]);
+        let failure = client
+            .post_form(url, &[("illust_id", "1".to_string())])
+            .await
+            .expect_err("a 429 fails the mutation");
+        assert_eq!(asked(&client).len(), 1, "one attempt, not max_retries + 1");
+        assert!(
+            !failure.possibly_applied,
+            "the server answered 429 before running anything: nothing to re-read"
+        );
+    }
+
+    /// A refusal that proves nothing happened is reported as definite.
+    #[tokio::test]
+    async fn a_logical_rejection_is_a_definite_failure() {
+        let url = "https://www.pixiv.net/ajax/illust/1/bookmarkData";
+        let client = scripted_client(&[(url, 400, r#"{"error":true,"message":"bad"}"#)]);
+        let failure = client
+            .post_form(url, &[("illust_id", "1".to_string())])
+            .await
+            .expect_err("a flagged 400 fails the mutation");
+        assert!(!failure.possibly_applied);
+        assert_eq!(asked(&client).len(), 1);
     }
 
     #[test]

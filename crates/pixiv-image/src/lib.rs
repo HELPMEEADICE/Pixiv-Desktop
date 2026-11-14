@@ -76,8 +76,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use futures::FutureExt;
 use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt};
 use parking_lot::Mutex;
 use pixiv_types::{PIXIV_REFERER, PixivError};
 use tokio::sync::OnceCell;
@@ -100,6 +100,34 @@ const USER_AGENT: &str = pixiv_types::BROWSER_USER_AGENT;
 
 /// Upper bound for one image download.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ceiling on one encoded image body: 32 MiB.
+///
+/// Enforced by [`BodyCeiling`], before the body is buffered. Pixiv's largest
+/// original page is a ~4 000 x 6 000 JPEG, a few MiB on the wire; 32 MiB is
+/// several times that, so a legitimate page never meets the ceiling while a
+/// hostile or broken response is refused after one chunk instead of after the
+/// machine has paid for it. It is deliberately looser than the API crate's text
+/// ceiling: an artwork is a binary payload, not a JSON document.
+const MAX_ENCODED_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Largest accepted edge of one decoded artwork: 16 384 px.
+///
+/// The same number the ugoira crate uses for a frame, and for the same reason:
+/// it is the largest dimension GIF can express, it is four times the widest
+/// original Pixiv publishes (about 4 000 px), and combined with
+/// [`MAX_DECODED_BYTES`] it bounds one decode by construction rather than by
+/// observation. A 12 000 x 12 000 response is refused here instead of allocated.
+const MAX_IMAGE_SIDE: u32 = 16_384;
+
+/// Ceiling on the decoded RGBA8 bytes of one artwork: 256 MiB.
+///
+/// The pixel buffer is the allocation that actually hurts: 16 384 squared is a
+/// gigabyte of RGBA, so the edge cap alone proves nothing. 256 MiB admits an
+/// 8 192 x 8 192 original (exactly 256 MiB) and every real page with two orders
+/// of magnitude to spare, while refusing the 12 000 x 12 000 case in the
+/// round-eight plan (576 MiB) before a single pixel is reserved.
+const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Decoded, tightly packed RGBA8 pixels.
 #[derive(Debug, Clone)]
@@ -268,14 +296,95 @@ impl BytesFetcher for HttpFetcher {
             if !status.is_success() {
                 return Err(PixivError::http(status.as_u16(), url.to_owned()));
             }
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|error| PixivError::Network(error.to_string()))?;
-            Ok(bytes.to_vec())
+            read_image_body(response).await
         }
         .boxed()
     }
+}
+
+/// The byte ceiling for one image body.
+///
+/// The same shape as the API crate's body budget, for the same reason: the
+/// declared `Content-Length` is judged before the first byte is buffered, and
+/// every arriving chunk is counted afterwards, because a chunked response
+/// declares nothing and a lying declaration is not a bound. Buffering first and
+/// checking afterwards is what made a hostile response cost a full allocation.
+struct BodyCeiling {
+    limit: u64,
+    taken: u64,
+}
+
+impl BodyCeiling {
+    fn new(limit: u64) -> Self {
+        Self { limit, taken: 0 }
+    }
+
+    /// Refuse a declared length above the ceiling, before reading anything.
+    fn check_declared(&self, declared: Option<u64>) -> Result<(), PixivError> {
+        match declared {
+            Some(len) if len > self.limit => Err(self.over(len)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Count one chunk, failing the moment the running total crosses the ceiling.
+    fn take(&mut self, len: usize) -> Result<(), PixivError> {
+        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        let taken = self.taken.saturating_add(len);
+        if taken > self.limit {
+            return Err(self.over(taken));
+        }
+        self.taken = taken;
+        Ok(())
+    }
+
+    /// The refusal an oversized body produces.
+    ///
+    /// [`PixivError::Decode`], not `Network`: an answer that is oversized by
+    /// construction is not worth requesting again, and the single-flight cell
+    /// then reports it as [`FetchError::Decode`] to every waiter instead of as a
+    /// retryable transport failure.
+    fn over(&self, size: u64) -> PixivError {
+        PixivError::Decode(format!(
+            "图片响应 {size} 字节超过 {} MiB 上限，已停止读取",
+            self.limit / (1024 * 1024)
+        ))
+    }
+}
+
+/// Buffer one image body under [`MAX_ENCODED_BYTES`].
+///
+/// `reqwest`'s `bytes()` collects the whole body and only then hands it over, so
+/// nothing can refuse a 300 MiB answer; this walks the chunk stream instead and
+/// stops at the ceiling. A connection that dies mid-body is a truncated image,
+/// which is a [`PixivError::Decode`] rather than a transport failure: the bytes
+/// that did arrive cannot become pixels either way.
+async fn read_image_body(response: reqwest::Response) -> Result<Vec<u8>, PixivError> {
+    let mut ceiling = BodyCeiling::new(MAX_ENCODED_BYTES);
+    let declared = response.content_length();
+    ceiling.check_declared(declared)?;
+    // Reserve only what was declared and admitted: the declaration is the one
+    // trustworthy hint about allocation, and it is already bounded by the limit.
+    let capacity = usize::try_from(declared.unwrap_or(0).min(MAX_ENCODED_BYTES)).unwrap_or(0);
+    let mut body: Vec<u8> = Vec::with_capacity(capacity);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) if body.is_empty() => {
+                return Err(PixivError::Network(error.to_string()));
+            }
+            Err(error) => {
+                return Err(PixivError::Decode(format!(
+                    "图片响应在 {} 字节处中断：{error}",
+                    body.len()
+                )));
+            }
+        };
+        ceiling.take(chunk.len())?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 struct Inner {
@@ -632,10 +741,42 @@ async fn decode_owned(
     }
 }
 
+/// Decoder limits for one artwork: the edge cap, the allocation budget.
+///
+/// Starts from [`image::Limits::no_limits`] and re-adds exactly the limits this
+/// crate wants, so a change to the `image` crate's defaults can neither loosen
+/// nor tighten them — the same shape the ugoira crate uses for a frame.
+fn decode_limits(max_alloc: u64) -> image::Limits {
+    let mut limits = image::Limits::no_limits();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(max_alloc);
+    limits
+}
+
 /// Blocking half of the decode step.
 fn decode_bytes(encoded: &[u8], wanted: Option<u32>) -> Result<DecodedImage, FetchError> {
-    let decoded =
-        image::load_from_memory(encoded).map_err(|error| FetchError::Decode(error.to_string()))?;
+    decode_bytes_with(encoded, wanted, decode_limits(MAX_DECODED_BYTES))
+}
+
+/// [`decode_bytes`] with the limits passed in, so a test can prove they bind.
+///
+/// `ImageReader::decode` reserves the decoder's `total_bytes()` against
+/// `max_alloc` *before* it decodes (image-0.25.10 src/io/image_reader_type.rs:319),
+/// so the pixel buffer of a hostile header is refused rather than allocated; the
+/// edge caps are strict and are checked when the decoder is constructed.
+fn decode_bytes_with(
+    encoded: &[u8],
+    wanted: Option<u32>,
+    limits: image::Limits,
+) -> Result<DecodedImage, FetchError> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(encoded))
+        .with_guessed_format()
+        .map_err(|error| FetchError::Decode(error.to_string()))?;
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|error| FetchError::Decode(error.to_string()))?;
     let rgba = decoded.to_rgba8();
     let image = DecodedImage {
         width: rgba.width(),
@@ -712,8 +853,8 @@ mod ua_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        BytesFetcher, CacheConfig, DecodedImage, ImageCache, PixivError, Priority, cache_key,
-        fit_to_width,
+        BodyCeiling, BytesFetcher, CacheConfig, DecodedImage, FetchError, ImageCache, PixivError,
+        Priority, cache_key, decode_bytes, decode_bytes_with, fit_to_width,
     };
     use futures::FutureExt;
     use futures::future::BoxFuture;
@@ -1397,6 +1538,75 @@ mod tests {
         let hot = cache.stats();
         assert_eq!(hot.memory_hits, 1);
         assert_eq!(hot.network_loads, 1);
+    }
+
+    // -- the two ceilings on remote bytes ----------------------------------
+
+    /// The encoded-body ceiling refuses a declared length before reading and a
+    /// chunked body the moment it crosses the limit, and the refusal is a
+    /// `Decode` rather than a retryable transport error.
+    #[test]
+    fn the_body_ceiling_refuses_before_buffering() {
+        let ceiling = BodyCeiling::new(1024);
+        assert!(ceiling.check_declared(Some(2048)).is_err());
+        assert!(ceiling.check_declared(Some(1024)).is_ok());
+        assert!(
+            ceiling.check_declared(None).is_ok(),
+            "a chunked answer declares nothing, so only the running count can bind"
+        );
+        assert!(matches!(
+            ceiling.check_declared(Some(4096)),
+            Err(PixivError::Decode(_))
+        ));
+
+        let mut running = BodyCeiling::new(1024);
+        assert!(running.take(512).is_ok());
+        assert!(running.take(512).is_ok());
+        assert_eq!(running.taken, 1024, "exactly at the ceiling is allowed");
+        assert!(running.take(1).is_err());
+        assert_eq!(running.taken, 1024, "a refused chunk is not counted");
+    }
+
+    /// A decode is bounded by the edge caps and by the pixel-byte budget, and an
+    /// artwork over either one fails as a `Decode` instead of allocating.
+    #[test]
+    fn decode_refuses_an_artwork_over_the_limits() {
+        let body = png_bytes(64, 64, 5);
+        // The shipped limits admit a 64x64 cover: 16 KiB of RGBA.
+        let admitted = decode_bytes(&body, None).expect("a normal cover decodes");
+        assert_eq!((admitted.width, admitted.height), (64, 64));
+
+        // One byte short of the pixel buffer: refused before it is reserved.
+        let tight = super::decode_limits(64 * 64 * 4 - 1);
+        match decode_bytes_with(&body, None, tight) {
+            Err(FetchError::Decode(message)) => assert!(!message.is_empty()),
+            other => panic!("expected Decode, got {other:?}"),
+        }
+
+        // The edge cap is strict: one pixel narrower than the cover refuses it,
+        // and exactly at the cap is accepted.
+        let mut narrow = super::decode_limits(super::MAX_DECODED_BYTES);
+        narrow.max_image_width = Some(63);
+        assert!(matches!(
+            decode_bytes_with(&body, None, narrow),
+            Err(FetchError::Decode(_))
+        ));
+        let mut exact = super::decode_limits(super::MAX_DECODED_BYTES);
+        exact.max_image_width = Some(64);
+        assert!(decode_bytes_with(&body, None, exact).is_ok());
+
+        // The numbers the shipped path uses, restated so a loosening is visible:
+        // a 12 000 x 12 000 response needs 576 MiB of pixels and is refused by
+        // the allocation budget, which is the case the plan names.
+        let shipped = super::decode_limits(super::MAX_DECODED_BYTES);
+        assert_eq!(shipped.max_image_width, Some(super::MAX_IMAGE_SIDE));
+        assert_eq!(shipped.max_image_height, Some(super::MAX_IMAGE_SIDE));
+        assert_eq!(super::MAX_IMAGE_SIDE, 16_384);
+        let pixels = 12_000_u64 * 12_000 * 4;
+        assert!(
+            pixels > super::MAX_DECODED_BYTES,
+            "12000x12000 must exceed the pixel ceiling"
+        );
     }
 
     #[test]

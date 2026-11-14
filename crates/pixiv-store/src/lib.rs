@@ -122,8 +122,20 @@ CREATE INDEX IF NOT EXISTS idx_view_history_viewed_at ON view_history (viewed_at
 CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON downloads (created_at DESC);
 "#;
 
+/// Migration step 2: the sequence indexes.
+///
+/// `push_search` and `record_view` each read `MAX(seq)` to compute the next
+/// sequence, and `search_history()` orders by `seq DESC`; without an index all
+/// three read the whole table. `IF NOT EXISTS` keeps the step re-runnable: a
+/// database whose version row was lost (or a copy restored from a backup) can be
+/// upgraded again without the batch failing on an index that is already there.
+const MIGRATION_STEP_2: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_search_history_seq ON search_history (seq DESC);
+CREATE INDEX IF NOT EXISTS idx_view_history_seq ON view_history (seq DESC);
+"#;
+
 /// Ordered migration steps; entry `i` upgrades the schema to version `i + 1`.
-const MIGRATIONS: &[&str] = &[MIGRATION_STEP_1];
+const MIGRATIONS: &[&str] = &[MIGRATION_STEP_1, MIGRATION_STEP_2];
 
 /// Version the current build produces.
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -482,13 +494,87 @@ mod tests {
         }
     }
 
+    /// The plan SQLite actually uses, as one printable line per row.
+    fn plan_of(conn: &Connection, sql: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("query plan");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("plan rows");
+        rows.map(|row| row.expect("plan detail"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// `MAX(seq)` and `ORDER BY seq DESC` must not read the whole table. Before
+    /// migration step 2 both said `SCAN search_history`: the next sequence was
+    /// found by walking every row on each search and each view.
     #[test]
-    fn schema_version_is_one_after_open() {
+    fn the_sequence_queries_use_an_index() {
         let s = store();
-        assert_eq!(s.schema_version().unwrap(), 1);
+        s.push_search("alpha").unwrap();
+        s.record_view(&view("1", 10)).unwrap();
+        let conn = s.lock();
+
+        // SQLite turns `MAX(seq)` into a single seek of the index, which is why
+        // the plan reads SEARCH and not SCAN.
+        let search_seq = plan_of(
+            &conn,
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM search_history",
+        );
+        assert!(
+            search_seq
+                .contains("SEARCH search_history USING COVERING INDEX idx_search_history_seq"),
+            "{search_seq}"
+        );
+        assert!(!search_seq.contains("SCAN"), "{search_seq}");
+
+        let view_seq = plan_of(&conn, "SELECT COALESCE(MAX(seq), 0) + 1 FROM view_history");
+        assert!(
+            view_seq.contains("SEARCH view_history USING COVERING INDEX idx_view_history_seq"),
+            "{view_seq}"
+        );
+        assert!(!view_seq.contains("SCAN"), "{view_seq}");
+
+        // The recent-search list is served in index order instead of sorted.
+        let recent = plan_of(
+            &conn,
+            "SELECT word FROM search_history ORDER BY seq DESC LIMIT 5",
+        );
+        assert!(
+            recent.contains("USING INDEX idx_search_history_seq"),
+            "{recent}"
+        );
+        assert!(!recent.contains("USE TEMP B-TREE FOR ORDER BY"), "{recent}");
+    }
+
+    /// A database restored from a backup can carry the index without the version
+    /// row, so the step has to be re-runnable rather than merely run once.
+    #[test]
+    fn the_sequence_migration_can_run_twice() {
+        let s = store();
+        s.push_search("alpha").unwrap();
+        {
+            let conn = s.lock();
+            conn.execute_batch(MIGRATION_STEP_2)
+                .expect("re-applying the step is a no-op");
+            conn.execute_batch(MIGRATION_STEP_2)
+                .expect("and so is a third application");
+        }
+        assert_eq!(s.search_history(10).unwrap(), words(&["alpha"]));
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn schema_version_tracks_the_migration_list() {
+        // Two steps today: the tables, then the sequence indexes.
+        assert_eq!(SCHEMA_VERSION, 2);
+        let s = store();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
 
         let fresh = crate::Store::open_in_memory().unwrap();
-        assert_eq!(fresh.schema_version().unwrap(), 1);
+        assert_eq!(fresh.schema_version().unwrap(), SCHEMA_VERSION);
     }
 
     #[test]
@@ -694,7 +780,7 @@ mod tests {
 
         {
             let s = Store::open(&path).unwrap();
-            assert_eq!(s.schema_version().unwrap(), 1);
+            assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
             s.push_search("初音ミク").unwrap();
             s.push_search("blue archive").unwrap();
             s.record_view(&view("42", 1_700_000_000)).unwrap();
@@ -708,7 +794,7 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(
             reopened.schema_version().unwrap(),
-            1,
+            SCHEMA_VERSION,
             "migrations stay idempotent"
         );
         assert_eq!(
@@ -783,6 +869,6 @@ mod tests {
         assert_eq!(s.stats().unwrap().history_entries, 40);
         assert_eq!(s.get_setting("key-3-9").unwrap().as_deref(), Some("value"));
         // The only shared value: the last writer wins, but nothing is corrupt.
-        assert_eq!(s.schema_version().unwrap(), 1);
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
     }
 }

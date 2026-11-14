@@ -10,11 +10,12 @@
 //! memory-only: [`DiskTier::open`] returns `None` and the caller warns.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use parking_lot::{Mutex, MutexGuard};
 use tracing::warn;
 
 /// Encoded-bytes tier with a byte budget and an explicit prune path.
@@ -22,6 +23,11 @@ pub(crate) struct DiskTier {
     dir: PathBuf,
     budget: u64,
     bytes: AtomicU64,
+    /// Serialises the accounting, so a trim can never write back a total that a
+    /// concurrent `put` has already moved past.
+    accounting: Mutex<()>,
+    /// Distinguishes two writers' temp files for one key.
+    writes: AtomicU64,
 }
 
 impl DiskTier {
@@ -57,6 +63,8 @@ impl DiskTier {
             dir,
             budget,
             bytes: AtomicU64::new(bytes),
+            accounting: Mutex::new(()),
+            writes: AtomicU64::new(0),
         })
     }
 
@@ -89,29 +97,79 @@ impl DiskTier {
     }
 
     /// Store one entry, replacing any previous bytes for the same key.
+    ///
+    /// Create, write, `sync_all`, rename — in that order, in a temp file whose
+    /// name belongs to this writer alone. The old shape was
+    /// `path.with_extension("part")`: one fixed name per key, and the key is the
+    /// URL digest, so two single-flight cells for the same URL at different
+    /// widths shared a temp file and one rename could publish the other
+    /// writer's half-written bytes. `fs::write` also returned as soon as the
+    /// kernel had the bytes, so a crash could leave the name in place with
+    /// nothing behind it.
+    ///
+    /// Cost: four syscalls per entry (create, write, fsync, rename) where it used
+    /// to be two (write, rename), and the whole sequence runs under the
+    /// accounting lock so the counter and the tree can never disagree. The tier is
+    /// written from a blocking pool, one entry at a time; a cover is worth the
+    /// fsync and the serialisation is what makes [`Self::enforce_budget`] exact.
     pub(crate) fn put(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
         let path = self.path(key);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        // Held for the write as well as the arithmetic: a file that exists but is
+        // not yet credited is a file a concurrent trim may delete and then
+        // subtract, which is the same drift in the other direction.
+        let _guard = self.accounting();
         let previous = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-        let temp = path.with_extension("part");
-        fs::write(&temp, bytes)?;
-        fs::rename(&temp, &path)?;
-        self.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        self.bytes.fetch_sub(previous, Ordering::Relaxed);
+        let temp = self.temp_path(&path);
+        let written = write_synced(&temp, bytes).and_then(|()| fs::rename(&temp, &path));
+        if let Err(err) = written {
+            // Never leave a temp file behind on the failure path: the tier counts
+            // every file it can see, so an orphan is charged to the budget until
+            // the next prune deletes it.
+            let _ = fs::remove_file(&temp);
+            return Err(err);
+        }
+        let added = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        self.bytes.fetch_add(added, Ordering::Relaxed);
+        let _ = self.subtract(previous);
         if self.bytes() > self.budget {
             self.enforce_budget();
         }
         Ok(())
     }
 
+    /// A temp path only this writer can use.
+    ///
+    /// `{name}.{pid}-{seq}.part`: the sequence makes two writers of one key
+    /// distinct inside a process, the pid across processes, and the `.part`
+    /// suffix keeps the file unmistakably not-an-entry.
+    fn temp_path(&self, path: &Path) -> PathBuf {
+        let seq = self.writes.fetch_add(1, Ordering::Relaxed);
+        let mut name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".to_string());
+        name.push_str(&format!(".{}-{seq}.part", std::process::id()));
+        path.with_file_name(name)
+    }
+
+    /// The accounting guard. `parking_lot` does not poison, so a panic elsewhere
+    /// cannot wedge the tier.
+    fn accounting(&self) -> MutexGuard<'_, ()> {
+        self.accounting.lock()
+    }
+
+    /// Drop one entry. The measurement, the unlink and the subtraction share one
+    /// lock section, so a trim cannot delete the same file underneath it.
     pub(crate) fn remove(&self, key: &str) -> io::Result<()> {
         let path = self.path(key);
+        let _guard = self.accounting();
         let freed = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
         match fs::remove_file(&path) {
             Ok(()) => {
-                self.bytes.fetch_sub(freed, Ordering::Relaxed);
+                let _ = self.subtract(freed);
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -120,37 +178,82 @@ impl DiskTier {
     }
 
     /// Delete everything the tier holds, returning the bytes reclaimed.
+    ///
+    /// The counter is decremented by exactly what this pass deleted instead of
+    /// being reset to zero: a `put` that lands during the walk has already added
+    /// its own bytes, and `store(0)` would erase that credit and leave the tier
+    /// believing it holds less than it does.
     pub(crate) fn clear(&self) -> io::Result<u64> {
+        let _guard = self.accounting();
         let entries = walk(&self.dir)?;
         let mut reclaimed = 0;
         for (_, size, path) in entries {
             match fs::remove_file(&path) {
-                Ok(()) => reclaimed += size,
+                Ok(()) => {
+                    reclaimed += size;
+                    let _ = self.subtract(size);
+                }
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => return Err(err),
             }
         }
-        self.bytes.store(0, Ordering::Relaxed);
         Ok(reclaimed)
     }
 
-    /// Drop oldest entries until the budget holds. Called only when over.
+    /// Drop oldest entries until the budget holds. The caller holds the
+    /// accounting lock.
+    ///
+    /// `store(total)` was the defect: the total was computed from a snapshot and
+    /// then written back over a counter that `put` and `remove` maintain with
+    /// `fetch_add`/`fetch_sub`, so a concurrent write was silently dropped and the
+    /// tier stopped trimming. The loop now only *decides* with its local total,
+    /// and the counter is decremented by exactly what this pass removed.
     fn enforce_budget(&self) {
         let Ok(mut entries) = walk(&self.dir) else {
             return;
         };
         entries.sort_by_key(|entry| entry.0);
         let mut total = self.bytes();
+        let mut trimmed = 0u64;
         for (_, size, path) in entries {
             if total <= self.budget {
                 break;
             }
             if fs::remove_file(&path).is_ok() {
                 total = total.saturating_sub(size);
+                trimmed = trimmed.saturating_add(size);
             }
         }
-        self.bytes.store(total, Ordering::Relaxed);
+        if trimmed > 0 {
+            let _ = self.subtract(trimmed);
+        }
     }
+
+    /// Subtract from the counter without underflowing.
+    ///
+    /// Two trims can race on one file, and the size read before a delete can
+    /// exceed what the counter still credits, so a bare `fetch_sub` would wrap to
+    /// a value near `u64::MAX` and switch trimming off for good.
+    fn subtract(&self, amount: u64) -> u64 {
+        self.bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(amount))
+            })
+            .unwrap_or(0)
+    }
+}
+
+/// Create `path`, write every byte of `bytes`, and flush it to the platter.
+///
+/// `fs::write` stops at the kernel: after it returns the name can exist while
+/// the data behind it does not, and only a crash reveals that. Readers here do
+/// recover from a torn entry (a decode failure drops it and re-fetches, see
+/// `crates/pixiv-image/src/lib.rs`), but relying on that means the recovery path
+/// is the durability story. One `sync_all` per entry removes the reliance.
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 /// `(modified, size, path)` for every file under `dir`, recursively.
@@ -214,6 +317,99 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         tier.put("cc-newest", b"9999").expect("put");
         assert!(tier.bytes() <= 8);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Two writers of one key must not share a temp file. The defect was
+    /// `path.with_extension("part")`: one name per key, and the key is the URL
+    /// digest, so two single-flight cells for the same URL at different widths
+    /// wrote and renamed the same temp.
+    #[test]
+    fn each_writer_gets_its_own_temp_name() {
+        let dir = scratch("disk-temp");
+        let tier = DiskTier::open(dir.clone(), 1 << 20).expect("disk tier");
+        let path = tier.dir().join("ab").join("abcdef");
+        let first = tier.temp_path(&path);
+        let second = tier.temp_path(&path);
+        assert_ne!(
+            first, second,
+            "two writers of one key must not share a temp file"
+        );
+        assert_ne!(first, path.with_extension("part"), "the fixed name is gone");
+        assert_eq!(first.parent(), path.parent(), "temp sits beside the entry");
+        assert!(first.to_string_lossy().ends_with(".part"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Concurrent writers of one key publish exactly one of their bodies, whole:
+    /// never an interleaving of the two, and no temp file left behind.
+    #[test]
+    fn two_writers_of_one_key_never_publish_a_torn_entry() {
+        use std::sync::Arc;
+        let dir = scratch("disk-race");
+        let tier = Arc::new(DiskTier::open(dir.clone(), 1 << 20).expect("disk tier"));
+        let first = vec![b'a'; 64 * 1024];
+        let second = vec![b'b'; 64 * 1024];
+        let mut writers = Vec::new();
+        for body in [first.clone(), second.clone()] {
+            let tier = Arc::clone(&tier);
+            writers.push(std::thread::spawn(move || {
+                for _ in 0..8 {
+                    tier.put("00112233", &body).expect("put");
+                }
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        let published = tier.get("00112233").expect("an entry survives");
+        assert!(
+            published == first || published == second,
+            "the published entry is one writer's bytes, not a mix"
+        );
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .expect("read cache dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".part"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The counter describes the tree. It used to be a total written back over a
+    /// counter that `put`/`remove` maintain with `fetch_add`/`fetch_sub`, so a
+    /// concurrent write was dropped and the tier stopped trimming.
+    #[test]
+    fn the_byte_counter_never_drifts_from_the_tree() {
+        use std::sync::Arc;
+        let dir = scratch("disk-accounting");
+        let tier = Arc::new(DiskTier::open(dir.clone(), 16).expect("disk tier"));
+        let mut writers = Vec::new();
+        for writer in 0..8u32 {
+            let tier = Arc::clone(&tier);
+            writers.push(std::thread::spawn(move || {
+                tier.put(&format!("{writer:02}-entry"), b"1234")
+                    .expect("put");
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        let on_disk: u64 = super::walk(&dir)
+            .expect("walk")
+            .iter()
+            .map(|entry| entry.1)
+            .sum();
+        assert_eq!(
+            tier.bytes(),
+            on_disk,
+            "the counter must describe the tree, not a stale total"
+        );
+        assert!(on_disk <= 16, "trimming kept the budget: {on_disk} bytes");
         let _ = fs::remove_dir_all(&dir);
     }
 
