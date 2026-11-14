@@ -1,4 +1,6 @@
 use super::*;
+use pixiv_download::{DownloadTask, TaskState};
+use std::sync::OnceLock;
 
 /// Take the one queue snapshot a tick is allowed to take.
 ///
@@ -34,6 +36,16 @@ impl App {
 
 impl App {
     pub(crate) fn push_downloads(&self) {
+        // Round nine (G24): a capture can ask for one deterministic queue instead of
+        // whatever this machine's history left behind. The fixture replaces the
+        // *snapshot*, never the publish path, so the rows a capture photographs are
+        // the rows `to_download_rows` builds (tools/fixture.ps1 is the other half of
+        // this seam and names the state).
+        if fixture_env() == Some(Fixture::Downloads) {
+            let (tasks, throughput) = fixture_downloads();
+            self.publish_downloads(tasks, throughput);
+            return;
+        }
         // One snapshot per call. The 500ms timer used to take one just to ask
         // "is the queue empty" and this function took a second one, and
         // `DownloadManager::tasks` deep-clones every row
@@ -42,23 +54,324 @@ impl App {
         let Some(tasks) =
             snapshot_downloads(|| self.downloads.tasks(), self.download_rows.row_count())
         else {
+            // Idle: no task and no row. One thing still has to be cleared by hand,
+            // because nothing else will: a rate describes the three seconds that just
+            // passed, so a queue that emptied would otherwise keep the last number it
+            // printed on screen for the rest of the session. Slint drops a write of an
+            // equal value, so repeating this on an idle tick paints nothing.
+            let ui = self.ui();
+            ui.set_throughput("".into());
+            ui.set_queue_paused(false);
             return;
         };
-        let rows = to_download_rows(tasks);
+        self.publish_downloads(tasks, self.downloads.throughput());
+    }
+
+    /// Apply one queue snapshot to the downloads page: the rows, the three counts the
+    /// page already drew, and the four properties round nine added (§4:
+    /// `queue-paused`, `queue-done`, `queue-total`, `throughput`).
+    fn publish_downloads(&self, tasks: Vec<DownloadTask>, throughput_bytes_per_second: u64) {
+        let view = DownloadsView::build(tasks, throughput_bytes_per_second);
         let ui = self.ui();
-        let active = rows
+        let active = view
+            .rows
             .iter()
             .filter(|row| row.state == 0 || row.state == 1)
             .count() as i32;
-        let done = rows.iter().filter(|row| row.state == 2).count() as i32;
-        let failed = rows.iter().filter(|row| row.state == 3).count() as i32;
+        let done = view.rows.iter().filter(|row| row.state == 2).count() as i32;
+        let failed = view.rows.iter().filter(|row| row.state == 3).count() as i32;
         // Patch in place. The old code built a brand-new `VecModel` every 500ms,
         // which replaced every row element: the row under the pointer lost its
         // hover state five times a second, and an idle queue still did that work.
-        sync_download_rows(&self.download_rows, rows);
+        sync_download_rows(&self.download_rows, view.rows);
         ui.set_downloads_active(active);
         ui.set_downloads_done(done);
         ui.set_downloads_failed(failed);
+        ui.set_queue_paused(view.paused);
+        ui.set_queue_done(view.done);
+        ui.set_queue_total(view.total);
+        ui.set_throughput(view.throughput.into());
+    }
+}
+
+impl App {
+    /// Hold one row (F5). `pause` reuses the in-flight cancel inside the manager, so a
+    /// running task gives its concurrency permit back at once instead of holding it
+    /// until its body would have landed.
+    pub(crate) fn pause_download(&self, id: i32) -> bool {
+        let changed = self.downloads.pause(id.max(0) as u64);
+        self.push_downloads();
+        changed
+    }
+
+    /// Send one held row back to the queue. HTTP Range resume is out of scope this
+    /// round (plan §5 F5), so the body starts again from zero - the row keeps the page
+    /// it is on, which is why a held row keeps its own progress on screen.
+    pub(crate) fn resume_download(&self, id: i32) -> bool {
+        let changed = self.downloads.resume(id.max(0) as u64);
+        self.push_downloads();
+        changed
+    }
+
+    /// The header's single button, in both directions.
+    ///
+    /// The direction is read from the queue rather than from the property the button
+    /// was last drawn with: a tick between the click and the read can land either side
+    /// of a row finishing, and a button that trusted its own label would pause a queue
+    /// the user had just resumed.
+    pub(crate) fn toggle_pause_all(&self) {
+        if queue_is_paused(&self.downloads.tasks()) {
+            self.downloads.resume_all();
+        } else {
+            self.downloads.pause_all();
+        }
+        self.push_downloads();
+    }
+}
+
+/// Everything the downloads page draws, from one queue snapshot.
+///
+/// Pure on purpose: the live queue, the fixture and the tests all take this one path,
+/// so the numbers a capture asserts are the numbers the app computes rather than a
+/// second set written next to them.
+pub(crate) struct DownloadsView {
+    pub(crate) rows: Vec<DownloadRow>,
+    /// Every row that can be held is held, and there is at least one such row.
+    pub(crate) paused: bool,
+    /// Pages of the works in this queue that are on disk.
+    pub(crate) done: i32,
+    /// Pages those works are made of.
+    pub(crate) total: i32,
+    /// `human_rate` of the queue, empty while nothing has been measured.
+    pub(crate) throughput: String,
+}
+
+impl DownloadsView {
+    pub(crate) fn build(tasks: Vec<DownloadTask>, throughput_bytes_per_second: u64) -> Self {
+        let paused = queue_is_paused(&tasks);
+        let (done, total) = queue_totals(&tasks);
+        let throughput = human_rate(throughput_bytes_per_second);
+        Self {
+            rows: to_download_rows(tasks),
+            paused,
+            done,
+            total,
+            throughput,
+        }
+    }
+}
+
+/// Is the *queue* held?
+///
+/// ui/pages/downloads.slint reads this one flag twice: the header's button labels
+/// itself "全部继续" while it is true and "全部暂停" while it is false, and the
+/// "已暂停" chip is drawn from it. "Any row is paused" would print that chip over a
+/// queue that is still downloading, so the honest reading is **every row that can be
+/// held is held** - plus the requirement that there is one, or an empty or
+/// all-finished queue would claim to be paused.
+pub(crate) fn queue_is_paused(tasks: &[DownloadTask]) -> bool {
+    let mut held = 0;
+    let mut runnable = 0;
+    for task in tasks {
+        match task.state {
+            TaskState::Paused => held += 1,
+            TaskState::Queued | TaskState::Running => runnable += 1,
+            _ => {}
+        }
+    }
+    held > 0 && runnable == 0
+}
+
+/// Pages finished, and pages the queue is responsible for.
+///
+/// Counted in **pages**, not in rows. `enqueue_download(all_pages)` turns one work of
+/// twelve pages into twelve page tasks, and a row count would print "1 / 4" for a
+/// queue that is a quarter of one artwork - a number whose meaning would change with
+/// which of the two download buttons the user pressed. A work is identified by its
+/// illust id, which `DownloadRequest` carries and `DownloadRow` does not, so this takes
+/// the tasks rather than the rows it is published beside.
+///
+/// `done` is the highest finished page index of a work plus one: the manager claims a
+/// work's pages oldest-first, so "pages 1..=n of this work are on disk" is what the
+/// counter can honestly claim, and a work nobody has finished a page of prints 0.
+pub(crate) fn queue_totals(tasks: &[DownloadTask]) -> (i32, i32) {
+    let mut works: HashMap<&str, (u32, u32)> = HashMap::new();
+    for task in tasks {
+        let entry = works
+            .entry(task.request.illust_id.as_str())
+            .or_insert((1, 0));
+        entry.0 = entry.0.max(task.request.page_count.max(1));
+        if matches!(task.state, TaskState::Completed | TaskState::Skipped) {
+            entry.1 = entry.1.max(task.request.page_index + 1);
+        }
+    }
+    let total: u32 = works.values().map(|(pages, _)| *pages).sum();
+    let done: u32 = works.values().map(|(_, finished)| *finished).sum();
+    (
+        i32::try_from(done).unwrap_or(i32::MAX),
+        i32::try_from(total).unwrap_or(i32::MAX),
+    )
+}
+
+/// A byte rate, as the page prints it ("3.2 MB/s"): empty while nothing is known.
+///
+/// `human_bytes` (app/helpers.rs:233) is reused for everything under a megabyte; from
+/// one megabyte up the rate keeps a decimal, because a three-second sliding window
+/// almost never lands on a whole number and "3 MB/s" for 3.9 MB/s is a 30 % lie in the
+/// one number a user watches while downloading. Zero is the empty string rather than
+/// "0 B/s": the page hides the line instead of claiming a stalled queue over a window
+/// that simply has no samples yet (the same argument the page makes above
+/// `throughput`).
+pub(crate) fn human_rate(bytes_per_second: u64) -> String {
+    if bytes_per_second == 0 {
+        return String::new();
+    }
+    if bytes_per_second >= 1024 * 1024 {
+        return format!("{:.1} MB/s", bytes_per_second as f64 / (1024.0 * 1024.0));
+    }
+    if bytes_per_second < 1024 {
+        return format!("{bytes_per_second} B/s");
+    }
+    format!("{}/s", human_bytes(bytes_per_second))
+}
+
+/// The row's one caption line: "第 2 / 4 页 · 3.2 MB/s · 剩 12 秒".
+///
+/// **Deliberate reuse.** `DownloadRow` is declared in ui/pages/downloads.slint, which
+/// this round froze, so the rate and the countdown ride in `subtitle` instead of
+/// gaining two fields the row would then have to lay out: the row already draws
+/// `author + " · " + subtitle` as one elided line, which is the shape a speed line
+/// wants anyway. The page number is the floor - a queued, finished or held row has no
+/// rate, and `DownloadTask::eta_seconds` is `None` exactly when a countdown could not
+/// be honoured, so nothing here guesses one.
+pub(crate) fn row_subtitle(
+    page_index: u32,
+    page_count: u32,
+    bytes_per_second: u64,
+    eta_seconds: Option<u32>,
+) -> String {
+    let mut line = format!("第 {} / {} 页", page_index + 1, page_count.max(1));
+    let rate = human_rate(bytes_per_second);
+    if rate.is_empty() {
+        return line;
+    }
+    line.push_str(" · ");
+    line.push_str(&rate);
+    if let Some(seconds) = eta_seconds {
+        line.push_str(&format!(" · 剩 {seconds} 秒"));
+    }
+    line
+}
+
+// ---------------------------------------------------------- fixtures (G24)
+
+/// The states `PIXIV_DESKTOP_FIXTURE` names, as far as this file answers them.
+///
+/// The variable names a state a capture has to photograph, and tools/fixture.ps1 is
+/// the gate half of that seam: it maps a value to a page, a gesture and the captures
+/// it owes. Four fixtures exist this round and each track owns the one whose page it
+/// owns; a value this parser does not know is the gate's to reject (it exits 77), not
+/// this parser's to guess at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Fixture {
+    /// F5: a queue with a finished, a failed, a held and an in-flight row.
+    Downloads,
+}
+
+/// Case- and whitespace-insensitive, so a shell that exported `Downloads` works.
+pub(crate) fn parse_fixture(value: Option<&str>) -> Option<Fixture> {
+    let name = value?.trim().to_ascii_lowercase();
+    match name.as_str() {
+        "downloads" => Some(Fixture::Downloads),
+        _ => None,
+    }
+}
+
+/// The ambient fixture, read once: `push_downloads` runs twice a second and the answer
+/// cannot change under it.
+fn fixture_env() -> Option<Fixture> {
+    static CACHED: OnceLock<Option<Fixture>> = OnceLock::new();
+    *CACHED.get_or_init(|| parse_fixture(std::env::var("PIXIV_DESKTOP_FIXTURE").ok().as_deref()))
+}
+
+/// 3.2 MiB/s - the rate the fixture prints - in bytes.
+///
+/// In bytes rather than as the string "3.2 MB/s", so the header's throughput and the
+/// row's countdown are computed from one number: two literals would be free to
+/// disagree the day either formatter changes.
+pub(crate) const FIXTURE_RATE: u64 = 3_355_443;
+
+/// The four rows `PIXIV_DESKTOP_FIXTURE=downloads` puts on screen, and the queue's
+/// throughput.
+///
+/// One work of twelve pages, four of them in the queue (pages 3 to 6): page 3
+/// finished, page 4 failed, page 5 held, page 6 in flight at 3.2 MB/s with twelve
+/// seconds left. The header therefore prints "已完成 3 / 12" over four rows - the two
+/// numbers are different units (`queue_totals`), and this is the state that proves the
+/// page can say both without lying about either.
+pub(crate) fn fixture_downloads() -> (Vec<DownloadTask>, u64) {
+    const PAGE_BYTES: u64 = 4_000_000;
+    // Exactly twelve seconds of work left at FIXTURE_RATE and 40 % done, so the row's
+    // countdown states the state rather than a rounding of it.
+    let in_flight_total = 20 * FIXTURE_RATE;
+    let in_flight_done = 8 * FIXTURE_RATE;
+    let tasks = vec![
+        fixture_task(
+            901,
+            2,
+            TaskState::Completed,
+            PAGE_BYTES,
+            Some(PAGE_BYTES),
+            0,
+        ),
+        fixture_task(
+            902,
+            3,
+            TaskState::Failed("连接在 3.1 MB 处被重置".to_string()),
+            3_100_000,
+            Some(PAGE_BYTES),
+            0,
+        ),
+        fixture_task(903, 4, TaskState::Paused, 1_000_000, Some(PAGE_BYTES), 0),
+        fixture_task(
+            904,
+            5,
+            TaskState::Running,
+            in_flight_done,
+            Some(in_flight_total),
+            FIXTURE_RATE,
+        ),
+    ];
+    (tasks, FIXTURE_RATE)
+}
+
+fn fixture_task(
+    id: u64,
+    page_index: u32,
+    state: TaskState,
+    bytes_done: u64,
+    bytes_total: Option<u64>,
+    bytes_per_second: u64,
+) -> DownloadTask {
+    DownloadTask {
+        id,
+        request: DownloadRequest {
+            illust_id: "700000001".into(),
+            title: "[DEMO] 夜明けの街 · 12 页".into(),
+            author: "演示作者".into(),
+            page_index,
+            page_count: 12,
+            url: format!("demo://illust/700000001/{}/regular.png", 800 + page_index),
+            extension: "png".into(),
+        },
+        state,
+        bytes_done,
+        bytes_total,
+        bytes_per_second,
+        destination: Some(PathBuf::from(format!(
+            "pixiv-demo/700000001_p{}.png",
+            page_index + 1
+        ))),
     }
 }
 
@@ -239,10 +552,13 @@ pub(crate) fn to_download_rows(tasks: Vec<pixiv_download::DownloadTask>) -> Vec<
                 id: task.id as i32,
                 title: task.request.title.clone().into(),
                 author: task.request.author.clone().into(),
-                subtitle: format!(
-                    "第 {} / {} 页",
-                    task.request.page_index + 1,
-                    task.request.page_count.max(1)
+                // The rate and the countdown ride in `subtitle`: `DownloadRow` is
+                // declared in ui/pages/downloads.slint and this round froze that file.
+                subtitle: row_subtitle(
+                    task.request.page_index,
+                    task.request.page_count,
+                    task.bytes_per_second,
+                    task.eta_seconds(),
                 )
                 .into(),
                 progress: task.percent().map(|percent| percent as i32).unwrap_or(-1),
@@ -322,5 +638,240 @@ mod tests {
         );
         assert_eq!(stale.map(|tasks| tasks.len()), Some(0));
         assert_eq!(stale_snapshots, 1);
+    }
+
+    /// One page of one work, which is what `enqueue_download(all_pages)` builds.
+    fn page_task(
+        id: u64,
+        illust: &str,
+        page_index: u32,
+        page_count: u32,
+        state: TaskState,
+    ) -> DownloadTask {
+        DownloadTask {
+            id,
+            request: DownloadRequest {
+                illust_id: illust.into(),
+                title: "t".into(),
+                author: "a".into(),
+                page_index,
+                page_count,
+                url: "demo://illust/1/800x600/regular.png".into(),
+                extension: "png".into(),
+            },
+            state,
+            bytes_done: 0,
+            bytes_total: Some(4_000_000),
+            bytes_per_second: 0,
+            destination: None,
+        }
+    }
+
+    /// F5: holding a row is state 6 on screen, and the whole-queue flag flips only
+    /// when there is nothing left to run.
+    #[test]
+    fn a_held_row_is_state_six_and_holds_the_queue_only_when_nothing_is_queued() {
+        let manager = DownloadManager::new(DownloadConfig::default());
+        let ids = manager.enqueue(vec![request("700000001"), request("700000002")]);
+        assert!(
+            !queue_is_paused(&manager.tasks()),
+            "two queued rows are not a held queue"
+        );
+
+        assert!(manager.pause(ids[0]), "a queued row can be held");
+        let rows = to_download_rows(manager.tasks());
+        let held = rows
+            .iter()
+            .find(|row| row.id == ids[0] as i32)
+            .expect("a held row is still in the model");
+        assert_eq!(
+            held.state, 6,
+            "6 is the number ui/pages/downloads.slint reads for TaskState::Paused"
+        );
+        assert_eq!(
+            held.subtitle.as_str(),
+            "第 1 / 1 页",
+            "a held row has no rate and no countdown"
+        );
+        assert!(
+            !queue_is_paused(&manager.tasks()),
+            "one held row beside a queued one is not a held queue"
+        );
+
+        // Pause-all takes the rest; now the header is told the whole queue is held.
+        assert_eq!(manager.pause_all(), 1, "only the queued row changes");
+        assert!(queue_is_paused(&manager.tasks()));
+        assert!(
+            to_download_rows(manager.tasks())
+                .iter()
+                .all(|row| row.state == 6)
+        );
+
+        // Resume sends it back to the queue, which is state 0 on screen.
+        assert!(manager.resume(ids[0]));
+        let rows = to_download_rows(manager.tasks());
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == ids[0] as i32)
+                .map(|row| row.state),
+            Some(0)
+        );
+        assert!(!queue_is_paused(&manager.tasks()));
+        assert_eq!(
+            manager.resume_all(),
+            1,
+            "the row pause-all held is still held, and resume-all is the only thing that moves it"
+        );
+        assert_eq!(manager.resume_all(), 0, "and now nothing is held");
+    }
+
+    /// The three captions the row can print, and the floor it falls back to.
+    #[test]
+    fn the_row_caption_carries_the_rate_and_the_countdown_when_there_is_one() {
+        assert_eq!(row_subtitle(1, 4, 0, None), "第 2 / 4 页");
+        assert_eq!(
+            row_subtitle(1, 4, FIXTURE_RATE, None),
+            "第 2 / 4 页 · 3.2 MB/s"
+        );
+        assert_eq!(
+            row_subtitle(1, 4, FIXTURE_RATE, Some(12)),
+            "第 2 / 4 页 · 3.2 MB/s · 剩 12 秒"
+        );
+        // A zero page count is one page, not a division by zero and not "第 1 / 0 页".
+        assert_eq!(row_subtitle(0, 0, 0, None), "第 1 / 1 页");
+        // `Some(0)` is the library's "running, last byte in", not "unknown".
+        assert_eq!(
+            row_subtitle(0, 1, FIXTURE_RATE, Some(0)),
+            "第 1 / 1 页 · 3.2 MB/s · 剩 0 秒"
+        );
+    }
+
+    /// The throughput property: empty at zero, and never a unit-less number.
+    #[test]
+    fn a_zero_rate_is_empty_and_every_other_rate_carries_its_unit() {
+        assert_eq!(human_rate(0), "", "no samples is not 0 B/s");
+        assert_eq!(human_rate(FIXTURE_RATE), "3.2 MB/s");
+        assert_eq!(human_rate(1024 * 1024), "1.0 MB/s");
+        assert_eq!(human_rate(4096), "4 KB/s", "under a megabyte: human_bytes");
+        assert_eq!(
+            human_rate(512),
+            "512 B/s",
+            "and not \"0 KB/s\" while bytes flow"
+        );
+        assert!(human_rate(FIXTURE_RATE).ends_with("/s"));
+
+        let idle = DownloadsView::build(Vec::new(), 0);
+        assert_eq!(idle.throughput, "", "an idle queue publishes no rate");
+        assert_eq!((idle.done, idle.total), (0, 0), "and no phantom progress");
+        assert!(!idle.paused);
+        assert!(idle.rows.is_empty());
+    }
+
+    /// The counter is pages of the work, not rows: four rows of a twelve-page work
+    /// whose third page is on disk read "已完成 3 / 12".
+    #[test]
+    fn the_queue_counter_is_pages_of_the_work_not_rows() {
+        let (fixture, _) = fixture_downloads();
+        assert_eq!(fixture.len(), 4);
+        assert_eq!(queue_totals(&fixture), (3, 12));
+
+        let fresh: Vec<DownloadTask> = (0..12)
+            .map(|page| page_task(page as u64, "9", page, 12, TaskState::Queued))
+            .collect();
+        assert_eq!(queue_totals(&fresh), (0, 12), "nothing finished yet");
+
+        let mut finished = fresh.clone();
+        for task in finished.iter_mut().take(4) {
+            task.state = TaskState::Completed;
+        }
+        assert_eq!(queue_totals(&finished), (4, 12), "pages 1..=4 are on disk");
+
+        let mut skipped = fresh.clone();
+        skipped[0].state = TaskState::Skipped;
+        assert_eq!(
+            queue_totals(&skipped),
+            (1, 12),
+            "Skipped means the file was already there, which is a finished page"
+        );
+
+        let mut two_works = fresh.clone();
+        two_works.extend(
+            (0..5).map(|page| page_task(100 + page as u64, "8", page, 5, TaskState::Queued)),
+        );
+        assert_eq!(queue_totals(&two_works), (0, 17), "two works add up");
+
+        assert_eq!(
+            queue_totals(&[page_task(1, "7", 0, 0, TaskState::Queued)]),
+            (0, 1),
+            "a zero page count is one page"
+        );
+    }
+
+    /// The fixture is the state tools/fixture.ps1 promises: four rows - one finished,
+    /// one failed, one held, one in flight - and the header the capture asserts.
+    #[test]
+    fn the_downloads_fixture_is_the_state_the_capture_asserts() {
+        let (tasks, rate) = fixture_downloads();
+        let view = DownloadsView::build(tasks, rate);
+        assert_eq!(view.rows.len(), 4);
+        assert_eq!((view.done, view.total), (3, 12));
+        assert_eq!(view.throughput, "3.2 MB/s");
+        assert!(
+            !view.paused,
+            "one held row beside a running one does not hold the queue"
+        );
+        assert_eq!(
+            view.rows.iter().map(|row| row.state).collect::<Vec<_>>(),
+            vec![2, 3, 6, 1]
+        );
+        assert_eq!(view.rows[1].message.as_str(), "连接在 3.1 MB 处被重置");
+        assert_eq!(
+            view.rows[2].subtitle.as_str(),
+            "第 5 / 12 页",
+            "a held row keeps its page and prints no rate"
+        );
+        assert_eq!(
+            view.rows[2].progress, 25,
+            "a held row keeps the progress it froze at (U13)"
+        );
+        assert_eq!(
+            view.rows[3].subtitle.as_str(),
+            "第 6 / 12 页 · 3.2 MB/s · 剩 12 秒"
+        );
+        assert_eq!(view.rows[3].progress, 40);
+        // Two publishes of the same state are the same pixels.
+        let (again, again_rate) = fixture_downloads();
+        let second = DownloadsView::build(again, again_rate);
+        assert_eq!(second.throughput, view.throughput);
+        assert_eq!(
+            second
+                .rows
+                .iter()
+                .map(|row| row.subtitle.clone())
+                .collect::<Vec<_>>(),
+            view.rows
+                .iter()
+                .map(|row| row.subtitle.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// G24: only this track's fixture is this track's to answer, and the variable
+    /// changes nothing about the ordinary queue.
+    #[test]
+    fn the_fixture_variable_names_one_state_and_leaves_the_queue_alone() {
+        assert_eq!(parse_fixture(None), None);
+        assert_eq!(parse_fixture(Some("")), None);
+        assert_eq!(parse_fixture(Some("downloads")), Some(Fixture::Downloads));
+        assert_eq!(
+            parse_fixture(Some("  Downloads ")),
+            Some(Fixture::Downloads)
+        );
+        assert_eq!(
+            parse_fixture(Some("ugoira")),
+            None,
+            "another track's fixture is not this parser's to claim"
+        );
+        assert_eq!(parse_fixture(Some("no-such-fixture")), None);
     }
 }

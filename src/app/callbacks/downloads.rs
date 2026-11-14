@@ -114,4 +114,33 @@ pub(crate) fn install(app: &Shared) {
             }
         });
     }
+
+    // ---- round nine (F5): pause, resume, and the header's one button ----
+    // Every one of these forwards to the manager and then republishes, so the row and
+    // the header are redrawn from the queue's own answer instead of from what the
+    // click hoped would happen: `pause` returns false for a terminal row, and a
+    // resumed task is `Queued` again only because the manager says so.
+    {
+        let shared = app.clone();
+        ui.on_pause_task(move |id| {
+            let app = shared.borrow();
+            app.pause_download(id);
+        });
+    }
+
+    {
+        let shared = app.clone();
+        ui.on_resume_task(move |id| {
+            let app = shared.borrow();
+            app.resume_download(id);
+        });
+    }
+
+    {
+        let shared = app.clone();
+        ui.on_toggle_pause_all(move || {
+            let app = shared.borrow();
+            app.toggle_pause_all();
+        });
+    }
 }

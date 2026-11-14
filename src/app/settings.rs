@@ -202,7 +202,21 @@ impl App {
 }
 
 impl App {
+    /// The settings page's "缓存占用" line.
+    ///
+    /// In demo mode it states the *budget* and takes no measurement at all, which is
+    /// what makes the settings capture deterministic (G23). Two facts justify it:
+    /// demo images never enter the cache - `demo_raw` renders them procedurally
+    /// (app/helpers.rs:313) instead of asking `ImageCache` for them - so 0 B is the
+    /// true figure rather than a convenient one; and a live figure describes this
+    /// machine's leftovers from earlier real sessions, which is why the two settings
+    /// baselines could only pass on a percentage budget (0.0028 % / 145 px of jitter,
+    /// measured in docs/OPTIMIZATION-PLAN-R9.md §2.2). Real mode keeps the
+    /// measurement, the disk figure and the hit rate.
     pub(crate) fn cache_summary(&self) -> String {
+        if self.mode == Mode::Demo {
+            return demo_cache_summary();
+        }
         let stats = self.cache.stats();
         let lookups = stats.memory_hits + stats.disk_hits;
         let requests = lookups + stats.network_loads;
@@ -222,6 +236,19 @@ impl App {
             hit_rate
         )
     }
+}
+
+/// The demo-mode cache line: the configured budgets, and nothing measured.
+///
+/// `CACHE_MEMORY_MB` / `CACHE_DISK_MB` are the budgets `App::new` hands to
+/// `ImageCache`, so this cannot state a limit that is not in force - and the one
+/// test below pins the exact string, because it is the input to a pixel baseline.
+pub(crate) fn demo_cache_summary() -> String {
+    format!(
+        "已用 0 B / 上限 {} MB · 磁盘 0 B / 上限 {:.1} GB",
+        CACHE_MEMORY_MB,
+        CACHE_DISK_MB as f64 / 1024.0
+    )
 }
 
 impl App {
@@ -360,4 +387,37 @@ pub(crate) fn set_theme_mode(app: &App, mode: ThemeMode) {
         .store
         .set_setting(crate::theme::SETTING_KEY, crate::theme::setting_value(mode));
     app.watch_system_theme(mode);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G23: two captures of this page are byte-identical only if this line is.
+    ///
+    /// It used to be "内存 96 MB · 磁盘 812 MB · 命中 41/57（71%）" - three numbers that
+    /// move with the machine's cache history, which is why both settings baselines
+    /// passed on a percentage budget instead of an exact one. The literal is pinned on
+    /// purpose: if a budget or the wording moves, the baseline moves with it, and this
+    /// is the test that says so before the capture does.
+    #[test]
+    fn the_demo_cache_line_states_the_budget_and_nothing_measured() {
+        assert_eq!(
+            demo_cache_summary(),
+            "已用 0 B / 上限 192 MB · 磁盘 0 B / 上限 1.0 GB"
+        );
+    }
+
+    /// No hit rate, no megabytes measured, nothing that a run can move: the same
+    /// string twice, and no placeholder left behind.
+    #[test]
+    fn the_demo_cache_line_is_the_same_string_twice() {
+        assert_eq!(demo_cache_summary(), demo_cache_summary());
+        assert!(
+            !demo_cache_summary().contains("命中"),
+            "a rate is a measurement"
+        );
+        assert!(demo_cache_summary().contains("上限 192 MB"));
+        assert!(demo_cache_summary().contains("上限 1.0 GB"));
+    }
 }
