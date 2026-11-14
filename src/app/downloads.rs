@@ -1,6 +1,5 @@
 use super::*;
 use pixiv_download::{DownloadTask, TaskState};
-use std::sync::OnceLock;
 
 /// Take the one queue snapshot a tick is allowed to take.
 ///
@@ -41,7 +40,7 @@ impl App {
         // *snapshot*, never the publish path, so the rows a capture photographs are
         // the rows `to_download_rows` builds (tools/fixture.ps1 is the other half of
         // this seam and names the state).
-        if fixture_env() == Some(Fixture::Downloads) {
+        if fixture_is_downloads() {
             let (tasks, throughput) = fixture_downloads();
             self.publish_downloads(tasks, throughput);
             return;
@@ -265,33 +264,17 @@ pub(crate) fn row_subtitle(
 
 // ---------------------------------------------------------- fixtures (G24)
 
-/// The states `PIXIV_DESKTOP_FIXTURE` names, as far as this file answers them.
+/// Whether the ambient fixture is this page's.
 ///
-/// The variable names a state a capture has to photograph, and tools/fixture.ps1 is
-/// the gate half of that seam: it maps a value to a page, a gesture and the captures
-/// it owes. Four fixtures exist this round and each track owns the one whose page it
-/// owns; a value this parser does not know is the gate's to reject (it exits 77), not
-/// this parser's to guess at.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Fixture {
-    /// F5: a queue with a finished, a failed, a held and an in-flight row.
-    Downloads,
-}
-
-/// Case- and whitespace-insensitive, so a shell that exported `Downloads` works.
-pub(crate) fn parse_fixture(value: Option<&str>) -> Option<Fixture> {
-    let name = value?.trim().to_ascii_lowercase();
-    match name.as_str() {
-        "downloads" => Some(Fixture::Downloads),
-        _ => None,
-    }
-}
-
-/// The ambient fixture, read once: `push_downloads` runs twice a second and the answer
-/// cannot change under it.
-fn fixture_env() -> Option<Fixture> {
-    static CACHED: OnceLock<Option<Fixture>> = OnceLock::new();
-    *CACHED.get_or_init(|| parse_fixture(std::env::var("PIXIV_DESKTOP_FIXTURE").ok().as_deref()))
+/// There is one parser for `PIXIV_DESKTOP_FIXTURE` and it lives in
+/// `feed::fixture`: the variable names one state, so a second reader would be a
+/// second answer waiting to disagree. This file only asks whether the state is
+/// the queue one.
+fn fixture_is_downloads() -> bool {
+    matches!(
+        super::feed::fixture::current(),
+        super::feed::fixture::Fixture::Downloads
+    )
 }
 
 /// 3.2 MiB/s - the rate the fixture prints - in bytes.
@@ -856,22 +839,21 @@ mod tests {
         );
     }
 
-    /// G24: only this track's fixture is this track's to answer, and the variable
-    /// changes nothing about the ordinary queue.
+    /// G24: this page answers exactly one fixture value, and that answer comes
+    /// from the one parser (feed::fixture) rather than from a second copy of the
+    /// table - two readers of one variable are two answers waiting to disagree.
     #[test]
     fn the_fixture_variable_names_one_state_and_leaves_the_queue_alone() {
-        assert_eq!(parse_fixture(None), None);
-        assert_eq!(parse_fixture(Some("")), None);
-        assert_eq!(parse_fixture(Some("downloads")), Some(Fixture::Downloads));
+        use super::super::feed::fixture::{Fixture, fixture_from};
+        assert_eq!(fixture_from(None), Fixture::None);
+        assert_eq!(fixture_from(Some("")), Fixture::None);
+        assert_eq!(fixture_from(Some("downloads")), Fixture::Downloads);
+        assert_eq!(fixture_from(Some("  Downloads ")), Fixture::Downloads);
         assert_eq!(
-            parse_fixture(Some("  Downloads ")),
-            Some(Fixture::Downloads)
+            fixture_from(Some("ugoira")),
+            Fixture::Ugoira,
+            "another track's fixture parses, and this page still does not claim it"
         );
-        assert_eq!(
-            parse_fixture(Some("ugoira")),
-            None,
-            "another track's fixture is not this parser's to claim"
-        );
-        assert_eq!(parse_fixture(Some("no-such-fixture")), None);
+        assert_eq!(fixture_from(Some("no-such-fixture")), Fixture::Unknown);
     }
 }
