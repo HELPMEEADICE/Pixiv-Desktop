@@ -273,7 +273,7 @@ export component DownloadsPage inherits Rectangle {
                 }
 
                 Text {
-                    text: "进行中 " + root.active-count + " · 已完成 " + root.done-count
+                    text: "进行中 " + root.active-count + " · 已完成 " + root.done-count + " 项"
                         + " · 失败 " + root.failed-count;
                     color: Theme.text-tertiary;
                     font-size: Theme.font-small;
@@ -303,8 +303,11 @@ export component DownloadsPage inherits Rectangle {
                 }
 
                 Text {
+                    // "页", because the row counter three lines up counts rows: two
+                    // numbers labelled the same thing on one screen is a defect even
+                    // when both are true.
                     text: root.queue-total > 0
-                        ? ("已完成 " + root.queue-done + " / " + root.queue-total)
+                        ? ("已下载 " + root.queue-done + " / " + root.queue-total + " 页")
                         : "队列为空";
                     color: Theme.text-secondary;
                     font-size: Theme.font-small;
