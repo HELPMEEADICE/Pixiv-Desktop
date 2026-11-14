@@ -1563,6 +1563,11 @@ export component IllustCard inherits Rectangle {
     /// opens the artwork itself when it is *not* selectable, so a click in selection
     /// mode is a selection report and never a navigation.
     callback clicked-with(bool, bool);
+    /// Round nine (U3): this card took the keyboard focus from the Tab walk. Slint
+    /// 1.18 has no `scroll-into-view`, so the page reports the event and Rust — the
+    /// only owner of the column heights and the viewport — scrolls it into view.
+    /// Nothing here scrolls: a card does not know where it sits.
+    callback gained-focus();
 
     // A card is one list item whose name is the caption it already draws, so a
     // screen reader reads "标题 · 作者" and can open it, instead of walking a
@@ -1599,6 +1604,13 @@ export component IllustCard inherits Rectangle {
             }
             EventResult.reject
         }
+    }
+
+    // The focus event itself, as a property: `changed` cannot watch a function, and
+    // `has-focus` is the only signal Slint exposes for "the walk arrived here".
+    property <bool> held: key_focus.has-focus;
+    changed held => {
+        if (root.held) { root.gained-focus(); }
     }
 
     // Open-on-click, underneath every interactive child.

@@ -134,6 +134,8 @@ export component HomePage inherits Rectangle {
     /// like every other gesture.
     public function request-select-all() { root.select-all(); }
     callback card-clicked(string, bool, bool);
+    /// U3: which card the Tab walk arrived on, by work id (see `ArtworkGrid`).
+    callback card-focused(string);
     /// Roving focus cursor for the recommended-tag strip (U7).
     in-out property <int> tag-cursor: 0;
 
@@ -314,6 +316,7 @@ export component HomePage inherits Rectangle {
             open-author(id) => { root.open-author(id); }
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
             card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
+            card-focused(id) => { root.card-focused(id); }
         }
 
         if root.feed-state == 1 : HorizontalLayout {

@@ -304,6 +304,10 @@ export component AppWindow inherits Window {
     callback batch-download();
     callback batch-bookmark();
     callback card-clicked(string, bool, bool);
+    /// U3: a card took the keyboard focus. Forwarded with the work id; Rust turns it
+    /// into a `grid-scroll-y`/`home-scroll-y`/profile offset, because only Rust knows
+    /// the column heights and the viewport.
+    callback card-focused(string);
 
     // ---- round nine: detail playback and bookmark restriction (F1/F4/U29) ----
     in property <bool> film-ready: false;
@@ -551,6 +555,15 @@ export component AppWindow inherits Window {
     /// the two cannot drift - "signed in: your own page, signed out: the
     /// sign-in flow" is a decision, and a decision kept in two places is a
     /// decision that will disagree with itself.
+    /// Put the keyboard back where it came from. A panel that closes and leaves the
+    /// focus nowhere is a keyboard trap in reverse: the palette is opened from the
+    /// search box (Ctrl+P) and the suggestion panel while typing in it, so that is
+    /// where closing has to land. Public because Rust closes the palette on its own
+    /// paths (a chosen row, a route change) and needs the same landing place.
+    public function focus-search() {
+        search-field.focus-input();
+    }
+
     public function open-account() {
         if (root.authenticated) { root.open-profile(""); }
         else { root.navigate(Destination.Settings); }
@@ -598,7 +611,10 @@ export component AppWindow inherits Window {
             // whole panel is reachable with no host wiring at all.
             if (e.modifiers.control && e.text == "p") {
                 root.palette-open = !root.palette-open;
-                if (!root.palette-open) { root.palette-close(); }
+                if (!root.palette-open) {
+                    root.palette-close();
+                    root.focus-search();
+                }
                 return EventResult.accept;
             }
             // F2's second entry point. A modifier *key* event is not a pointer event:
@@ -622,6 +638,7 @@ export component AppWindow inherits Window {
                 if (root.palette-open) {
                     root.palette-open = false;
                     root.palette-close();
+                    root.focus-search();
                 } else if (root.suggest-visible) {
                     root.suggest-dismissed();
                 } else {
@@ -994,6 +1011,7 @@ export component AppWindow inherits Window {
                         batch-download => { root.batch-download(); }
                         batch-bookmark => { root.batch-bookmark(); }
                         card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
+                        card-focused(id) => { root.card-focused(id); }
                     }
 
                     gallery := GalleryPage {
@@ -1051,6 +1069,7 @@ export component AppWindow inherits Window {
                         batch-download => { root.batch-download(); }
                         batch-bookmark => { root.batch-bookmark(); }
                         card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
+                        card-focused(id) => { root.card-focused(id); }
                     }
 
                     profile-page := ProfilePage {
@@ -1098,6 +1117,7 @@ export component AppWindow inherits Window {
                         batch-download => { root.batch-download(); }
                         batch-bookmark => { root.batch-bookmark(); }
                         card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
+                        card-focused(id) => { root.card-focused(id); }
                     }
 
                     DetailPage {
@@ -1446,7 +1466,22 @@ export component AppWindow inherits Window {
                     index: i;
                     choose => { root.suggest-chosen(s.tag); }
                     became-active(index) => {
-                        root.suggest-scroll-y = Math.max(0px, index * 34px + 5px - 64px);
+                        // `content-y` is negative-down in this tree: `PageScroll` reports
+                        // `root.scrolled(root.scroll-y)` and every scrolled page stores a
+                        // negative offset. The first version of this line got the sign
+                        // wrong and *pushed the list down* by the cursor row: measured with
+                        // `PIXIV_DESKTOP_FIXTURE=suggestion` (twelve rows, cursor on row 9),
+                        // the active row ended up 213 px below the panel.
+                        //
+                        // Clamped on both sides: never below the top (a cursor near the top
+                        // must not scroll at all) and never past the content's own overflow
+                        // (a list shorter than the 392 px viewport has no offset to give,
+                        // and a negative residue there would scroll a full panel of nothing).
+                        // `34px` is `SuggestRow`'s height and `5px` its body padding above;
+                        // `64px` keeps the cursor two rows clear of the top edge.
+                        root.suggest-scroll-y = Math.max(
+                            0px - Math.max(0px, panel-body.height - panel-scroll.visible-height),
+                            Math.min(0px, 64px - (index * 34px + 5px)));
                     }
                 }
 
@@ -1482,6 +1517,7 @@ export component AppWindow inherits Window {
             clicked => {
                 root.palette-open = false;
                 root.palette-close();
+                root.focus-search();
             }
         }
     }

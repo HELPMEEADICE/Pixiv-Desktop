@@ -35,6 +35,11 @@ export component ArtworkGrid inherits Rectangle {
     /// is why the page also carries an explicit selection-mode toggle instead of
     /// betting the feature on Ctrl/Shift reaching `TouchArea.pointer-event`.
     callback card-clicked(string, bool, bool);
+    /// U3: a card took the keyboard focus. The argument is the work id, not a
+    /// position: `columns` is a height-balanced reshuffle of `items`, so no element
+    /// of this layout can name a card's index in the feed. Rust owns `items` and
+    /// resolves the id to the index the scroll offset needs.
+    callback card-focused(string);
 
     height: cols.preferred-height;
     width: cols.preferred-width;
@@ -60,6 +65,7 @@ export component ArtworkGrid inherits Rectangle {
                 open-author => { root.open-author(it.author-id); }
                 toggle-bookmark => { root.toggle-bookmark(it.id); }
                 clicked-with(ctrl, shift) => { root.card-clicked(it.id, ctrl, shift); }
+                gained-focus => { root.card-focused(it.id); }
             }
         }
     }
@@ -143,6 +149,8 @@ export component GalleryPage inherits Rectangle {
     public function request-select-all() { root.select-all(); }
     /// A card was clicked with the keys that were (or were not) delivered.
     callback card-clicked(string, bool, bool);
+    /// U3: which card the Tab walk arrived on, by work id (see `ArtworkGrid`).
+    callback card-focused(string);
 
     /// Roving focus cursors for the two chip rows on this page (U7). A strip is one
     /// Tab stop: Left/Right move this index and the chip that owns it takes focus.
@@ -430,6 +438,7 @@ export component GalleryPage inherits Rectangle {
             open-author(id) => { root.open-author(id); }
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
             card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
+            card-focused(id) => { root.card-focused(id); }
         }
 
         // ---------------- empty / error / locked ----------------
