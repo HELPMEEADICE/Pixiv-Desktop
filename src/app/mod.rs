@@ -25,11 +25,15 @@ mod downloads;
 mod feed;
 mod helpers;
 mod lifecycle;
+mod palette;
 mod profile;
+mod selection;
 mod settings;
+mod ugoira;
 
 pub(crate) use self::{
-    callbacks::install_callbacks, feed::*, helpers::*, lifecycle::*, profile::*, settings::*,
+    callbacks::install_callbacks, feed::*, helpers::*, lifecycle::*, palette::PaletteState,
+    profile::*, selection::Selection, settings::*, ugoira::PlaybackState,
 };
 
 use slint::{
@@ -184,6 +188,20 @@ pub(crate) struct App {
     theme_mode: ThemeMode,
     /// Slow AppsUseLightTheme watcher, running only while the mode is System.
     theme_timer: slint::Timer,
+
+    // ---- round nine (docs/OPTIMIZATION-PLAN-R9.md §4) --------------------
+    // Declared in phase 0 so three parallel tracks never edit this file. Each
+    // carries an allow until the track that owns it reads it; that allow is part
+    // of the track's acceptance, not a permanent fixture.
+    /// What the user has selected on a grid page (F2, feed track).
+    #[allow(dead_code)]
+    selection: Selection,
+    /// Command palette state (F3, feed track).
+    #[allow(dead_code)]
+    palette: PaletteState,
+    /// Ugoira playback for the detail page (F1, detail track).
+    #[allow(dead_code)]
+    playback: PlaybackState,
 }
 
 /// How many routes Back/Forward can hold. Named because the scroll table is sized

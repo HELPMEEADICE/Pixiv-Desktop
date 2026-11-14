@@ -455,6 +455,8 @@ mod tests {
                 author_avatar: slint::Image::default(),
                 author_avatar_url: illust.author.avatar.clone().unwrap_or_default().into(),
                 author_avatar_state: BAND_LOADING,
+                selected: false,
+                selectable: false,
             })
             .collect();
         let model = Rc::new(VecModel::from(rows));

@@ -258,6 +258,11 @@ pub(crate) fn illust_to_item(illust: &Illust, rank: i32) -> IllustItem {
         // when there is no URL at all, which is the only case where drawing the
         // initial is honest.
         author_avatar_state: if illust.author.avatar.is_some() { 1 } else { 2 },
+        // Round nine (F2). A freshly built card is never selected: selection is
+        // a property of the page, applied by the feed track when it enters the
+        // mode, never something a card is born with.
+        selected: false,
+        selectable: false,
     }
 }
 

@@ -289,6 +289,9 @@ impl App {
             notice_timer: slint::Timer::default(),
             theme_mode,
             theme_timer: slint::Timer::default(),
+            selection: Selection::default(),
+            palette: PaletteState::default(),
+            playback: PlaybackState::default(),
         }
     }
 }

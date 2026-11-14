@@ -1377,6 +1377,11 @@ export struct IllustItem {
     height: int,
     /// 0 ok, 1 loading, 2 failed
     state: int,
+    /// Round nine (F2): the grid is in selection mode and this card is one of
+    /// the chosen ones. Both default to "an ordinary card", so every existing
+    /// producer keeps working without knowing about selection.
+    selected: bool,
+    selectable: bool,
     /// The author's real avatar, loaded from i.pximg.net. `author-avatar-url` is
     /// kept as well so an avatar that arrives later can be matched back to the
     /// rows that want it without re-fetching a profile.

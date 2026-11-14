@@ -204,6 +204,26 @@ export global Theme {
     /// NavigationView row metric. WinUI uses 36px for a standard-density pane.
     out property <length> nav-item-height: 36px;
 
+    // ---- round nine (docs/OPTIMIZATION-PLAN-R9.md §4) -------------------
+    // Declared here, once, before anything draws with them: the panel, its row
+    // delegate, the menu and the accessibility walk all have to agree.
+    /// Command palette (Ctrl+P). Windows Terminal's proportions: a 520px panel
+    /// 88px below the body's top edge, a 40px query row, 36px result rows.
+    out property <length> palette-width: 520px;
+    out property <length> palette-min-width: 360px;
+    out property <length> palette-offset-y: 88px;
+    out property <length> palette-query-height: 40px;
+    out property <length> palette-row-height: 36px;
+    /// The check WinUI draws in a selected list item, and the ring around the
+    /// card it belongs to.
+    out property <length> select-check: 22px;
+    out property <length> select-ring: 2px;
+    /// SplitButton's chevron column, beside a 32px control (Fluent: 24px).
+    out property <length> split-chevron: 24px;
+    /// MenuFlyout metrics (Fluent: 32px rows, 200px minimum width).
+    out property <length> menu-row-height: 32px;
+    out property <length> menu-width: 200px;
+
     // ---- motion --------------------------------------------------------
     // Short and linear-ish: a desktop tool should never feel animated. Every
     // animation in the UI names one of these two, no `animate` carries a
