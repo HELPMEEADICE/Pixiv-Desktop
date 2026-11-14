@@ -157,7 +157,10 @@ impl App {
         let cache = self.cache.clone();
         let rt = self.rt.clone();
         let scale = self.ui().window().scale_factor().max(1.0);
-        let target = crate::images::target_width(1200.0, scale);
+        // Not `target_width`: its clamp is the *card* ceiling, and this image is
+        // drawn across the whole header row (plan §2.2 U8).
+        let target =
+            crate::images::target_width_up_to(1200.0, scale, crate::images::BANNER_MAX_WIDTH);
         rt.spawn(async move {
             let raw = fetch_sized(&cache, &url, target).await;
             on_ui(move |shared| {
@@ -169,7 +172,9 @@ impl App {
                     return;
                 };
                 let image = raw.to_slint();
-                app.avatars.insert(url.clone(), image.clone());
+                // Through the same eviction path as a face, which also protects
+                // this URL: nothing but this function ever requests it (plan §2.3 R7).
+                app.remember_avatar(url.clone(), image.clone());
                 app.ui().set_profile_background(image);
             });
         });

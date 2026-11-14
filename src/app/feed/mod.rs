@@ -11,10 +11,14 @@ impl App {
     // ------------------------------------------------------------- feed
 
     pub(crate) fn render_feed(&mut self, items: Vec<Illust>, append: bool) {
-        let mut all = if append {
-            std::mem::take(&mut self.items)
+        // The count has to be taken *before* the take: read from `self.items` after
+        // `mem::take` had emptied it, `already` was 0 by construction, so
+        // `already > 0` was never true and every "load more" fell through to
+        // `rebuild_columns` (plan §2.2 R2).
+        let (already, mut all) = if append {
+            take_existing(&mut self.items)
         } else {
-            Vec::new()
+            (0, Vec::new())
         };
         if items.is_empty() && all.is_empty() {
             let ui = self.ui();
@@ -48,7 +52,6 @@ impl App {
             self.reached_end = true;
             return;
         }
-        let already = self.items.len();
         all.extend(items);
         self.items = all;
         if !append {
@@ -62,16 +65,76 @@ impl App {
         // balancer over the whole feed, so every card above silently moved to a
         // different column - the opposite of what `layout::distribute` is documented
         // to preserve, and visible as a jump while scrolling.
-        if append
-            && already > 0
-            && self.columns.len() == self.geometry.columns
-            && self.column_heights.len() == self.columns.len()
-        {
-            self.append_columns(already);
-        } else {
-            self.rebuild_columns();
+        match plan_feed_update(
+            append,
+            already,
+            self.columns.len(),
+            self.geometry.columns,
+            self.column_heights.len(),
+        ) {
+            FeedUpdate::Extend { from } => self.append_columns(from),
+            FeedUpdate::Rebuild => self.rebuild_columns(),
         }
     }
+}
+
+/// Move the page that is already on screen out of `items`, remembering how many
+/// rows it held.
+///
+/// Both halves are one operation on purpose. `render_feed` used to take the page
+/// first and read `self.items.len()` afterwards, which measured the emptied
+/// vector (plan §2.2 R2); there is no longer an ordering to get wrong.
+fn take_existing<T>(items: &mut Vec<T>) -> (usize, Vec<T>) {
+    let already = items.len();
+    (already, std::mem::take(items))
+}
+
+/// What `render_feed` does with the page it was handed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FeedUpdate {
+    /// Rebuild every column model from `self.items`.
+    Rebuild,
+    /// Extend the models that are already there, starting at item `from`.
+    Extend { from: usize },
+}
+
+/// Extend the columns, or rebuild them?
+///
+/// `existing` is the item count *before* the new page is merged in, and
+/// `heights`/`columns` must describe the models currently set on the grid: a
+/// column count that changed under the feed invalidates both the buckets and the
+/// accumulated heights, so that case rebuilds.
+pub(crate) fn plan_feed_update(
+    append: bool,
+    existing: usize,
+    columns: usize,
+    geometry_columns: usize,
+    heights: usize,
+) -> FeedUpdate {
+    if append && existing > 0 && columns == geometry_columns && heights == columns {
+        FeedUpdate::Extend { from: existing }
+    } else {
+        FeedUpdate::Rebuild
+    }
+}
+
+/// Push one card into the shortest column, returning the row it landed on.
+///
+/// The models are extended in place - never replaced - which is the whole point
+/// of the incremental path: a model that is swapped for a new one makes Slint
+/// re-create every card above it.
+pub(crate) fn place_in_columns(
+    columns: &[Rc<VecModel<IllustItem>>],
+    heights: &mut [f32],
+    item: IllustItem,
+    height: f32,
+) -> Option<(usize, usize)> {
+    let target = shortest_column(heights);
+    let model = columns.get(target)?;
+    let row = model.row_count();
+    model.push(item);
+    heights[target] += height;
+    Some((target, row))
 }
 
 impl App {
@@ -194,7 +257,6 @@ impl App {
                 geometry.card_width,
                 layout::clamped_aspect(illust.width, illust.height),
             );
-            let target = shortest_column(&self.column_heights);
             let mut item = illust_to_item(illust, self.rank_of(illust));
             let key = illust.id.to_string();
             if let Some(image) = self.covers.get(&key) {
@@ -211,13 +273,12 @@ impl App {
                     upgrades.push((key.clone(), illust.urls.grid().to_string()));
                 }
             }
-            let Some(model) = self.columns.get(target) else {
+            let Some((target, row)) =
+                place_in_columns(&self.columns, &mut self.column_heights, item, height)
+            else {
                 continue;
             };
-            let row = model.row_count();
-            model.push(item);
             self.index.insert(key, (target, row));
-            self.column_heights[target] += height;
         }
 
         let ui = self.ui();
@@ -389,22 +450,13 @@ impl App {
         const NARROW_BREAKPOINT: f32 = 1000.0;
 
         let narrow = width < NARROW_BREAKPOINT;
-        let collapsed = self.ui().get_rail_collapsed();
-        // Read the rail widths from the theme rather than restating them here: they
-        // were duplicated as 240/52 while `theme.slint` said 232/52, so the content
-        // box this function reported was 8px wider than the one the layout used.
-        let ui = self.ui();
-        let rail = {
-            let theme = ui.global::<Theme>();
-            if narrow || collapsed {
-                theme.get_rail_width_compact()
-            } else {
-                theme.get_rail_width()
-            }
-        };
-        let content = (width - rail).max(0.0);
-        ui.set_narrow(narrow);
-        ui.set_content_width(content);
+        // Only the narrow/compact decision is made here. This function also used to
+        // *report* a content box, computed from a rail width it read out of the theme:
+        // a second source of truth for a number Slint can derive from its own layout,
+        // and the reason collapsing the rail left the detail page 180px too narrow
+        // until the window was resized. `ui/main.slint` now states
+        // `root.width - rail-pane.width` where that number is needed.
+        self.ui().set_narrow(narrow);
     }
 }
 
@@ -634,5 +686,104 @@ impl App {
                 BAND_LOADING
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(id: &str) -> IllustItem {
+        IllustItem {
+            id: id.into(),
+            title: "".into(),
+            author: "".into(),
+            author_id: "".into(),
+            cover: slint::Image::default(),
+            kind: 0,
+            page_count: 1,
+            bookmarked: false,
+            rank: 0,
+            width: 0,
+            height: 0,
+            state: 0,
+            author_avatar: slint::Image::default(),
+            author_avatar_url: "".into(),
+            author_avatar_state: 0,
+        }
+    }
+
+    fn columns(count: usize) -> Vec<Rc<VecModel<IllustItem>>> {
+        (0..count)
+            .map(|_| Rc::new(VecModel::from(Vec::<IllustItem>::new())))
+            .collect()
+    }
+
+    /// "Load more" must extend the column models that are already on screen.
+    ///
+    /// This could not hold before the fix, and not because of a layout rule:
+    /// `render_feed` took `self.items` (plan §2.2 R2, `feed/mod.rs:14`) and then
+    /// read `self.items.len()` (`:51`), so `already` measured the emptied vector,
+    /// was 0 by construction, `already > 0` was never true and `append_columns`
+    /// was unreachable. Every append therefore rebuilt every row model: a fresh
+    /// `distribute`, five `SharedString` allocations per card and a full card
+    /// re-creation in Slint, growing with what the user had already scrolled.
+    #[test]
+    fn a_second_page_extends_the_column_models_instead_of_rebuilding_them() {
+        let mut heights = vec![0.0_f32; 4];
+        let columns = columns(4);
+
+        // First page: 24 cards, laid out by the same greedy rule the feed uses.
+        for index in 0..24 {
+            let height = 100.0 + (index % 5) as f32 * 40.0;
+            place_in_columns(&columns, &mut heights, card(&format!("p{index}")), height);
+        }
+        let first_page: Vec<Rc<VecModel<IllustItem>>> = columns.clone();
+        let rows_before: Vec<usize> = columns.iter().map(|model| model.row_count()).collect();
+        assert_eq!(rows_before.iter().sum::<usize>(), 24);
+
+        // Second page arrives while the first is on screen. The measurement and
+        // the take are one operation, so the decision sees 24 and not 0.
+        let mut on_screen: Vec<String> = (0..24).map(|index| format!("p{index}")).collect();
+        let (already, taken) = take_existing(&mut on_screen);
+        assert_eq!(already, 24);
+        assert!(on_screen.is_empty() && taken.len() == 24);
+        assert_eq!(
+            plan_feed_update(true, already, columns.len(), 4, heights.len()),
+            FeedUpdate::Extend { from: 24 }
+        );
+        // 0 is the value master measured, and it always chose the rebuild.
+        assert_eq!(plan_feed_update(true, 0, 4, 4, 4), FeedUpdate::Rebuild);
+
+        // The extend itself: the same models, more rows in each.
+        for index in 24..48 {
+            let height = 100.0 + (index % 5) as f32 * 40.0;
+            place_in_columns(&columns, &mut heights, card(&format!("p{index}")), height);
+        }
+        for (index, before) in first_page.iter().enumerate() {
+            assert!(
+                Rc::ptr_eq(before, &columns[index]),
+                "column {index} was rebuilt instead of extended"
+            );
+            assert!(
+                columns[index].row_count() > rows_before[index],
+                "column {index} did not grow"
+            );
+        }
+        assert_eq!(
+            columns.iter().map(|model| model.row_count()).sum::<usize>(),
+            48
+        );
+    }
+
+    /// A column count that changed under the feed invalidates the buckets and
+    /// the accumulated heights, so that is the case that still rebuilds.
+    #[test]
+    fn a_changed_column_count_still_rebuilds() {
+        assert_eq!(plan_feed_update(true, 24, 3, 4, 3), FeedUpdate::Rebuild);
+        assert_eq!(plan_feed_update(true, 24, 4, 4, 3), FeedUpdate::Rebuild);
+        assert_eq!(plan_feed_update(false, 24, 4, 4, 4), FeedUpdate::Rebuild);
+        // Nothing on screen yet: an empty feed has no columns to extend.
+        assert_eq!(plan_feed_update(true, 0, 0, 4, 0), FeedUpdate::Rebuild);
     }
 }

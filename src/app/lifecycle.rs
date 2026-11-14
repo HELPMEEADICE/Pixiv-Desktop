@@ -326,9 +326,10 @@ pub(crate) fn start_timers(app: &Shared) {
             let Ok(app) = shared.try_borrow() else {
                 return;
             };
-            if !app.downloads.tasks().is_empty() {
-                app.push_downloads();
-            }
+            // One `tasks()` snapshot per tick, taken inside `push_downloads`:
+            // the emptiness test used to cost a second deep clone of the whole
+            // queue (plan §2.3 R8).
+            app.push_downloads();
         },
     );
     std::mem::forget(tick);

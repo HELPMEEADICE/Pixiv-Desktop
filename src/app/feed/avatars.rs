@@ -1,4 +1,80 @@
+use std::cell::RefCell;
+use std::collections::VecDeque;
+
 use super::*;
+
+thread_local! {
+    /// Insertion order for [`App::avatars`], so eviction can drop the oldest
+    /// faces first (plan §2.3 R7). The map itself is declared in `app/mod.rs` and
+    /// stays a plain `HashMap`; the order lives beside the only code that writes
+    /// it, the way `mod.rs` keeps the single `App` handle in a `thread_local!`.
+    static AVATAR_ORDER: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
+}
+
+/// Store one decoded face, evicting the oldest faces and nothing else.
+///
+/// The map used to be `clear()`ed the moment it passed `AVATARS_KEEP`, which took
+/// the profile banner with it: the banner is stored here too (`profile.rs:172`)
+/// and `spawn_profile_background` is its only requester, so an evicted banner
+/// stayed blank for the life of the page. Rows already on screen hold their own
+/// copy of an `Image`, so dropping a *face* never blanks a visible avatar - the
+/// next render re-requests it and gets it from the disk/memory tier. That is true
+/// of a face and false of the banner, which is why `protect` exists.
+pub(crate) fn insert_avatar(
+    avatars: &mut HashMap<String, slint::Image>,
+    order: &mut VecDeque<String>,
+    url: String,
+    image: slint::Image,
+    keep: usize,
+    protect: Option<&str>,
+) {
+    avatars.insert(url.clone(), image);
+    if let Some(seen) = order.iter().position(|known| *known == url) {
+        order.remove(seen);
+    }
+    order.push_back(url);
+    // A cap of zero entries is not a queue, it is a licence to loop forever.
+    let keep = keep.max(1);
+    while avatars.len() > keep {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        if Some(oldest.as_str()) == protect {
+            // Never dropped, but sent to the back: the one entry that cannot be
+            // re-requested must not block the next eviction.
+            order.push_back(oldest);
+            continue;
+        }
+        avatars.remove(&oldest);
+    }
+}
+
+impl App {
+    /// One decoded face in, the oldest faces out.
+    ///
+    /// The banner is protected by URL rather than by a field of its own: the
+    /// field would have to be declared in `App` (`app/mod.rs`), which is outside
+    /// this round's boundary, and the URL is already known exactly - it is
+    /// `profile.background`, and `spawn_profile_background` is its only requester.
+    pub(crate) fn remember_avatar(&mut self, url: String, image: slint::Image) {
+        let banner = self
+            .profile
+            .as_ref()
+            .and_then(|state| state.profile.background.clone());
+        let avatars = &mut self.avatars;
+        AVATAR_ORDER.with(|order| {
+            let mut order = order.borrow_mut();
+            insert_avatar(
+                avatars,
+                &mut order,
+                url,
+                image,
+                AVATARS_KEEP,
+                banner.as_deref(),
+            );
+        });
+    }
+}
 
 impl App {
     // ------------------------------------------------------------- avatars
@@ -59,13 +135,7 @@ impl App {
                         return;
                     };
                     let image = raw.to_slint();
-                    app.avatars.insert(url.clone(), image);
-                    // Rows on screen already hold their own copy of the image, so
-                    // dropping the map never blanks a visible face: the next render
-                    // re-requests it and gets it from the disk/memory tier.
-                    if app.avatars.len() > AVATARS_KEEP {
-                        app.avatars.clear();
-                    }
+                    app.remember_avatar(url.clone(), image);
                     app.repaint_avatars(&url);
                 });
             }
@@ -251,5 +321,68 @@ impl App {
                 column.set_row_data(row, item);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn face() -> slint::Image {
+        slint::Image::default()
+    }
+
+    /// Avatar pressure must not empty the map, and must never take the banner
+    /// with it. The old code `clear()`ed at the cap, so the profile header lost
+    /// its cover after 256 faces and nothing re-requested it (plan §2.3 R7).
+    #[test]
+    fn the_avatar_map_drops_the_oldest_face_and_never_the_banner() {
+        let mut avatars: HashMap<String, slint::Image> = HashMap::new();
+        let mut order: VecDeque<String> = VecDeque::new();
+        // The banner is the oldest entry, which is exactly the one wholesale
+        // eviction used to throw away first.
+        insert_avatar(
+            &mut avatars,
+            &mut order,
+            "banner".into(),
+            face(),
+            AVATARS_KEEP,
+            Some("banner"),
+        );
+        for index in 0..300 {
+            insert_avatar(
+                &mut avatars,
+                &mut order,
+                format!("u{index}"),
+                face(),
+                AVATARS_KEEP,
+                Some("banner"),
+            );
+            assert!(
+                avatars.len() <= AVATARS_KEEP,
+                "the map never grows past the cap"
+            );
+        }
+        assert_eq!(avatars.len(), AVATARS_KEEP);
+        assert!(
+            avatars.contains_key("banner"),
+            "the banner has no re-request path, so it is never evicted"
+        );
+        assert!(avatars.contains_key("u299"), "the newest faces are kept");
+        assert!(!avatars.contains_key("u0"), "the oldest faces go first");
+        assert_eq!(order.len(), avatars.len(), "the order tracks the map");
+    }
+
+    /// Re-inserting a URL that is already held must not duplicate its slot in
+    /// the order, or one re-decode would keep two entries alive.
+    #[test]
+    fn a_repeated_url_keeps_one_slot_in_the_order() {
+        let mut avatars: HashMap<String, slint::Image> = HashMap::new();
+        let mut order: VecDeque<String> = VecDeque::new();
+        for _ in 0..3 {
+            insert_avatar(&mut avatars, &mut order, "a".into(), face(), 2, None);
+        }
+        assert_eq!(avatars.len(), 1);
+        assert_eq!(order.len(), 1);
     }
 }

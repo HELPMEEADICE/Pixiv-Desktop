@@ -1,5 +1,23 @@
 use super::*;
 
+/// Take the one queue snapshot a tick is allowed to take.
+///
+/// Returns `None` when the queue is empty **and** the model already shows
+/// nothing: that is the idle case, and it must not write to the UI. `shown` is
+/// the app-side cache of what the model holds (`download_rows.row_count()`), which
+/// is what lets the emptiness test share the snapshot instead of cloning the
+/// queue a second time to find out.
+pub(crate) fn snapshot_downloads(
+    source: impl FnOnce() -> Vec<pixiv_download::DownloadTask>,
+    shown: usize,
+) -> Option<Vec<pixiv_download::DownloadTask>> {
+    let tasks = source();
+    if tasks.is_empty() && shown == 0 {
+        return None;
+    }
+    Some(tasks)
+}
+
 impl App {
     // ------------------------------------------------------------- workers
 
@@ -16,7 +34,17 @@ impl App {
 
 impl App {
     pub(crate) fn push_downloads(&self) {
-        let rows = to_download_rows(self.downloads.tasks());
+        // One snapshot per call. The 500ms timer used to take one just to ask
+        // "is the queue empty" and this function took a second one, and
+        // `DownloadManager::tasks` deep-clones every row
+        // (`crates/pixiv-download/src/worker.rs:278`) - so a queue with anything
+        // in it paid that twice per half second (plan §2.3 R8).
+        let Some(tasks) =
+            snapshot_downloads(|| self.downloads.tasks(), self.download_rows.row_count())
+        else {
+            return;
+        };
+        let rows = to_download_rows(tasks);
         let ui = self.ui();
         let active = rows
             .iter()
@@ -224,4 +252,71 @@ pub(crate) fn to_download_rows(tasks: Vec<pixiv_download::DownloadTask>) -> Vec<
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(id: &str) -> DownloadRequest {
+        DownloadRequest {
+            illust_id: id.into(),
+            title: "t".into(),
+            author: "a".into(),
+            page_index: 0,
+            page_count: 1,
+            url: format!("demo://illust/{id}/800x600/regular.png"),
+            extension: "png".into(),
+        }
+    }
+
+    /// A 500ms tick must read the queue once. It used to read it twice -
+    /// `lifecycle.rs` took a snapshot only to test for emptiness, and
+    /// `push_downloads` took another to build the rows, each one a deep clone of
+    /// every task (plan §2.3 R8).
+    #[test]
+    fn a_tick_takes_one_queue_snapshot_not_two() {
+        let manager = DownloadManager::new(DownloadConfig::default());
+        manager.enqueue(vec![request("700000001")]);
+
+        let mut snapshots = 0;
+        let taken = snapshot_downloads(
+            || {
+                snapshots += 1;
+                manager.tasks()
+            },
+            0,
+        );
+        assert_eq!(
+            snapshots, 1,
+            "one snapshot serves both the test and the push"
+        );
+        assert_eq!(taken.map(|tasks| tasks.len()), Some(1));
+
+        // Idle queue, nothing on screen: one snapshot and no UI write at all.
+        let idle = DownloadManager::new(DownloadConfig::default());
+        let mut idle_snapshots = 0;
+        let nothing = snapshot_downloads(
+            || {
+                idle_snapshots += 1;
+                idle.tasks()
+            },
+            0,
+        );
+        assert!(nothing.is_none(), "an idle tick pushes nothing");
+        assert_eq!(idle_snapshots, 1);
+
+        // An empty queue with rows still on screen is not idle: the rows have to
+        // be dropped, and that still costs exactly one snapshot.
+        let mut stale_snapshots = 0;
+        let stale = snapshot_downloads(
+            || {
+                stale_snapshots += 1;
+                idle.tasks()
+            },
+            3,
+        );
+        assert_eq!(stale.map(|tasks| tasks.len()), Some(0));
+        assert_eq!(stale_snapshots, 1);
+    }
 }

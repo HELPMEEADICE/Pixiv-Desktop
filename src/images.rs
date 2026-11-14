@@ -67,8 +67,28 @@ pub fn tier_up(physical: u32) -> u32 {
 /// target is rounded up to a 32px multiple ([`tier_up`]) so nearby window sizes
 /// share one cache entry instead of missing each other by a few pixels.
 pub fn target_width(card_width: f32, scale_factor: f32) -> u32 {
-    let physical = (card_width.max(1.0) * scale_factor.max(1.0)).ceil() as u32;
-    tier_up(physical).clamp(128, 640)
+    target_width_up_to(card_width, scale_factor, CARD_MAX_WIDTH)
+}
+
+/// Ceiling for a card cover. A grid card is at most ~420 logical px wide, so a
+/// 640px decode already covers a 150% display with room for the settle.
+pub const CARD_MAX_WIDTH: u32 = 640;
+
+/// Ceiling for the profile banner, which is drawn across the whole header row.
+///
+/// The card ceiling is the wrong limit for it: at 150% a full-width banner asks
+/// for ~1 800 physical px and the card clamp handed back 640, so the image was
+/// decoded at a third of its draw size and then stretched (plan §2.2 U8).
+pub const BANNER_MAX_WIDTH: u32 = 2048;
+
+/// [`target_width`] for a surface that is wider than a card.
+///
+/// Same rule - the [`tier_up`] rounding is what lets two nearby window widths
+/// share one decoded bitmap - with a ceiling the caller names instead of the
+/// card's.
+pub fn target_width_up_to(width: f32, scale_factor: f32, cap: u32) -> u32 {
+    let physical = (width.max(1.0) * scale_factor.max(1.0)).ceil() as u32;
+    tier_up(physical).clamp(128, cap.max(128))
 }
 
 /// Must a cover decoded at tier `decoded` be requested again for `target`?
@@ -280,6 +300,24 @@ mod tests {
 
     /// The tier the tests plan at when the exact number does not matter.
     const TIER: u32 = 320;
+
+    /// The profile banner is not a card and must not be decoded at the card
+    /// ceiling. At 150% it is drawn ~1 800 physical px wide; `target_width`
+    /// clamps to 640, which is why the header looked soft (plan §2.2 U8).
+    #[test]
+    fn a_banner_is_not_decoded_at_the_card_ceiling() {
+        assert_eq!(target_width(1200.0, 1.5), 640, "the card ceiling stays");
+        assert!(
+            target_width_up_to(1200.0, 1.5, 2048) >= (1200.0_f32 * 1.5) as u32,
+            "a full-width banner must be decoded at its draw size, not a card's"
+        );
+        // Still on the 32px tier grid, so two nearby window widths share a decode.
+        assert_eq!(target_width_up_to(1200.0, 1.5, 2048) % TIER_STEP, 0);
+        // The cap is the caller's, and it is a real ceiling.
+        assert_eq!(target_width_up_to(4000.0, 2.0, 2048), 2048);
+        // A card-tier cap reproduces the old answer exactly.
+        assert_eq!(target_width_up_to(1200.0, 1.5, CARD_MAX_WIDTH), 640);
+    }
 
     fn pair(id: u64) -> (String, String) {
         (id.to_string(), format!("https://example.invalid/{id}.jpg"))
