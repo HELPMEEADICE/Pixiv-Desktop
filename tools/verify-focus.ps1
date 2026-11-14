@@ -436,7 +436,8 @@ $closedWalks = @($fullWalks | Where-Object { $_.Cycle })
 $walkSeconds = [math]::Round((($sessions | Measure-Object -Property Seconds -Sum).Sum), 1)
 $requestedFull = if (@($FullPages).Count) { @($FullPages) -join ", " } else { "none requested" }
 
-$countLine = "{0} Tab stops on {1} pages: {2} with the focus ring ({3} of them dimmed on a disabled control), {4} with the text-field accent rule, {5} invisible" -f $allStops.Count, $sessions.Count, $ringStops.Count, $dimStops.Count, $accentStops.Count, $missing.Count
+$windowStops = @($allStops | Where-Object { $_.Verdict -eq "WINDOW" })
+$countLine = "{0} Tab stops on {1} pages: {2} with the focus ring ({3} of them dimmed on a disabled control), {4} with the text-field accent rule, {5} on the window root (not a control), {6} invisible" -f $allStops.Count, $sessions.Count, $ringStops.Count, $dimStops.Count, $accentStops.Count, $windowStops.Count, $missing.Count
 Write-Host $countLine -ForegroundColor $(if ($missing.Count) { "Red" } else { "Green" })
 $walkList = if ($closedWalks.Count) { ($closedWalks | ForEach-Object { "{0}: {1} stops" -f $_.Page, $_.Stops.Count }) -join ", " } else { "none" }
 Write-Host ("  walk: {0} page(s) walked every stop ({1}); {2} page(s) sampled; {3:N1}s total" -f $closedWalks.Count, $walkList, ($sessions.Count - $closedWalks.Count), $walkSeconds)

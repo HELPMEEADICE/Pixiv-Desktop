@@ -402,12 +402,16 @@ $limitRest = Get-WalkLimit -Page "settings" -FullPages @("home") -Stops 10 -MaxS
 $planted = @(
     [pscustomobject]@{ Name = "Back";       Verdict = (Get-FocusVerdict -RingPixels 512 -Alpha 1.0 -Type "Button" -MinPixels 6) },
     [pscustomobject]@{ Name = "IllustCard"; Verdict = (Get-FocusVerdict -RingPixels 0 -Alpha 0.0 -AccentPixels 0 -Type "ListItem" -MinPixels 6) },
-    [pscustomobject]@{ Name = "Search";     Verdict = (Get-FocusVerdict -RingPixels 0 -Alpha 0.0 -AccentPixels 40 -Type "Edit" -MinPixels 6) }
+    [pscustomobject]@{ Name = "Search";     Verdict = (Get-FocusVerdict -RingPixels 0 -Alpha 0.0 -AccentPixels 40 -Type "Edit" -MinPixels 6) },
+    # The window root, planted with the numbers round nine's full walk measured on it:
+    # no ring, some accent pixels from the search field inside it. It must NOT be
+    # invisible, or every page with a full walk fails for a node nobody can focus.
+    [pscustomobject]@{ Name = "Window";     Verdict = (Get-FocusVerdict -RingPixels 0 -Alpha 0.0 -AccentPixels 1629 -Type "Window" -MinPixels 6) }
 )
 $invisible = @(Get-InvisibleStops -Stops $planted)
 $focusText = Get-Content $FocusScript -Raw
 $wired = (($focusText -match "Get-WalkLimit") -and ($focusText -match "Get-FocusVerdict") -and ($focusText -match "Get-InvisibleStops") -and ($focusText -match "s total"))
-Add-Case -Name "focus-full" -Wanted "home walks past 10, others keep 10, planted stop NONE, duration printed" -Ok ($limitFull -gt 10 -and $limitOld -eq 10 -and $limitRest -eq 10 -and $invisible.Count -eq 1 -and $planted[1].Verdict -eq "NONE" -and $planted[0].Verdict -eq "RING" -and $planted[2].Verdict -eq "ACCENT" -and $wired) -Evidence ("full={0} old={1} other={2}; verdicts={3}; invisible={4}; wired={5}" -f $limitFull, $limitOld, $limitRest, (($planted | ForEach-Object { $_.Verdict }) -join ","), $invisible.Count, $wired)
+Add-Case -Name "focus-full" -Wanted "home walks past 10, others keep 10, planted stop NONE, duration printed" -Ok ($limitFull -gt 10 -and $limitOld -eq 10 -and $limitRest -eq 10 -and $invisible.Count -eq 1 -and $planted[1].Verdict -eq "NONE" -and $planted[0].Verdict -eq "RING" -and $planted[2].Verdict -eq "ACCENT" -and $planted[3].Verdict -eq "WINDOW" -and $wired) -Evidence ("full={0} old={1} other={2}; verdicts={3}; invisible={4}; wired={5}" -f $limitFull, $limitOld, $limitRest, (($planted | ForEach-Object { $_.Verdict }) -join ","), $invisible.Count, $wired)
 
 # ---- case fixture: G24 - an unknown PIXIV_DESKTOP_FIXTURE exits 77, never 0 ----
 # The value the app and the capture gates actually read is the ambient one, so that is

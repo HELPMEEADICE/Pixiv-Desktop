@@ -37,6 +37,13 @@ function Get-FocusVerdict {
         [string]$Type = "",
         [int]$MinPixels = 6
     )
+    # The UIA root is reported as a Tab stop by Windows and is not a control: it cannot
+    # own a ring, and it is where the walk lands when focus returns to the window itself.
+    # It gets its own verdict instead of NONE, because "reached a stop that drew nothing"
+    # has to keep meaning "a control the user can see is focused and nothing shows it".
+    # Round nine: the full walk on home ends on this node, and calling it invisible made
+    # a green page red for a reason no user could act on.
+    if ($Type -eq "Window") { return "WINDOW" }
     if ($RingPixels -ge $MinPixels -and $Alpha -eq 1.0) { return "RING" }
     if ($RingPixels -ge ($MinPixels * 2) -and $Alpha -gt 0) { return "RING-DIM" }
     if ($AccentPixels -ge $MinPixels -and $Type -eq "Edit") { return "ACCENT" }
