@@ -4,11 +4,12 @@
 //! worker can own everything it touches. All mutation happens under a
 //! `parking_lot::Mutex`; no lock is ever held across an `await`.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 use pixiv_types::PixivError;
@@ -23,8 +24,69 @@ use crate::{DownloadConfig, DownloadManager, DownloadRequest, DownloadTask, Task
 /// re-checked between chunks.
 const CHUNK_BYTES: usize = 64 * 1024;
 
-/// How long the idle loop sleeps before looking at the queue again.
-const IDLE_POLL: Duration = Duration::from_millis(20);
+/// How long a parked loop waits before deciding its manager has gone away.
+///
+/// The loop only holds a `Weak`, and nothing signals "the last handle was dropped",
+/// so a fully event-driven loop would outlive its manager for the life of the
+/// process. This is a shutdown watchdog, not a poll: it fires once a second, it
+/// does not claim a task from here, and it is not counted as a wake-up.
+const SHUTDOWN_WATCH: Duration = Duration::from_secs(1);
+
+/// Width of the sliding window both rates are measured over.
+const RATE_WINDOW: Duration = Duration::from_secs(3);
+
+/// Bytes completed in the recent past, reported as bytes per second.
+///
+/// The window is what makes the number mean something under a bursty transport:
+/// a one-second average swings with every chunk, and a whole-run average never
+/// comes back down after a fast start. The divisor is the full window rather than
+/// the age of the oldest sample, so a queue that has been idle for a minute reads
+/// zero rather than the last burst divided by one millisecond.
+#[derive(Debug, Default)]
+pub(crate) struct RateWindow {
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl RateWindow {
+    /// Record with an explicit clock, which is what makes the arithmetic testable.
+    fn record_at(&mut self, now: Instant, bytes: u64) {
+        self.prune(now);
+        if bytes > 0 {
+            self.samples.push_back((now, bytes));
+        }
+    }
+
+    /// Drop samples that have left the window.
+    fn prune(&mut self, now: Instant) {
+        while let Some((at, _)) = self.samples.front() {
+            if now.saturating_duration_since(*at) <= RATE_WINDOW {
+                break;
+            }
+            self.samples.pop_front();
+        }
+    }
+
+    fn bytes_per_second(&self) -> u64 {
+        let total: u64 = self.samples.iter().map(|(_, bytes)| *bytes).sum();
+        window_rate(total)
+    }
+
+    fn bytes_per_second_at(&mut self, now: Instant) -> u64 {
+        self.prune(now);
+        self.bytes_per_second()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.samples.len()
+    }
+}
+
+/// Bytes in the window, expressed per second over the window's whole width.
+fn window_rate(bytes_in_window: u64) -> u64 {
+    let millis = u64::try_from(RATE_WINDOW.as_millis()).unwrap_or(1);
+    (bytes_in_window as u128 * 1_000 / u128::from(millis)) as u64
+}
 
 /// Per-task cancellation: a flag the write loop polls, plus a signal the
 /// in-flight request can await.
@@ -72,8 +134,24 @@ pub(crate) struct Record {
     state: TaskState,
     bytes_done: u64,
     bytes_total: Option<u64>,
+    /// This task's own rate, so one slow page cannot hide behind three fast ones.
+    rate: RateWindow,
+    bytes_per_second: u64,
     destination: Option<PathBuf>,
     cancel: Arc<Cancel>,
+    /// The user's intent, which outlives the state for as long as a task unwinds.
+    ///
+    /// Pausing a running task cancels it at the transport level - that is the only
+    /// way the permit comes back before the body does - and this flag is what makes
+    /// the resulting `Cancelled` land as `Paused` instead.
+    paused: bool,
+    /// Bumped on every re-queue; a claim writes only under the value it took.
+    ///
+    /// `resume` can put a row back in the queue while the claim that was cancelled
+    /// for the pause is still unwinding. Without this, that claim's `finish` - or
+    /// its `ClaimGuard` - would land on the *new* attempt: a resumed download shown
+    /// as cancelled, or requeued a second time while it runs.
+    generation: u64,
 }
 
 impl Record {
@@ -84,8 +162,43 @@ impl Record {
             state: self.state.clone(),
             bytes_done: self.bytes_done,
             bytes_total: self.bytes_total,
+            bytes_per_second: self.bytes_per_second,
             destination: self.destination.clone(),
         }
+    }
+
+    /// Put this record back at the head of the queue's work, from zero.
+    ///
+    /// Shared by `retry` and `resume`: both abandon whatever the last attempt had
+    /// done, and both need a fresh cancel signal because the old one is latched.
+    fn requeue(&mut self) {
+        self.state = TaskState::Queued;
+        self.bytes_done = 0;
+        self.bytes_total = None;
+        self.bytes_per_second = 0;
+        self.rate = RateWindow::default();
+        self.destination = None;
+        self.cancel = Cancel::new();
+        self.paused = false;
+        // Wrapping is fine: a collision needs 2^64 re-queues of one row, and a
+        // saturating counter would stop fencing anything for good instead.
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Pause this record, reporting whether it changed anything.
+    fn pause(&mut self) -> bool {
+        if self.state.is_terminal() || matches!(self.state, TaskState::Paused) {
+            return false;
+        }
+        self.paused = true;
+        match self.state {
+            TaskState::Queued => self.state = TaskState::Paused,
+            // Running: the claim is already out, so the only way to free its
+            // permit now is to cancel the request the claim is waiting on.
+            // `finish` reads `paused` and records `Paused`, not `Cancelled`.
+            _ => self.cancel.cancel(),
+        }
+        true
     }
 }
 
@@ -93,13 +206,37 @@ impl Record {
 #[derive(Debug)]
 pub(crate) struct Inner {
     config: RwLock<Arc<DownloadConfig>>,
-    tasks: Mutex<Vec<Record>>,
+    tasks: Mutex<Queue>,
     next_id: AtomicU64,
+    /// Wakes the loop out of its idle wait.
+    ///
+    /// Its own `Arc` so the loop can await it without keeping `Inner` - and
+    /// therefore the manager - alive. Every transition into `Queued` signals it:
+    /// enqueue, retry, resume, and a claim coming back from a worker that died.
+    wake: Arc<Notify>,
+    /// How often an idle wait has ended because of a wake rather than the watchdog.
+    ///
+    /// O3 is accepted on a count, not on a feeling: the 20 ms poll this replaced
+    /// would have counted fifty of them a second with an empty queue. Test-only read.
+    wakeups: Arc<AtomicU64>,
+}
+
+/// Everything behind the one queue lock.
+///
+/// The aggregate rate sits beside the records because one chunk write credits both,
+/// and one lock for the pair is what stops `throughput()` from ever reporting bytes
+/// a task does not have yet.
+#[derive(Debug, Default)]
+pub(crate) struct Queue {
+    records: Vec<Record>,
+    rate: RateWindow,
 }
 
 /// A task claimed by the worker: queued -> running, with its destination fixed.
 struct Claim {
     id: TaskId,
+    /// The record's generation at claim time. See [`Record::generation`].
+    generation: u64,
     request: DownloadRequest,
     destination: PathBuf,
     cancel: Arc<Cancel>,
@@ -128,11 +265,12 @@ struct Claim {
 struct ClaimGuard {
     inner: Arc<Inner>,
     id: TaskId,
+    generation: u64,
 }
 
 impl Drop for ClaimGuard {
     fn drop(&mut self) {
-        self.inner.release_claim(self.id);
+        self.inner.release_claim(self.id, self.generation);
     }
 }
 
@@ -140,9 +278,20 @@ impl Inner {
     fn new(config: DownloadConfig) -> Self {
         Self {
             config: RwLock::new(Arc::new(config)),
-            tasks: Mutex::new(Vec::new()),
+            tasks: Mutex::new(Queue::default()),
             next_id: AtomicU64::new(0),
+            wake: Arc::new(Notify::new()),
+            wakeups: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Signal the loop that the queue changed.
+    ///
+    /// `Notify` stores one permit when nobody is waiting, so a wake that lands
+    /// between the loop's emptiness check and its await is not lost - which is the
+    /// one race a hand-rolled flag would have to get right.
+    fn wake(&self) {
+        self.wake.notify_one();
     }
 
     fn config(&self) -> Arc<DownloadConfig> {
@@ -157,80 +306,178 @@ impl Inner {
     }
 
     fn enqueue(&self, requests: Vec<DownloadRequest>) -> Vec<TaskId> {
-        let mut tasks = self.tasks.lock();
         let mut ids = Vec::with_capacity(requests.len());
-        for request in requests {
-            let id = self
-                .next_id
-                .fetch_add(1, Ordering::Relaxed)
-                .saturating_add(1);
-            tasks.push(Record {
-                id,
-                request,
-                state: TaskState::Queued,
-                bytes_done: 0,
-                bytes_total: None,
-                destination: None,
-                cancel: Cancel::new(),
-            });
-            ids.push(id);
+        {
+            let mut queue = self.tasks.lock();
+            for request in requests {
+                let id = self
+                    .next_id
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                queue.records.push(Record {
+                    id,
+                    request,
+                    state: TaskState::Queued,
+                    bytes_done: 0,
+                    bytes_total: None,
+                    rate: RateWindow::default(),
+                    bytes_per_second: 0,
+                    destination: None,
+                    cancel: Cancel::new(),
+                    paused: false,
+                    generation: 0,
+                });
+                ids.push(id);
+            }
         }
+        self.wake();
         ids
     }
 
     fn tasks(&self) -> Vec<DownloadTask> {
-        let tasks = self.tasks.lock();
-        tasks.iter().rev().map(Record::snapshot).collect()
+        let queue = self.tasks.lock();
+        queue.records.iter().rev().map(Record::snapshot).collect()
     }
 
+    /// Bytes per second written by the whole queue over the last three seconds.
+    fn throughput(&self) -> u64 {
+        self.tasks.lock().rate.bytes_per_second_at(Instant::now())
+    }
+
+    /// Pause one task, reusing the in-flight cancel. See [`Record::pause`].
+    fn pause(&self, id: TaskId) -> bool {
+        let changed = {
+            let mut queue = self.tasks.lock();
+            queue
+                .records
+                .iter_mut()
+                .find(|record| record.id == id)
+                .is_some_and(Record::pause)
+        };
+        if changed {
+            self.wake();
+        }
+        changed
+    }
+
+    /// Pause everything that can be paused, returning how many rows changed.
+    fn pause_all(&self) -> usize {
+        let mut changed = 0;
+        {
+            let mut queue = self.tasks.lock();
+            for record in &mut queue.records {
+                if record.pause() {
+                    changed += 1;
+                }
+            }
+        }
+        if changed > 0 {
+            self.wake();
+        }
+        changed
+    }
+
+    /// Put a paused task back in the queue, from the start of its body.
+    ///
+    /// Range resume is deliberately out of scope: the destination is published only
+    /// after the whole body arrives, so re-downloading is safe and is one request,
+    /// where a partial body on disk would be a second code path to get wrong.
+    fn resume(&self, id: TaskId) -> bool {
+        let resumed = {
+            let mut queue = self.tasks.lock();
+            match queue.records.iter_mut().find(|record| record.id == id) {
+                Some(record) if matches!(record.state, TaskState::Paused) => {
+                    record.requeue();
+                    true
+                }
+                _ => false,
+            }
+        };
+        if resumed {
+            self.wake();
+        }
+        resumed
+    }
+
+    /// Resume every paused task, returning how many rows changed.
+    fn resume_all(&self) -> usize {
+        let mut changed = 0;
+        {
+            let mut queue = self.tasks.lock();
+            for record in &mut queue.records {
+                if matches!(record.state, TaskState::Paused) {
+                    record.requeue();
+                    changed += 1;
+                }
+            }
+        }
+        if changed > 0 {
+            self.wake();
+        }
+        changed
+    }
+
+    /// Cancel one task.
+    ///
+    /// A cancel outranks a pause: it is the later instruction, so a row the user
+    /// paused and then cancelled must end `Cancelled` when its claim unwinds, not
+    /// sit in `Paused` for the rest of the session.
     fn cancel(&self, id: TaskId) -> bool {
-        let mut tasks = self.tasks.lock();
-        let Some(record) = tasks.iter_mut().find(|r| r.id == id) else {
+        let mut queue = self.tasks.lock();
+        let Some(record) = queue.records.iter_mut().find(|r| r.id == id) else {
             return false;
         };
         if record.state.is_terminal() {
             return false;
         }
+        record.paused = false;
         record.cancel.cancel();
-        if matches!(record.state, TaskState::Queued) {
-            // Never started, so nothing has to unwind: mark it done right here
-            // and the worker will simply never pick it up.
+        if matches!(record.state, TaskState::Queued | TaskState::Paused) {
+            // Never started or already held, so nothing has to unwind: mark it
+            // done right here and the worker will simply never pick it up.
             record.state = TaskState::Cancelled;
         }
+        drop(queue);
+        self.wake();
         true
     }
 
     fn retry(&self, id: TaskId) -> bool {
-        let mut tasks = self.tasks.lock();
-        let Some(record) = tasks.iter_mut().find(|r| r.id == id) else {
-            return false;
+        let retried = {
+            let mut queue = self.tasks.lock();
+            match queue.records.iter_mut().find(|r| r.id == id) {
+                Some(record)
+                    if matches!(record.state, TaskState::Failed(_) | TaskState::Cancelled) =>
+                {
+                    record.requeue();
+                    true
+                }
+                _ => false,
+            }
         };
-        if !matches!(record.state, TaskState::Failed(_) | TaskState::Cancelled) {
-            return false;
+        if retried {
+            self.wake();
         }
-        record.state = TaskState::Queued;
-        record.bytes_done = 0;
-        record.bytes_total = None;
-        record.destination = None;
-        record.cancel = Cancel::new();
-        true
+        retried
     }
 
     fn clear_finished(&self) {
-        self.tasks.lock().retain(|r| !r.state.is_terminal());
+        self.tasks.lock().records.retain(|r| !r.state.is_terminal());
     }
 
     fn has_queued(&self) -> bool {
         self.tasks
             .lock()
+            .records
             .iter()
             .any(|r| matches!(r.state, TaskState::Queued))
     }
 
     fn take_next_queued(&self) -> Option<Claim> {
         let config = self.config();
-        let mut tasks = self.tasks.lock();
-        let record = tasks
+        let mut queue = self.tasks.lock();
+        let record = queue
+            .records
             .iter_mut()
             .find(|r| matches!(r.state, TaskState::Queued))?;
         let name = download_file_name(&config.filename_template, &record.request);
@@ -239,6 +486,7 @@ impl Inner {
         record.destination = Some(destination.clone());
         Some(Claim {
             id: record.id,
+            generation: record.generation,
             request: record.request.clone(),
             destination,
             cancel: Arc::clone(&record.cancel),
@@ -247,18 +495,72 @@ impl Inner {
         })
     }
 
-    fn set_progress(&self, id: TaskId, done: u64, total: Option<u64>) {
-        if let Some(record) = self.tasks.lock().iter_mut().find(|r| r.id == id) {
+    /// Is this claim still the one that owns `record`? See [`Record::generation`].
+    fn owns(record: &Record, generation: u64) -> bool {
+        record.generation == generation
+    }
+
+    fn set_progress(&self, id: TaskId, generation: u64, done: u64, total: Option<u64>) {
+        if let Some(record) = self
+            .tasks
+            .lock()
+            .records
+            .iter_mut()
+            .find(|r| r.id == id && Self::owns(r, generation))
+        {
             record.bytes_done = done;
             record.bytes_total = total;
         }
     }
 
-    fn finish(&self, id: TaskId, state: TaskState, done: u64, total: Option<u64>) {
-        if let Some(record) = self.tasks.lock().iter_mut().find(|r| r.id == id) {
-            record.state = state;
+    /// Credit one written chunk to the task's own window and to the queue's.
+    ///
+    /// Both are fed here rather than in `throughput()` so the aggregate can never
+    /// count bytes a row does not report, and the row's ETA can never be computed
+    /// from bytes it did not write.
+    fn credit(&self, id: TaskId, generation: u64, chunk: u64, done: u64, total: Option<u64>) {
+        let now = Instant::now();
+        let mut queue = self.tasks.lock();
+        queue.rate.record_at(now, chunk);
+        if let Some(record) = queue
+            .records
+            .iter_mut()
+            .find(|r| r.id == id && Self::owns(r, generation))
+        {
             record.bytes_done = done;
             record.bytes_total = total;
+            record.rate.record_at(now, chunk);
+            record.bytes_per_second = record.rate.bytes_per_second();
+        }
+    }
+
+    /// Write a task's outcome.
+    ///
+    /// The one translation that matters: a `Cancelled` that lands while the record
+    /// is paused is the pause's own cancellation unwinding, and it has to be
+    /// recorded as `Paused` - the user asked to hold the task, not to drop it, and
+    /// `resume` is what they expect to work next.
+    fn finish(&self, id: TaskId, generation: u64, state: TaskState, done: u64, total: Option<u64>) {
+        let mut queue = self.tasks.lock();
+        let Some(record) = queue
+            .records
+            .iter_mut()
+            .find(|r| r.id == id && Self::owns(r, generation))
+        else {
+            // The claim was superseded while it unwound (a pause followed by a
+            // resume): its outcome describes an attempt nobody is watching.
+            return;
+        };
+        let paused = record.paused && matches!(state, TaskState::Cancelled);
+        let cancelled = matches!(state, TaskState::Cancelled);
+        record.state = if paused { TaskState::Paused } else { state };
+        record.paused = paused;
+        record.bytes_done = if paused { 0 } else { done };
+        record.bytes_total = if paused { None } else { total };
+        if paused || cancelled {
+            // Nothing was kept, so no rate was earned: a resumed task starts from
+            // zero and must not inherit the speed of the attempt that was dropped.
+            record.bytes_per_second = 0;
         }
     }
 
@@ -267,19 +569,30 @@ impl Inner {
     /// No file is touched: the partial file is written to a `.part` sibling and
     /// the next attempt truncates it with `File::create`, so an interrupted
     /// write can never leave a truncated file that looks complete.
-    fn release_claim(&self, id: TaskId) {
-        let mut tasks = self.tasks.lock();
-        let Some(record) = tasks.iter_mut().find(|r| r.id == id) else {
-            return;
+    fn release_claim(&self, id: TaskId, generation: u64) {
+        let requeued = {
+            let mut queue = self.tasks.lock();
+            match queue
+                .records
+                .iter_mut()
+                .find(|r| r.id == id && Self::owns(r, generation))
+            {
+                Some(record) if matches!(record.state, TaskState::Running) => {
+                    // A claim that comes back belongs in the state the user left it
+                    // in: a hold outlives the worker that died under it.
+                    let paused = record.paused;
+                    record.requeue();
+                    if paused {
+                        record.state = TaskState::Paused;
+                    }
+                    !paused
+                }
+                _ => false,
+            }
         };
-        if !matches!(record.state, TaskState::Running) {
-            return;
+        if requeued {
+            self.wake();
         }
-        record.state = TaskState::Queued;
-        record.bytes_done = 0;
-        record.bytes_total = None;
-        record.destination = None;
-        record.cancel = Cancel::new();
     }
 }
 
@@ -331,6 +644,41 @@ impl DownloadManager {
         self.inner.clear_finished();
     }
 
+    /// Hold one task: it leaves the queue and, if it was running, gives its
+    /// concurrency permit back at once instead of when its body would have landed.
+    ///
+    /// Returns `false` for an unknown id, a terminal row, or a row already paused.
+    pub fn pause(&self, id: TaskId) -> bool {
+        self.inner.pause(id)
+    }
+
+    /// Hold every task that is queued or running. Returns how many rows changed.
+    pub fn pause_all(&self) -> usize {
+        self.inner.pause_all()
+    }
+
+    /// Send a paused task back to the queue, from the start of its body.
+    pub fn resume(&self, id: TaskId) -> bool {
+        self.inner.resume(id)
+    }
+
+    /// Resume every paused task. Returns how many rows changed.
+    pub fn resume_all(&self) -> usize {
+        self.inner.resume_all()
+    }
+
+    /// Bytes per second the queue has written over the last three seconds.
+    #[must_use]
+    pub fn throughput(&self) -> u64 {
+        self.inner.throughput()
+    }
+
+    /// How many times the loop was woken out of an idle wait. Test-only.
+    #[cfg(test)]
+    pub(crate) fn wakeups(&self) -> u64 {
+        self.inner.wakeups.load(Ordering::Relaxed)
+    }
+
     /// Run the worker loop until the manager is dropped.
     ///
     /// Intended to be spawned once by the app on a tokio task. The client is
@@ -367,6 +715,10 @@ where
     // The cap is a hard bound: a permit must be held for the whole task.
     let permits = first.config().concurrency.max(1);
     let semaphore = Arc::new(Semaphore::new(permits));
+    // Cloned out of `Inner` so this loop can park on the signal without holding
+    // the manager alive; the weak handle is what decides when to stop.
+    let wake = Arc::clone(&first.wake);
+    let wakeups = Arc::clone(&first.wakeups);
     drop(first);
 
     loop {
@@ -390,9 +742,34 @@ where
             let idle = inflight.is_empty();
             drop(inner);
             if idle {
-                tokio::time::sleep(IDLE_POLL).await;
+                // Parked until something makes work: an enqueue, a resume, a retry,
+                // or a claim coming back from a worker that died. `Notify` keeps one
+                // permit when nobody is waiting, so a signal that lands between the
+                // emptiness check above and this await is not lost.
+                //
+                // The timeout is the shutdown watchdog, not a poll: the loop holds
+                // only a `Weak`, nothing signals the last handle going away, and
+                // without this it would outlive the manager for the life of the
+                // process. A timeout is not a wake-up and is not counted as one.
+                if tokio::time::timeout(SHUTDOWN_WATCH, wake.notified())
+                    .await
+                    .is_ok()
+                {
+                    wakeups.fetch_add(1, Ordering::Relaxed);
+                }
             } else {
-                inflight.join_next().await;
+                tokio::select! {
+                    joined = inflight.join_next() => {
+                        if let Some(Err(err)) = joined {
+                            tracing::warn!(%err, "download worker task did not finish cleanly");
+                        }
+                    }
+                    // Counted here and not in the idle arm alone: this is a real
+                    // signal, and O3's gate is the count of those.
+                    () = wake.notified() => {
+                        wakeups.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
             continue;
         }
@@ -407,6 +784,7 @@ where
         claim.guard = Some(ClaimGuard {
             inner: Arc::clone(&inner),
             id: claim.id,
+            generation: claim.generation,
         });
         let task_inner = Arc::clone(&inner);
         let task_fetch = Arc::clone(&fetch);
@@ -427,6 +805,7 @@ where
     // holding it in a named binding is the point, not a lint dodge.
     let Claim {
         id,
+        generation,
         request,
         destination,
         cancel,
@@ -440,23 +819,30 @@ where
     };
 
     if cancelled() {
-        inner.finish(id, TaskState::Cancelled, 0, None);
+        inner.finish(id, generation, TaskState::Cancelled, 0, None);
         return;
     }
 
     if destination_is_complete(&destination) {
         tracing::debug!(task = log.id, illust = %log.illust, page = log.page, "destination exists, skipping");
-        inner.finish(id, TaskState::Skipped, 0, None);
+        inner.finish(id, generation, TaskState::Skipped, 0, None);
         return;
     }
 
     let Some(parent) = destination.parent().map(Path::to_path_buf) else {
-        inner.finish(id, TaskState::Failed("目标路径无效".to_string()), 0, None);
+        inner.finish(
+            id,
+            generation,
+            TaskState::Failed("目标路径无效".to_string()),
+            0,
+            None,
+        );
         return;
     };
     if let Err(err) = tokio::fs::create_dir_all(&parent).await {
         inner.finish(
             id,
+            generation,
             TaskState::Failed(format!("无法创建目录：{}", short_io(&err))),
             0,
             None,
@@ -479,30 +865,30 @@ where
     };
     let Some(fetched) = fetched else {
         tracing::debug!(task = log.id, illust = %log.illust, page = log.page, "download cancelled while fetching");
-        inner.finish(id, TaskState::Cancelled, 0, None);
+        inner.finish(id, generation, TaskState::Cancelled, 0, None);
         return;
     };
     let body = match fetched {
         Ok((bytes, _content_type)) => bytes,
         Err(PixivError::Cancelled) => {
-            inner.finish(id, TaskState::Cancelled, 0, None);
+            inner.finish(id, generation, TaskState::Cancelled, 0, None);
             return;
         }
         Err(err) => {
             let reason = describe(&err);
             tracing::warn!(task = log.id, illust = %log.illust, page = log.page, %reason, "download failed");
-            inner.finish(id, TaskState::Failed(reason), 0, None);
+            inner.finish(id, generation, TaskState::Failed(reason), 0, None);
             return;
         }
     };
 
     if cancelled() {
-        inner.finish(id, TaskState::Cancelled, 0, None);
+        inner.finish(id, generation, TaskState::Cancelled, 0, None);
         return;
     }
 
     let total = body.len() as u64;
-    inner.set_progress(id, 0, Some(total));
+    inner.set_progress(id, generation, 0, Some(total));
 
     // Write beside the destination, then rename: a cancelled or interrupted
     // download can never leave a truncated file that looks complete.
@@ -512,6 +898,7 @@ where
         Err(err) => {
             inner.finish(
                 id,
+                generation,
                 TaskState::Failed(format!("无法创建临时文件：{}", short_io(&err))),
                 0,
                 Some(total),
@@ -531,7 +918,7 @@ where
             break;
         }
         written = written.saturating_add(chunk.len() as u64);
-        inner.set_progress(id, written, Some(total));
+        inner.credit(id, generation, chunk.len() as u64, written, Some(total));
     }
     if interrupted.is_none() && !cancelled() {
         // `sync_all` rather than `flush`: flushing only hands the bytes to the
@@ -546,25 +933,26 @@ where
 
     if let Some(reason) = interrupted {
         remove_part(&part).await;
-        inner.finish(id, TaskState::Failed(reason), 0, Some(total));
+        inner.finish(id, generation, TaskState::Failed(reason), 0, Some(total));
         return;
     }
     if cancelled() {
         remove_part(&part).await;
         tracing::debug!(task = log.id, illust = %log.illust, page = log.page, "download cancelled");
-        inner.finish(id, TaskState::Cancelled, 0, None);
+        inner.finish(id, generation, TaskState::Cancelled, 0, None);
         return;
     }
 
     match tokio::fs::rename(&part, &destination).await {
         Ok(()) => {
             tracing::debug!(task = log.id, illust = %log.illust, page = log.page, bytes = written, "download complete");
-            inner.finish(id, TaskState::Completed, written, Some(total));
+            inner.finish(id, generation, TaskState::Completed, written, Some(total));
         }
         Err(err) => {
             remove_part(&part).await;
             inner.finish(
                 id,
+                generation,
                 TaskState::Failed(format!("重命名失败：{}", short_io(&err))),
                 0,
                 Some(total),
@@ -1240,5 +1628,350 @@ mod tests {
         // Two tasks rendering one name never share a temp file.
         assert_ne!(part_path(&destination, 7), part_path(&destination, 8));
         assert_eq!(part_path(&destination, 7).parent(), destination.parent());
+    }
+
+    /// The window's arithmetic, with the clock supplied: the divisor is the window's
+    /// own width, so a burst cannot read as a lifetime average and an idle queue
+    /// cannot inherit the speed of a burst that has already left the window.
+    #[test]
+    fn throughput_is_measured_over_a_three_second_window() {
+        let start = Instant::now();
+        let mut window = RateWindow::default();
+        assert_eq!(window.bytes_per_second_at(start), 0, "nothing written yet");
+
+        window.record_at(start, 6_000);
+        assert_eq!(
+            window.bytes_per_second_at(start + Duration::from_millis(2_900)),
+            2_000,
+            "6 KB inside a 3 s window is 2 KB/s"
+        );
+        // Just outside it the sample is pruned, not merely ignored: the queue has
+        // written nothing for a second and must say so.
+        assert_eq!(
+            window.bytes_per_second_at(start + Duration::from_millis(3_001)),
+            0
+        );
+        assert_eq!(window.len(), 0, "the sample left the window");
+
+        // Two samples inside the window add up, and the divisor stays the window's
+        // width rather than shrinking to the age of the oldest sample.
+        window.record_at(start + Duration::from_secs(4), 1_000);
+        window.record_at(start + Duration::from_millis(4_500), 500);
+        assert_eq!(
+            window.bytes_per_second_at(start + Duration::from_millis(4_500)),
+            500
+        );
+    }
+
+    #[test]
+    fn eta_is_none_whenever_the_answer_would_be_a_guess() {
+        let running = DownloadTask {
+            id: 1,
+            request: request(0),
+            state: TaskState::Running,
+            bytes_done: 0,
+            bytes_total: Some(1_000),
+            bytes_per_second: 100,
+            destination: None,
+        };
+        assert_eq!(running.eta_seconds(), Some(10));
+
+        // Rounded up: 120 bytes at 100 B/s is 1.2 s, which reads 2 - never 1, and
+        // never 0 while bytes remain.
+        let mut nearly = running.clone();
+        nearly.bytes_done = 880;
+        assert_eq!(nearly.eta_seconds(), Some(2));
+
+        // No size yet: the row would otherwise claim it is finished.
+        let mut unknown_size = running.clone();
+        unknown_size.bytes_total = None;
+        assert_eq!(unknown_size.eta_seconds(), None);
+
+        // No rate yet: nothing has been written inside the window.
+        let mut no_rate = running.clone();
+        no_rate.bytes_per_second = 0;
+        assert_eq!(no_rate.eta_seconds(), None);
+
+        // Held, queued or finished: not a running body, so no countdown is owed.
+        for state in [
+            TaskState::Paused,
+            TaskState::Queued,
+            TaskState::Completed,
+            TaskState::Cancelled,
+        ] {
+            let mut idle = running.clone();
+            idle.state = state.clone();
+            assert_eq!(idle.eta_seconds(), None, "{state:?}");
+        }
+
+        // Exactly complete is the one zero a row may report.
+        let mut complete = running.clone();
+        complete.bytes_done = 1_000;
+        assert_eq!(complete.eta_seconds(), Some(0));
+    }
+
+    #[test]
+    fn resume_returns_a_task_to_the_queue_exactly_once() {
+        let dir = temp_dir("resume-once");
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        let ids = manager.enqueue(vec![request(0)]);
+
+        assert!(manager.pause(ids[0]));
+        assert_eq!(manager.tasks()[0].state, TaskState::Paused);
+        assert!(
+            !manager.pause(ids[0]),
+            "pausing a paused row changes nothing"
+        );
+
+        assert!(manager.resume(ids[0]));
+        assert_eq!(
+            manager.tasks().len(),
+            1,
+            "resume re-queues, it never duplicates"
+        );
+        assert_eq!(manager.tasks()[0].state, TaskState::Queued);
+
+        assert!(
+            !manager.resume(ids[0]),
+            "a queued row has nothing to resume"
+        );
+        assert_eq!(manager.tasks().len(), 1, "and no second copy appears");
+        // Retry is not a second door into the queue for a row already in it.
+        assert!(!manager.retry(ids[0]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pause_all_and_resume_all_leave_terminal_rows_alone() {
+        let dir = temp_dir("pause-all");
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        let ids = manager.enqueue((0..3).map(request).collect());
+
+        assert_eq!(manager.pause_all(), 3);
+        assert!(
+            manager
+                .tasks()
+                .iter()
+                .all(|task| task.state == TaskState::Paused)
+        );
+        assert_eq!(manager.pause_all(), 0, "already held");
+
+        assert_eq!(manager.resume_all(), 3);
+        assert!(
+            manager
+                .tasks()
+                .iter()
+                .all(|task| task.state == TaskState::Queued)
+        );
+        assert_eq!(manager.resume_all(), 0);
+
+        // A cancelled row is terminal: neither control touches it.
+        assert!(manager.cancel(ids[0]));
+        assert_eq!(manager.pause_all(), 2);
+        assert_eq!(manager.resume_all(), 2);
+        let cancelled = manager
+            .tasks()
+            .into_iter()
+            .find(|task| task.id == ids[0])
+            .expect("the cancelled row is still listed");
+        assert_eq!(cancelled.state, TaskState::Cancelled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A paused task must hand its permit to the next queued row at once. Holding it
+    /// until the abandoned body arrived would stall the queue behind a task the user
+    /// deliberately stopped (the R8 C6 defect, in the pause path).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_paused_task_frees_its_permit_for_the_next_row() {
+        let dir = temp_dir("pause-permit");
+        // One permit: the second row can only start if the first gives it back.
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        let ids = manager.enqueue(vec![request(0), request(1)]);
+
+        let fetch = |_url: String| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<_, PixivError>((vec![1u8; 8], None::<String>))
+        };
+        let runner = manager.clone();
+        let handle = tokio::spawn(async move { runner.run_with(fetch).await });
+        wait_running(&manager, 1).await;
+
+        assert!(manager.pause(ids[0]));
+        let mut started = false;
+        for _ in 0..200 {
+            let tasks = manager.tasks();
+            let held = tasks.iter().find(|task| task.id == ids[0]);
+            let next = tasks.iter().find(|task| task.id == ids[1]);
+            if held.is_some_and(|task| task.state == TaskState::Paused)
+                && next.is_some_and(|task| task.state == TaskState::Running)
+            {
+                started = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            started,
+            "a paused task must let the next queued row run: {:?}",
+            manager.tasks()
+        );
+        handle.abort();
+
+        let held = manager
+            .tasks()
+            .into_iter()
+            .find(|task| task.id == ids[0])
+            .expect("the paused row keeps its place");
+        assert_eq!(held.state, TaskState::Paused, "held, not cancelled");
+        assert_eq!(held.bytes_done, 0, "nothing was kept for a resume to skip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pause's own cancellation unwinds as `Cancelled`; a cancel that lands
+    /// after it must win, because it is the later instruction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_paused_task_that_is_then_cancelled_ends_cancelled() {
+        let dir = temp_dir("pause-cancel");
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        let ids = manager.enqueue(vec![request(0)]);
+
+        let fetch = |_url: String| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok::<_, PixivError>((vec![1u8; 8], None::<String>))
+        };
+        let runner = manager.clone();
+        let handle = tokio::spawn(async move { runner.run_with(fetch).await });
+        wait_running(&manager, 1).await;
+
+        assert!(manager.pause(ids[0]));
+        assert!(manager.cancel(ids[0]));
+        let tasks = wait_terminal(&manager).await;
+        handle.abort();
+
+        assert_eq!(
+            tasks[0].state,
+            TaskState::Cancelled,
+            "cancel outranks the pause it landed on"
+        );
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert!(entries.is_empty(), "a cancelled attempt publishes nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// O3: the idle loop is woken by work, not by the clock. The 20 ms poll this
+    /// replaced would have looked at the queue ten times in the window below.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_idle_loop_is_woken_by_work_and_never_by_the_clock() {
+        let dir = temp_dir("idle-wake");
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        let fetch =
+            move |_url: String| async move { Ok::<_, PixivError>((vec![1u8; 64], None::<String>)) };
+        let runner = manager.clone();
+        let handle = tokio::spawn(async move { runner.run_with(fetch).await });
+
+        // Let the loop reach its idle wait before the measurement starts.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let before = manager.wakeups();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            manager.wakeups(),
+            before,
+            "an idle queue must not wake the loop"
+        );
+
+        // Positive control: the same counter does move when work arrives, so the
+        // zero above is the loop's behaviour and not a dead counter.
+        manager.enqueue(vec![request(0)]);
+        let tasks = wait_terminal(&manager).await;
+        let after = manager.wakeups();
+        handle.abort();
+
+        assert_eq!(tasks[0].state, TaskState::Completed);
+        assert!(
+            after > before,
+            "an enqueue must wake the loop: {before} -> {after}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Both rates are fed by the same chunk writes, so a row's speed line and the
+    /// queue's throughput cannot disagree about whether anything was written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_completed_body_leaves_bytes_in_both_windows() {
+        let dir = temp_dir("throughput");
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        manager.enqueue(vec![request(0)]);
+
+        let fetch = move |_url: String| async move {
+            Ok::<_, PixivError>((vec![7u8; 64 * 1024], None::<String>))
+        };
+        let runner = manager.clone();
+        let handle = tokio::spawn(async move { runner.run_with(fetch).await });
+        let tasks = wait_terminal(&manager).await;
+        let throughput = manager.throughput();
+        handle.abort();
+
+        assert_eq!(tasks[0].state, TaskState::Completed);
+        assert!(
+            tasks[0].bytes_per_second > 0,
+            "the row's own window kept the bytes it wrote"
+        );
+        assert!(
+            throughput >= 64 * 1024 / 3,
+            "64 KiB inside the 3 s window is at least 21 KiB/s, got {throughput}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A claim that has been superseded must not stamp the queue.
+    ///
+    /// Pause then resume re-queues a row while its first claim is still unwinding,
+    /// and that claim's `finish` and `ClaimGuard` both land afterwards. Without a
+    /// generation they would show the resumed download as cancelled, or re-queue it
+    /// while it runs.
+    #[test]
+    fn a_superseded_claim_cannot_stamp_the_queue() {
+        let dir = temp_dir("superseded");
+        let manager = DownloadManager::new(config(dir.clone(), 1));
+        let ids = manager.enqueue(vec![request(0)]);
+        let inner = Arc::clone(&manager.inner);
+
+        let first = inner.take_next_queued().expect("the record is claimable");
+        assert_eq!(first.generation, 0, "a fresh record starts at zero");
+
+        // Pause the running row: its claim unwinds as `Paused`, and the resume that
+        // follows re-queues the record with a generation of its own.
+        assert!(manager.pause(ids[0]));
+        inner.finish(ids[0], first.generation, TaskState::Cancelled, 0, None);
+        assert_eq!(manager.tasks()[0].state, TaskState::Paused);
+        assert!(manager.resume(ids[0]));
+
+        let second = inner
+            .take_next_queued()
+            .expect("the resumed record is claimable");
+        assert_eq!(second.generation, 1, "the re-queue bumped the generation");
+        assert_eq!(manager.tasks()[0].state, TaskState::Running);
+
+        // Both of the first claim's exit paths land now, and neither may touch the
+        // claim that owns the record.
+        inner.finish(ids[0], first.generation, TaskState::Cancelled, 0, None);
+        assert_eq!(
+            manager.tasks()[0].state,
+            TaskState::Running,
+            "a superseded finish is ignored"
+        );
+        inner.release_claim(ids[0], first.generation);
+        assert_eq!(
+            manager.tasks()[0].state,
+            TaskState::Running,
+            "a superseded guard does not re-queue a running row"
+        );
+
+        // The claim that does own the record still writes it.
+        inner.finish(ids[0], second.generation, TaskState::Completed, 4, Some(4));
+        assert_eq!(manager.tasks()[0].state, TaskState::Completed);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -778,6 +778,9 @@ mod tests {
             state,
             bytes_done,
             bytes_total,
+            // Round nine: the row's measured rate. Zero is "no sample yet";
+            // `eta_seconds` returns None for it, and no mapping test reads it.
+            bytes_per_second: 0,
             destination: Some(PathBuf::from(r"C:\out\700000001_p2.png")),
         }
     }

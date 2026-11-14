@@ -5,7 +5,8 @@
 //! pair into frames the UI can blit, and can re-encode them as an animated GIF.
 //!
 //! Frames are decoded lazily in the UI; this crate exposes both the timing model
-//! ([`UgoiraFilm::frame_index_at`]) and full decoding.
+//! ([`UgoiraFilm::frame_index_at`]) and full decoding, plus
+//! [`UgoiraFilm::scaled_to_width`] for a film published at the size it is drawn.
 //!
 //! # Memory profile
 //!
@@ -207,15 +208,22 @@ impl UgoiraFilm {
         })
     }
 
+    /// Milliseconds one pass of the film takes.
+    ///
+    /// Clamped at `u32` because the value drives a UI clock and a caption, and one
+    /// frame's delay is already `u32`: the only films that saturate are the ones a
+    /// hostile metadata list declares (49 days of playback per loop). The exact sum
+    /// is still available where the wrap arithmetic needs it — see
+    /// [`Self::timeline_ms`].
     #[must_use]
-    pub fn total_duration_ms(&self) -> u64 {
-        self.frames.iter().map(|f| u64::from(f.delay_ms)).sum()
+    pub fn total_duration_ms(&self) -> u32 {
+        u32::try_from(self.timeline_ms()).unwrap_or(u32::MAX)
     }
 
     /// Which frame is showing at `elapsed_ms`, looping.
     #[must_use]
     pub fn frame_index_at(&self, elapsed_ms: u64) -> usize {
-        let total = self.total_duration_ms();
+        let total = self.timeline_ms();
         // A degenerate film (no frames, or every delay zero) has no timeline to
         // index into; the first frame is the only defensible answer.
         if total == 0 || self.frames.is_empty() {
@@ -243,6 +251,46 @@ impl UgoiraFilm {
             .take(index)
             .map(|f| u64::from(f.delay_ms))
             .sum()
+    }
+
+    /// The exact loop length in milliseconds.
+    ///
+    /// `u64` and private: a frame's delay is `u32`, so a metadata list of
+    /// `u32::MAX` delays sums past `u32::MAX`, and the modulo in
+    /// [`Self::frame_index_at`] must not be clamped with it — a film whose total
+    /// saturates would report frame 0 for an elapsed time inside a later loop.
+    fn timeline_ms(&self) -> u64 {
+        self.frames.iter().map(|f| u64::from(f.delay_ms)).sum()
+    }
+
+    /// A copy of this film scaled to `width` pixels wide, keeping the aspect ratio.
+    ///
+    /// `0`, the current width and anything wider return the film unchanged: a
+    /// viewer asking for a size it already holds must not pay for a second copy of
+    /// every frame, and an upscale would invent pixels the archive never carried.
+    /// Everything else is an area average — see [`area_average`] for why that
+    /// filter and not a sample.
+    #[must_use]
+    pub fn scaled_to_width(&self, width: u32) -> Self {
+        if width == 0 || width >= self.width {
+            return self.clone();
+        }
+        let height = scaled_height(self.width, self.height, width);
+        let frames = self
+            .frames
+            .iter()
+            .map(|frame| FilmFrame {
+                file: frame.file.clone(),
+                // Timing is metadata; a smaller frame has the same delay.
+                delay_ms: frame.delay_ms,
+                rgba: area_average(&frame.rgba, self.width, self.height, width, height),
+            })
+            .collect();
+        Self {
+            width,
+            height,
+            frames,
+        }
     }
 
     /// Re-encode as an animated GIF, honouring the original per-frame delays.
@@ -332,6 +380,84 @@ fn over_ceiling(bytes: u64, file: &str) -> UgoiraError {
         "帧 {file} 解码后需 {bytes} 字节，超过 {} MiB 上限",
         MAX_DECODED_BYTES / (1024 * 1024)
     ))
+}
+
+/// The height that keeps `src_width`:`src_height` at `width`, rounded to nearest.
+///
+/// Rounded rather than truncated then floored at one: a 31-frame strip scaled to a
+/// width whose exact height is 12.7 must not collapse to 12 and squash every frame
+/// by a hair, and a very wide frame must not become zero rows tall.
+fn scaled_height(src_width: u32, src_height: u32, width: u32) -> u32 {
+    if src_width == 0 {
+        return src_height.max(1);
+    }
+    let scaled = u64::from(src_height) * u64::from(width);
+    let rounded = (scaled + u64::from(src_width) / 2) / u64::from(src_width);
+    u32::try_from(rounded).unwrap_or(u32::MAX).max(1)
+}
+
+/// Area-average downscale of one RGBA8 frame.
+///
+/// Every destination pixel is the mean of the source pixels it covers, each
+/// weighted by the fraction of it that falls inside the destination pixel's box.
+/// Point sampling throws that weight away — at 3 columns into 2 it keeps one column
+/// and drops the other — and bilinear `resize` point-samples at this ratio too, so
+/// a 1920 px frame thinned to a viewer's 900 px would lose half its detail to a
+/// grid that does not line up with it.
+///
+/// Weights are integers in units of `1/width` horizontally and `1/height`
+/// vertically, so the overlap of two boxes is an exact product and no rounding
+/// happens until the final division, which rounds half up: truncating would darken
+/// every averaged pixel by up to one level, which reads as a grey cast on a flat
+/// field.
+fn area_average(src: &[u8], src_width: u32, src_height: u32, width: u32, height: u32) -> Vec<u8> {
+    let mut out = vec![0_u8; width as usize * height as usize * 4];
+    // A frame whose buffer is shorter than its declared geometry has nothing to
+    // average; `decode_zip` never produces one, and a film built by hand gets
+    // transparent black instead of a panic.
+    if src.len() / 4 < src_width as usize * src_height as usize {
+        return out;
+    }
+    let (sw, sh) = (u64::from(src_width), u64::from(src_height));
+    let (dw, dh) = (u64::from(width), u64::from(height));
+    for dy in 0..dh {
+        let top = dy * sh;
+        let bottom = top + sh;
+        let sy_first = top / dh;
+        let sy_last = bottom.div_ceil(dh);
+        for dx in 0..dw {
+            let left = dx * sw;
+            let right = left + sw;
+            let sx_first = left / dw;
+            let sx_last = right.div_ceil(dw);
+            let mut acc = [0_u64; 4];
+            let mut weight = 0_u64;
+            for sy in sy_first..sy_last {
+                let wy = (sy * dh + dh).min(bottom) - (sy * dh).max(top);
+                let row = sy * sw;
+                for sx in sx_first..sx_last {
+                    let wx = (sx * dw + dw).min(right) - (sx * dw).max(left);
+                    let w = wx * wy;
+                    let offset = usize::try_from((row + sx) * 4).ok();
+                    let Some(pixel) = offset.and_then(|offset| src.get(offset..offset + 4)) else {
+                        continue;
+                    };
+                    for (sum, value) in acc.iter_mut().zip(pixel) {
+                        *sum += u64::from(*value) * w;
+                    }
+                    weight += w;
+                }
+            }
+            if weight == 0 {
+                continue;
+            }
+            let offset = ((dy * dw + dx) * 4) as usize;
+            for (slot, sum) in out[offset..offset + 4].iter_mut().zip(acc) {
+                *slot = u8::try_from((sum + weight / 2) / weight).unwrap_or(u8::MAX);
+            }
+        }
+    }
+    out
 }
 
 /// GIF timing: centiseconds, never zero.

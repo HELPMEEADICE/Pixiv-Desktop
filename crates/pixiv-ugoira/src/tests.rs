@@ -436,7 +436,17 @@ fn total_duration_sums_metadata_delays() {
     assert_eq!(film(&[16]).total_duration_ms(), 16);
     assert_eq!(film(&[200, 200, 200, 200]).total_duration_ms(), 800);
     assert_eq!(film(&[0, 0]).total_duration_ms(), 0);
-    assert_eq!(film(&[u32::MAX, 1]).total_duration_ms(), 4_294_967_296);
+    // Saturation, not wrap: `delay_ms` is per-frame `u32`, so a metadata list can
+    // sum past `u32::MAX` (49 days), and a total that wrapped to 1 ms would make the
+    // viewer believe every frame lasts a millisecond. The exact sum still governs
+    // the wrap: 2^64 - 1 lands one millisecond before the second loop's first frame.
+    let long = film(&[u32::MAX, 1]);
+    assert_eq!(long.total_duration_ms(), u32::MAX);
+    assert_eq!(
+        long.frame_index_at(u64::MAX),
+        1,
+        "4_294_967_295 ms is frame 1"
+    );
 }
 
 #[test]
@@ -457,6 +467,150 @@ fn zero_delay_film_returns_first_frame() {
     assert_eq!(film.frame_index_at(0), 0);
     assert_eq!(film.frame_index_at(123_456), 0);
     assert_eq!(film.frame_start_ms(2), 0);
+}
+
+#[test]
+fn empty_film_has_no_timeline() {
+    let empty = UgoiraFilm {
+        width: 8,
+        height: 6,
+        frames: Vec::new(),
+    };
+    assert_eq!(empty.total_duration_ms(), 0);
+    assert_eq!(empty.frame_index_at(0), 0);
+    assert_eq!(
+        empty.frame_index_at(123_456),
+        0,
+        "a film with no frames has no later frame to reach"
+    );
+    assert_eq!(empty.frame_start_ms(99), 0);
+}
+
+#[test]
+fn scaled_to_width_keeps_the_aspect_ratio_and_frame_layout() {
+    let film = film(&[200, 100, 300]); // 8x6, three frames
+    let scaled = film.scaled_to_width(4);
+    assert_eq!((scaled.width, scaled.height), (4, 3), "8x6 halved is 4x3");
+    assert_eq!(scaled.frames.len(), 3);
+    for (original, shrunk) in film.frames.iter().zip(&scaled.frames) {
+        assert_eq!(shrunk.file, original.file, "frames keep their order");
+        assert_eq!(shrunk.delay_ms, original.delay_ms, "timing is metadata");
+        assert_eq!(shrunk.rgba.len(), 4 * 3 * 4, "width * height * 4");
+    }
+    // 8x6 at 3 wide is a height of 2.25, rounded to 2 rather than truncated to 2
+    // by luck; the point is that it is nearest, and never zero.
+    assert_eq!(
+        (
+            film.scaled_to_width(3).width,
+            film.scaled_to_width(3).height
+        ),
+        (3, 2)
+    );
+    let sliver = film.scaled_to_width(1);
+    assert_eq!(
+        (sliver.width, sliver.height),
+        (1, 1),
+        "a one-pixel request keeps one row"
+    );
+    assert_eq!(sliver.frames[0].rgba.len(), 4);
+}
+
+/// A film from raw RGBA frames: the scaling cases compare exact pixel values, and
+/// stating the bytes here keeps each expected average checkable by hand.
+fn raw_film(width: u32, height: u32, frame: (&str, u32, Vec<u8>)) -> UgoiraFilm {
+    UgoiraFilm {
+        width,
+        height,
+        frames: vec![super::FilmFrame {
+            file: frame.0.to_owned(),
+            delay_ms: frame.1,
+            rgba: frame.2,
+        }],
+    }
+}
+
+#[test]
+fn scaled_to_width_averages_the_pixels_each_destination_covers() {
+    // An even ratio: two source columns per destination column.
+    let ramp = raw_film(
+        4,
+        1,
+        (
+            "000000.png",
+            100,
+            vec![
+                0, 0, 0, 10, 100, 100, 100, 20, 200, 200, 200, 30, 255, 255, 255, 40,
+            ],
+        ),
+    );
+    let halved = ramp.scaled_to_width(2);
+    assert_eq!((halved.width, halved.height), (2, 1));
+    assert_eq!(
+        halved.frames[0].rgba,
+        vec![50, 50, 50, 15, 228, 228, 228, 35],
+        "means of (0,100) and (200,255), rounding 227.5 up, alpha included"
+    );
+
+    // An odd ratio: three source columns into two. The middle column is covered
+    // half by each destination column, so it must be weighted 1:2, not 1:1 — an
+    // unweighted mean would give 75 and 255.
+    let odd = raw_film(
+        3,
+        1,
+        (
+            "000000.png",
+            100,
+            vec![0, 0, 0, 255, 150, 150, 150, 255, 255, 255, 255, 255],
+        ),
+    );
+    let odd_halved = odd.scaled_to_width(2);
+    assert_eq!(
+        odd_halved.frames[0].rgba,
+        vec![50, 50, 50, 255, 220, 220, 220, 255],
+        "(0*2 + 150*1)/3 and (150*1 + 255*2)/3"
+    );
+
+    // Both axes at once: the top-left quadrant must stay red and every other
+    // destination pixel must stay blue, which fails if either axis is sampled
+    // rather than averaged.
+    let mut quadrant = Vec::with_capacity(4 * 4 * 4);
+    for row in 0..4 {
+        for column in 0..4 {
+            let pixel: [u8; 4] = if row < 2 && column < 2 {
+                [200, 20, 20, 255]
+            } else {
+                [20, 20, 200, 255]
+            };
+            quadrant.extend_from_slice(&pixel);
+        }
+    }
+    let quadrant = raw_film(4, 4, ("000000.png", 100, quadrant));
+    let quarter = quadrant.scaled_to_width(2);
+    assert_eq!((quarter.width, quarter.height), (2, 2));
+    assert_eq!(
+        quarter.frames[0].rgba,
+        vec![
+            200, 20, 20, 255, 20, 20, 200, 255, 20, 20, 200, 255, 20, 20, 200, 255
+        ]
+    );
+}
+
+#[test]
+fn scaled_to_width_returns_the_film_unchanged_at_zero_equal_or_wider() {
+    let film = film(&[200, 100, 300]);
+    for width in [0, film.width, film.width + 4] {
+        let same = film.scaled_to_width(width);
+        assert_eq!(
+            (same.width, same.height),
+            (film.width, film.height),
+            "width {width}"
+        );
+        for (original, kept) in film.frames.iter().zip(&same.frames) {
+            assert_eq!(kept.rgba, original.rgba, "width {width} must not resample");
+            assert_eq!(kept.file, original.file);
+            assert_eq!(kept.delay_ms, original.delay_ms);
+        }
+    }
 }
 
 #[test]

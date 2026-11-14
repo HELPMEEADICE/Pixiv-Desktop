@@ -9,25 +9,45 @@
 //! directory that cannot be created or written degrades the whole tier to
 //! memory-only: [`DiskTier::open`] returns `None` and the caller warns.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 use tracing::warn;
+
+/// One entry the tier believes it holds.
+#[derive(Debug, Clone, Copy)]
+struct IndexEntry {
+    /// When `put` published it; a trim deletes oldest first.
+    modified: SystemTime,
+    size: u64,
+}
 
 /// Encoded-bytes tier with a byte budget and an explicit prune path.
 pub(crate) struct DiskTier {
     dir: PathBuf,
     budget: u64,
     bytes: AtomicU64,
-    /// Serialises the accounting, so a trim can never write back a total that a
-    /// concurrent `put` has already moved past.
-    accounting: Mutex<()>,
+    /// Every entry the tier holds: key -> size, with the stamp a trim sorts by.
+    ///
+    /// This lock is the accounting lock. It used to guard only the arithmetic,
+    /// while `enforce_budget` learned what to delete by walking the tree - a
+    /// recursive `read_dir` plus a `metadata` per entry, on every write once the
+    /// budget was full (plan §2.3 O2). The map is both the ledger and the candidate
+    /// list now, so what the counter credits and what a trim may delete are one
+    /// fact under one lock.
+    index: Mutex<BTreeMap<String, IndexEntry>>,
     /// Distinguishes two writers' temp files for one key.
     writes: AtomicU64,
+    /// Directory scans this tier has run, the opening one included.
+    ///
+    /// O2's acceptance is "zero on the hot path", and a counter is the only way to
+    /// state that as a measurement instead of a reading. Test-only accessor.
+    scans: AtomicU64,
 }
 
 impl DiskTier {
@@ -56,16 +76,55 @@ impl DiskTier {
         if let Err(err) = fs::remove_file(&probe) {
             warn!(dir = %dir.display(), error = %err, "could not remove cache probe file");
         }
-        let bytes = walk(&dir)
-            .map(|entries| entries.iter().map(|entry| entry.1).sum())
-            .unwrap_or(0);
+        // The one scan the tier needs: everything after this is maintained by `put`
+        // and `remove`, and a tier opened over an existing directory must start with
+        // a ledger that describes it.
+        let index = scan_index(&dir).unwrap_or_default();
+        let bytes: u64 = index.values().map(|entry| entry.size).sum();
         Some(Self {
             dir,
             budget,
             bytes: AtomicU64::new(bytes),
-            accounting: Mutex::new(()),
+            index: Mutex::new(index),
             writes: AtomicU64::new(0),
+            // The scan above is this tier's first, and counting it keeps
+            // `scans()` honest about what a hot path is allowed to cost.
+            scans: AtomicU64::new(1),
         })
+    }
+
+    /// Run one recursive scan of the tree and count it.
+    ///
+    /// Only `clear` uses this: its contract is that the directory holds nothing, a
+    /// crashed writer's `.part` leftover included, and no index entry describes that
+    /// file.
+    fn scan(&self) -> io::Result<Vec<(SystemTime, u64, PathBuf)>> {
+        self.scans.fetch_add(1, Ordering::Relaxed);
+        walk(&self.dir)
+    }
+
+    /// Directory scans run so far, the opening one included. Test-only.
+    #[cfg(test)]
+    pub(crate) fn scans(&self) -> u64 {
+        self.scans.load(Ordering::Relaxed)
+    }
+
+    /// `(key, size)` for every entry the tier believes it holds. Test-only.
+    #[cfg(test)]
+    pub(crate) fn indexed(&self) -> Vec<(String, u64)> {
+        self.index
+            .lock()
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry.size))
+            .collect()
+    }
+
+    /// Drop the entry for a key whose file could not be read, giving its bytes back.
+    fn forget(&self, key: &str) {
+        let mut index = self.index.lock();
+        if let Some(entry) = index.remove(key) {
+            let _ = self.subtract(entry.size);
+        }
     }
 
     pub(crate) fn dir(&self) -> &Path {
@@ -85,12 +144,20 @@ impl DiskTier {
     }
 
     /// Read one cached entry. A missing or unreadable file is a miss.
+    ///
+    /// A failed read is also the only signal the tier gets that the tree moved
+    /// behind its back - a cache cleaner, a manual prune, a second instance - so the
+    /// index entry goes with it. Keeping the entry would credit bytes that no longer
+    /// exist, and a trim could then delete nothing while the budget still believed
+    /// the tier was full.
     pub(crate) fn get(&self, key: &str) -> Option<Vec<u8>> {
         match fs::read(self.path(key)) {
             Ok(bytes) => Some(bytes),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => {
-                warn!(key, error = %err, "could not read cached image");
+                if err.kind() != io::ErrorKind::NotFound {
+                    warn!(key, error = %err, "could not read cached image");
+                }
+                self.forget(key);
                 None
             }
         }
@@ -108,10 +175,10 @@ impl DiskTier {
     /// nothing behind it.
     ///
     /// Cost: four syscalls per entry (create, write, fsync, rename) where it used
-    /// to be two (write, rename), and the whole sequence runs under the
-    /// accounting lock so the counter and the tree can never disagree. The tier is
-    /// written from a blocking pool, one entry at a time; a cover is worth the
-    /// fsync and the serialisation is what makes [`Self::enforce_budget`] exact.
+    /// to be two (write, rename), and the whole sequence runs under the index lock
+    /// so the counter and the entry list can never disagree. The tier is written
+    /// from a blocking pool, one entry at a time; a cover is worth the fsync and the
+    /// serialisation is what makes [`Self::enforce_budget`] exact.
     pub(crate) fn put(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
         let path = self.path(key);
         if let Some(parent) = path.parent() {
@@ -120,22 +187,31 @@ impl DiskTier {
         // Held for the write as well as the arithmetic: a file that exists but is
         // not yet credited is a file a concurrent trim may delete and then
         // subtract, which is the same drift in the other direction.
-        let _guard = self.accounting();
-        let previous = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        let mut index = self.index.lock();
+        // The previous size comes from the index, not from a `metadata` call: the
+        // entry is either there or it is not, and one fewer stat per write is what
+        // O2 was for.
+        let previous = index.get(key).map_or(0, |entry| entry.size);
         let temp = self.temp_path(&path);
         let written = write_synced(&temp, bytes).and_then(|()| fs::rename(&temp, &path));
         if let Err(err) = written {
-            // Never leave a temp file behind on the failure path: the tier counts
-            // every file it can see, so an orphan is charged to the budget until
-            // the next prune deletes it.
+            // Never leave a temp file behind on the failure path: the next scan
+            // would find it, and the entry it belongs to was never credited.
             let _ = fs::remove_file(&temp);
             return Err(err);
         }
         let added = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        index.insert(
+            key.to_owned(),
+            IndexEntry {
+                modified: SystemTime::now(),
+                size: added,
+            },
+        );
         self.bytes.fetch_add(added, Ordering::Relaxed);
         let _ = self.subtract(previous);
         if self.bytes() > self.budget {
-            self.enforce_budget();
+            self.enforce_budget(&mut index);
         }
         Ok(())
     }
@@ -155,74 +231,97 @@ impl DiskTier {
         path.with_file_name(name)
     }
 
-    /// The accounting guard. `parking_lot` does not poison, so a panic elsewhere
-    /// cannot wedge the tier.
-    fn accounting(&self) -> MutexGuard<'_, ()> {
-        self.accounting.lock()
-    }
-
-    /// Drop one entry. The measurement, the unlink and the subtraction share one
+    /// Drop one entry. The unlink, the index update and the subtraction share one
     /// lock section, so a trim cannot delete the same file underneath it.
+    ///
+    /// `parking_lot` does not poison, so a panic elsewhere cannot wedge the tier.
     pub(crate) fn remove(&self, key: &str) -> io::Result<()> {
         let path = self.path(key);
-        let _guard = self.accounting();
-        let freed = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        let mut index = self.index.lock();
+        let freed = index.get(key).map_or(0, |entry| entry.size);
         match fs::remove_file(&path) {
             Ok(()) => {
+                index.remove(key);
                 let _ = self.subtract(freed);
                 Ok(())
             }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // Already gone, so the index was the stale half: drop it and give
+                // the bytes back rather than leaving a phantom to be trimmed.
+                index.remove(key);
+                let _ = self.subtract(freed);
+                Ok(())
+            }
             Err(err) => Err(err),
         }
     }
 
     /// Delete everything the tier holds, returning the bytes reclaimed.
     ///
-    /// The counter is decremented by exactly what this pass deleted instead of
-    /// being reset to zero: a `put` that lands during the walk has already added
-    /// its own bytes, and `store(0)` would erase that credit and leave the tier
-    /// believing it holds less than it does.
+    /// This is the one call that scans, and it has to: its contract is that the
+    /// directory holds nothing, which includes a crashed writer's `.part` leftover -
+    /// a file no index entry describes. The counter is then zeroed *inside* the lock
+    /// section `put` must also take, which is what makes `store(0)` exact here; it
+    /// was the defect when the lock only covered the arithmetic and a concurrent
+    /// `put` could be erased by it.
     pub(crate) fn clear(&self) -> io::Result<u64> {
-        let _guard = self.accounting();
-        let entries = walk(&self.dir)?;
+        let mut index = self.index.lock();
+        let entries = self.scan()?;
         let mut reclaimed = 0;
         for (_, size, path) in entries {
             match fs::remove_file(&path) {
-                Ok(()) => {
-                    reclaimed += size;
-                    let _ = self.subtract(size);
-                }
+                Ok(()) => reclaimed += size,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => return Err(err),
             }
         }
+        index.clear();
+        self.bytes.store(0, Ordering::Relaxed);
         Ok(reclaimed)
     }
 
-    /// Drop oldest entries until the budget holds. The caller holds the
-    /// accounting lock.
+    /// Drop oldest entries until the budget holds. The caller holds the index lock.
     ///
-    /// `store(total)` was the defect: the total was computed from a snapshot and
-    /// then written back over a counter that `put` and `remove` maintain with
+    /// `store(total)` used to be the defect here: the total came from a snapshot and
+    /// was written back over a counter that `put`/`remove` maintain with
     /// `fetch_add`/`fetch_sub`, so a concurrent write was silently dropped and the
-    /// tier stopped trimming. The loop now only *decides* with its local total,
-    /// and the counter is decremented by exactly what this pass removed.
-    fn enforce_budget(&self) {
-        let Ok(mut entries) = walk(&self.dir) else {
-            return;
-        };
-        entries.sort_by_key(|entry| entry.0);
+    /// tier stopped trimming. The loop still only *decides* with its local total, and
+    /// the counter is decremented by exactly what this pass removed.
+    ///
+    /// The walk is gone: the candidates, their sizes and their stamps all come from
+    /// the index, so a trim costs a sort and some unlinks instead of a recursive
+    /// `read_dir` plus a `metadata` per entry (plan §2.3 O2).
+    fn enforce_budget(&self, index: &mut BTreeMap<String, IndexEntry>) {
         let mut total = self.bytes();
+        if total <= self.budget {
+            return;
+        }
+        let mut candidates: Vec<(String, SystemTime, u64)> = index
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry.modified, entry.size))
+            .collect();
+        // Oldest first, and the key breaks a tie: two entries published inside one
+        // clock tick must trim in a fixed order, or the same run would delete
+        // different files each time.
+        candidates.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
         let mut trimmed = 0u64;
-        for (_, size, path) in entries {
+        for (key, _, size) in candidates {
             if total <= self.budget {
                 break;
             }
-            if fs::remove_file(&path).is_ok() {
-                total = total.saturating_sub(size);
-                trimmed = trimmed.saturating_add(size);
+            match fs::remove_file(self.path(&key)) {
+                Ok(()) => {}
+                // The file was already gone and the index was the stale half; the
+                // phantom still has to stop counting against the budget.
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    warn!(%key, error = %err, "could not trim cached image");
+                    continue;
+                }
             }
+            index.remove(&key);
+            total = total.saturating_sub(size);
+            trimmed = trimmed.saturating_add(size);
         }
         if trimmed > 0 {
             let _ = self.subtract(trimmed);
@@ -256,7 +355,47 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
+/// `key -> (stamp, size)` for every entry `dir` holds.
+///
+/// Runs once, in [`DiskTier::open`]. Two things are deliberately not entries:
+/// anything outside a shard folder, and a `*.part` temp, which belongs to a writer
+/// that is about to rename it - the index is the list a trim may delete from, so a
+/// temp in it would be a file deleted under a live writer.
+fn scan_index(dir: &Path) -> io::Result<BTreeMap<String, IndexEntry>> {
+    let mut index = BTreeMap::new();
+    for shard in fs::read_dir(dir)? {
+        let shard = shard?;
+        if !shard.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let folder = shard.path();
+        for file in fs::read_dir(&folder)? {
+            let file = file?;
+            let Ok(meta) = file.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let name = file.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".part") {
+                continue;
+            }
+            index.insert(
+                name,
+                IndexEntry {
+                    modified: meta.modified().unwrap_or(UNIX_EPOCH),
+                    size: meta.len(),
+                },
+            );
+        }
+    }
+    Ok(index)
+}
+
 /// `(modified, size, path)` for every file under `dir`, recursively.
+///
+/// Only `clear` and the tests still use this: every other path consults the index.
 fn walk(dir: &Path) -> io::Result<Vec<(SystemTime, u64, PathBuf)>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -420,6 +559,105 @@ mod tests {
         let blocker = dir.join("not-a-directory");
         fs::write(&blocker, b"x").expect("write blocker");
         assert!(DiskTier::open(blocker.join("cache"), 1 << 20).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// O2: opens scan once, and nothing else does. The trim in particular used to
+    /// start with a recursive `read_dir` plus a `metadata` per entry, on every write
+    /// once the budget was full.
+    #[test]
+    fn the_hot_path_never_scans_the_directory() {
+        let dir = scratch("disk-no-scan");
+        // A small budget, so every write past the fourth also runs a trim.
+        let tier = DiskTier::open(dir.clone(), 16).expect("disk tier");
+        assert_eq!(tier.scans(), 1, "opening scans once");
+
+        for index in 0..8u32 {
+            tier.put(&format!("{index:02}-entry"), b"1234")
+                .expect("put");
+        }
+        assert_eq!(tier.scans(), 1, "a budget trim must not walk the tree");
+
+        assert!(tier.get("07-entry").is_some(), "the newest entry survives");
+        assert_eq!(tier.scans(), 1, "a hit must not walk the tree");
+        assert!(tier.get("zz-missing").is_none());
+        tier.remove("06-entry").expect("remove");
+        assert_eq!(
+            tier.scans(),
+            1,
+            "a miss and a remove must not walk the tree"
+        );
+
+        // And the counter is not dead: `clear` has to scan, because its contract
+        // covers files no index describes.
+        let _ = tier.clear().expect("clear");
+        assert_eq!(tier.scans(), 2, "clear scans exactly once");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// O2: a tier reopened over the same directory must believe exactly what the
+    /// live tier believed, and both must describe the files that are really there.
+    #[test]
+    fn an_index_rebuilt_by_a_restart_equals_the_one_maintained_live() {
+        let dir = scratch("disk-restart");
+        let live = {
+            let tier = DiskTier::open(dir.clone(), 1 << 20).expect("disk tier");
+            for (key, body) in [
+                ("aa-first", &b"aaaa"[..]),
+                ("bb-second", &b"bbbbbb"[..]),
+                ("cc-third", &b"cc"[..]),
+            ] {
+                tier.put(key, body).expect("put");
+            }
+            // A removal is part of the live history: the rebuilt index must match
+            // it, not the puts alone.
+            tier.put("dd-doomed", b"dddd").expect("put");
+            tier.remove("dd-doomed").expect("remove");
+            let mut live = tier.indexed();
+            live.sort();
+            live
+        };
+
+        // The restart: nothing carried over but the directory itself.
+        let reopened = DiskTier::open(dir.clone(), 1 << 20).expect("reopen");
+        let mut rebuilt = reopened.indexed();
+        rebuilt.sort();
+        assert_eq!(
+            rebuilt, live,
+            "the scan must rebuild the index the writes kept"
+        );
+
+        for (key, size) in &rebuilt {
+            let shard = key.get(..2).unwrap_or(key);
+            let meta = fs::metadata(reopened.dir().join(shard).join(key))
+                .expect("every indexed entry is a real file");
+            assert_eq!(meta.len(), *size, "size recorded for {key}");
+        }
+        assert_eq!(reopened.bytes(), 4 + 6 + 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// O2: a read that fails is a miss *and* the entry goes with it. The file was
+    /// removed behind the tier's back, and a phantom entry would be credited against
+    /// the budget for the rest of the session while a trim deleted nothing.
+    #[test]
+    fn a_miss_whose_file_vanished_drops_the_entry() {
+        let dir = scratch("disk-vanish");
+        let tier = DiskTier::open(dir.clone(), 1 << 20).expect("disk tier");
+        tier.put("0011223344", b"hello").expect("put");
+        assert_eq!(tier.bytes(), 5);
+        assert_eq!(tier.indexed().len(), 1);
+
+        fs::remove_file(tier.dir().join("00").join("0011223344")).expect("delete the entry");
+
+        assert!(tier.get("0011223344").is_none(), "a failed read is a miss");
+        assert_eq!(tier.bytes(), 0, "the bytes it claimed are given back");
+        assert!(tier.indexed().is_empty(), "and the entry is dropped");
+        assert!(
+            tier.get("0011223344").is_none(),
+            "a second look stays a miss"
+        );
+        assert_eq!(tier.scans(), 1, "and no scan was needed to notice");
         let _ = fs::remove_dir_all(&dir);
     }
 }

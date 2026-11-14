@@ -230,6 +230,10 @@ pub(crate) fn to_download_rows(tasks: Vec<pixiv_download::DownloadTask>) -> Vec<
                 pixiv_download::TaskState::Failed(message) => (3, message.clone()),
                 pixiv_download::TaskState::Cancelled => (4, String::new()),
                 pixiv_download::TaskState::Skipped => (5, String::new()),
+                // Round nine (F5). `6` is the next number in the contract with
+                // ui/pages/downloads.slint: a paused row keeps its progress and
+                // offers "继续" instead of "取消".
+                pixiv_download::TaskState::Paused => (6, String::new()),
             };
             DownloadRow {
                 id: task.id as i32,

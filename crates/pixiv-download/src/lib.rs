@@ -40,8 +40,16 @@
 //!    │           ├────▶ Failed(msg)  ──retry──▶ Queued
 //!    │           ├────▶ Cancelled    ──retry──▶ Queued
 //!    │           └────▶ Skipped        (destination already exists)
-//!    └──cancel──▶ Cancelled
+//!    ├──cancel──▶ Cancelled
+//!    └──pause───▶ Paused   ──resume──▶ Queued
+//! Running ──pause──▶ Paused ──resume──▶ Queued
 //! ```
+//!
+//! `Paused` is not terminal: the row keeps its place, its partial bytes are
+//! discarded, and `resume` starts the body again from zero. HTTP Range resume is
+//! deliberately not implemented — the destination is only published once the whole
+//! body has arrived, so restarting is safe and costs one request, where a partial
+//! body on disk would be a second code path to get wrong.
 //!
 //! Files are written to `<name>.part` and renamed into place only once the whole
 //! body has been flushed, so an interrupted download can never leave a
@@ -78,6 +86,12 @@ pub type TaskId = u64;
 pub enum TaskState {
     Queued,
     Running,
+    /// Held by the user: not eligible for a claim, and not terminal.
+    ///
+    /// Pausing a *running* task cancels its request rather than waiting for the
+    /// body, so the concurrency permit goes back to the pool while the row sits
+    /// here — a paused queue must let the tasks that are not paused run.
+    Paused,
     Completed,
     Failed(String),
     Cancelled,
@@ -117,6 +131,12 @@ pub struct DownloadTask {
     pub state: TaskState,
     pub bytes_done: u64,
     pub bytes_total: Option<u64>,
+    /// Bytes per second over the last three seconds of this task's own writes.
+    ///
+    /// Zero before the first chunk lands and after a resume, because the attempt
+    /// starts again from zero: a rate that survived a pause would describe bytes
+    /// that were already thrown away.
+    pub bytes_per_second: u64,
     pub destination: Option<PathBuf>,
 }
 
@@ -129,6 +149,31 @@ impl DownloadTask {
             return None;
         }
         Some(((self.bytes_done.min(total) * 100) / total) as u32)
+    }
+
+    /// Seconds left at the current rate, or `None` when that cannot be known.
+    ///
+    /// `None` rather than a guess in three cases, because a row showing `0 s` reads
+    /// as "about to finish": the size is unknown (the body has not arrived, so the
+    /// row would claim it is done), no rate has been measured inside the window
+    /// (nothing written yet, or a row that is queued or paused), or the row is not
+    /// running at all - a terminal row keeps its bytes but has no countdown to
+    /// honour. `Some(0)` therefore means exactly "running, and the last byte is in".
+    #[must_use]
+    pub fn eta_seconds(&self) -> Option<u32> {
+        if self.state != TaskState::Running || self.bytes_per_second == 0 {
+            return None;
+        }
+        let total = self.bytes_total?;
+        let remaining = total.saturating_sub(self.bytes_done);
+        if remaining == 0 {
+            return Some(0);
+        }
+        // Rounded up: a row that has 1.2 s left must read "2 s", because "1 s" is a
+        // promise it will miss, and the countdown never shows 0 while bytes remain.
+        let seconds =
+            remaining / self.bytes_per_second + u64::from(remaining % self.bytes_per_second != 0);
+        Some(u32::try_from(seconds).unwrap_or(u32::MAX))
     }
 }
 
