@@ -338,16 +338,16 @@ export component HomePage inherits Rectangle {
             if root.artists-state == 1 : HorizontalLayout {
                 spacing: Theme.card-gap;
                 alignment: start;
-                height: 132px;
+                height: Theme.artist-strip-height;
                 for n in [0, 1, 2, 3] : Skeleton {
-                    width: 210px;
-                    height: 132px;
+                    width: Theme.artist-card-width;
+                    height: Theme.artist-strip-height;
                     border-radius: Theme.radius-lg;
                 }
             }
 
             if root.artists-state == 0 : Rectangle {
-                height: 132px;
+                height: Theme.artist-strip-height;
                 clip: true;
 
                 ScrollView {
@@ -361,7 +361,7 @@ export component HomePage inherits Rectangle {
                         alignment: start;
                         for u in root.artists : UserCard {
                             item: u;
-                            card-width: 210px;
+                            card-width: Theme.artist-card-width;
                             open => { root.open-recommend-user(u.id); }
                             toggle-follow => { }
                         }

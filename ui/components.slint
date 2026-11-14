@@ -253,11 +253,17 @@ export component AppButton inherits Rectangle {
             }
         }
 
-        if key_focus.has-focus : Rectangle {
+        // Focus ring as opacity rather than as an `if`: a Tab stop that appears
+        // between two frames reads as a glitch on a dark surface. Opacity only -
+        // it moves nothing - and it rests at 0 while unfocused, so an unfocused
+        // button paints exactly the pixels the old conditional left behind.
+        Rectangle {
             border-radius: Theme.radius-sm;
             border-width: 2px;
             border-color: Theme.focus-ring;
             background: transparent;
+            opacity: key_focus.has-focus ? 1.0 : 0.0;
+            animate opacity { duration: Theme.motion-fast; easing: ease-out; }
         }
     }
 
@@ -331,7 +337,8 @@ export component IconButton inherits Rectangle {
     // Keyboard: same ring, same 2px stroke and same Theme.focus-ring as AppButton,
     // drawn on the button's visual square rather than the element, so a command-bar
     // button that claims a 48px row still shows a 32px square ring.
-    if key_focus.has-focus : Rectangle {
+    // Same ring, same fade as AppButton's: opacity, not an `if`.
+    Rectangle {
         y: (root.height - root.size) / 2;
         width: root.size;
         height: root.size;
@@ -339,6 +346,8 @@ export component IconButton inherits Rectangle {
         border-width: 2px;
         border-color: Theme.focus-ring;
         background: transparent;
+        opacity: key_focus.has-focus ? 1.0 : 0.0;
+        animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 
     key_focus := FocusScope {
@@ -733,11 +742,14 @@ export component NavItem inherits Rectangle {
         y: (root.height - self.height) / 2;
     }
 
-    if key_focus.has-focus : Rectangle {
+    // Same ring, same fade as AppButton's: opacity, not an `if`.
+    Rectangle {
         border-radius: Theme.radius-sm;
         border-width: 2px;
         border-color: Theme.focus-ring;
         background: transparent;
+        opacity: key_focus.has-focus ? 1.0 : 0.0;
+        animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 
     // Up/Down move along the rail, Enter/Space activate. The arrows are key
@@ -811,11 +823,14 @@ export component TagChip inherits Rectangle {
         }
     }
 
-    if key_focus.has-focus : Rectangle {
+    // Same ring, same fade as AppButton's: opacity, not an `if`.
+    Rectangle {
         border-radius: Theme.radius-sm;
         border-width: 2px;
         border-color: Theme.focus-ring;
         background: transparent;
+        opacity: key_focus.has-focus ? 1.0 : 0.0;
+        animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 
     key_focus := FocusScope {
@@ -914,6 +929,13 @@ export component InfoBar inherits Rectangle {
         : (root.kind == InfoKind.Warning) ? Theme.warning-subtle
         : (root.kind == InfoKind.Success) ? Theme.success-subtle
         : Theme.accent-subtle;
+
+    // Entrance, not decoration: the bar fades in when it gains content instead of
+    // appearing between two frames. A bar declared inside an `if` is created at
+    // its rest value (1.0, nothing to animate), which is exactly what a capture
+    // must see - the animation is only ever the transition.
+    opacity: (root.title != "" || root.message != "") ? 1.0 : 0.0;
+    animate opacity { duration: Theme.motion-fast; easing: ease-out; }
 
     body := HorizontalLayout {
         padding-left: Theme.space-3;
@@ -1412,6 +1434,12 @@ export component IllustCard inherits Rectangle {
                 image-fit: cover;
                 width: 100%;
                 height: 100%;
+                // Fades in when its decode lands (`state` 1 -> 0) instead of popping
+                // into a finished card. Rest is 1.0 for a loaded cover, and the
+                // loading/failed overlays paint over it anyway, so the rest pixels are
+                // the ones the card already had.
+                opacity: root.item.state == 0 ? 1.0 : 0.0;
+                animate opacity { duration: Theme.motion; easing: ease-out; }
             }
 
             // Loading / failure overlays so a card is never an empty hole.
@@ -1580,11 +1608,14 @@ export component IllustCard inherits Rectangle {
 
     // Declared last so the ring is not painted over by the cover: a card that can
     // be opened is a keyboard stop too, and a stop with no ring is invisible.
-    if key_focus.has-focus : Rectangle {
+    // Same ring, same fade as AppButton's: opacity, not an `if`.
+    Rectangle {
         border-radius: Theme.radius-sm;
         border-width: 2px;
         border-color: Theme.focus-ring;
         background: transparent;
+        opacity: key_focus.has-focus ? 1.0 : 0.0;
+        animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 }
 
@@ -1770,7 +1801,7 @@ export component UserCard inherits Rectangle {
     accessible-action-default => { root.open(); }
 
     width: root.card-width;
-    height: 132px;
+    height: Theme.artist-strip-height;
     border-radius: Theme.radius-lg;
     background: hover.has-hover ? Theme.layer : Theme.layer-alt;
     border-width: 1px;
@@ -1794,12 +1825,17 @@ export component UserCard inherits Rectangle {
         clicked => { root.open(); }
     }
 
-    if root.item.preview.width > 0 : Rectangle {
+    Rectangle {
+        // The preview is the tile's cover. It is always declared and its opacity is
+        // the entrance: no `if` that can pop, and the rest value is 0.5 (the tile's
+        // own wash) with a preview, 0 without one - the same pixels the old
+        // conditional left behind.
         x: parent.width - 96px;
         y: 0px;
         width: 96px;
         height: 100%;
-        opacity: 0.5;
+        opacity: root.item.preview.width > 0 ? 0.5 : 0.0;
+        animate opacity { duration: Theme.motion; easing: ease-out; }
         clip: true;
         Image {
             source: root.item.preview;
@@ -1850,10 +1886,13 @@ export component UserCard inherits Rectangle {
         }
     }
 
-    if key_focus.has-focus : Rectangle {
+    // Same ring, same fade as AppButton's: opacity, not an `if`.
+    Rectangle {
         border-radius: Theme.radius-sm;
         border-width: 2px;
         border-color: Theme.focus-ring;
         background: transparent;
+        opacity: key_focus.has-focus ? 1.0 : 0.0;
+        animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 }

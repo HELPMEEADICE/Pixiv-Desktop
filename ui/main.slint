@@ -121,6 +121,30 @@ export component AppWindow inherits Window {
     /// to the host, so it is pushed in from Rust on the change event instead.
     in property <bool> narrow: false;
     out property <bool> rail-compact: root.rail-collapsed || root.narrow;
+
+    // ---- page entrance -------------------------------------------------
+    // Opacity of the page host after a route change: 0 while the new page is
+    // being painted, 1 at rest. Opacity only - a route change must never move
+    // layout, and a page that is caught mid-fade is a pixel-gate false
+    // positive, so the rest value is 1.0 by construction and the timer that
+    // releases it is the only thing that can raise it.
+    //
+    // The release cannot happen in the `changed` handler itself: assigning 0
+    // and then 1 in the same handler animates from the value the property
+    // already had, so the fade would show nothing. One tick of separation is
+    // what turns it into an entrance.
+    property <float> page-entrance: 1.0;
+
+    changed page => { root.page-entrance = 0.0; }
+
+    // `running` is `page-entrance < 1.0`, so an idle window schedules nothing
+    // and there is no timer left to fire late.
+    Timer {
+        interval: Theme.motion-fast;
+        running: root.page-entrance < 1.0;
+        triggered => { root.page-entrance = 1.0; }
+    }
+
     /// Content box width (window minus the navigation pane), pushed from Rust so
     /// pages never have to read the window width from inside their own layout.
     in property <length> content-width: 880px;
@@ -606,8 +630,16 @@ export component AppWindow inherits Window {
                 spacing: 0px;
 
                 // ---- NavigationView pane ----
-                Rectangle {
+                rail-pane := Rectangle {
                     width: root.rail-compact ? Theme.rail-width-compact : Theme.rail-width;
+                    // The one place the rail moves: 232 <-> 52 is a width change,
+                    // and letting it happen between two frames is what made the
+                    // pane read as a redraw rather than a control. `motion` (150ms)
+                    // is the longest duration the style contract allows and this is
+                    // the largest thing that moves, so it gets that one; the page
+                    // host takes its width from `rail-pane.width` below, so the two
+                    // halves of the window can never overlap while it runs.
+                    animate width { duration: Theme.motion; easing: ease-out; }
                     background: Theme.chrome;
                     border-width: 1px;
                     border-color: Theme.border;
@@ -698,9 +730,19 @@ export component AppWindow inherits Window {
                 // Stating the width breaks the cycle at the source, so a page with
                 // narrow content is still full width and no page needs a per-page
                 // anchor to compensate.
+                // It is stated against the *pane* rather than against `rail-compact`,
+                // so the host follows `rail-pane` while the pane's own 232 <-> 52
+                // animation runs instead of the pane sliding over the page for a
+                // frame and a half.
                 Rectangle {
                     horizontal-stretch: 1;
-                    width: root.width - (root.rail-compact ? Theme.rail-width-compact : Theme.rail-width);
+                    width: root.width - rail-pane.width;
+                    // Entrance, not decoration: a new route is painted at
+                    // `page-entrance` 0 and released one `motion-fast` later, so the
+                    // page fades in over 90ms instead of appearing between frames.
+                    // Rest is 1.0, which is what a capture after settle sees.
+                    opacity: root.page-entrance;
+                    animate opacity { duration: Theme.motion-fast; easing: ease-out; }
                     background: Theme.canvas;
                     clip: true;
 

@@ -935,4 +935,154 @@ mod tests {
         }
         out
     }
+
+    /// Rule: a declared motion token is referenced, and no `animate` invents its
+    /// own duration.
+    ///
+    /// `theme.slint` has declared `motion-fast: 90ms` and `motion: 150ms` since
+    /// round three, and for two rounds the whole UI contained exactly one
+    /// `animate` (the toggle-switch thumb) while `Theme.motion` was read by
+    /// nothing at all. A token table nothing reads is not a design language, it is
+    /// a comment: the rail snapped, a page appeared between two frames, a cover
+    /// popped into a card and the InfoBar blinked, and none of that showed in
+    /// review because the durations the theme promised never appeared in a diff.
+    ///
+    /// Both halves are about *drift*, not about values. A `<duration>` token no
+    /// other file reads is a rule that silently stopped applying; an `animate`
+    /// that writes `duration: 120ms` bypasses the table and the 150 ms ceiling the
+    /// style contract sets. The reference check is deliberately not a plain
+    /// `contains`: `Theme.motion` is a *prefix* of `Theme.motion-fast`, so a text
+    /// search would let a dead `motion` token pass on its sibling's strength,
+    /// which is the exact shape of the mistake this rule exists to catch.
+    #[test]
+    fn every_declared_motion_token_is_referenced_and_no_animate_uses_a_literal_duration() {
+        let theme = read(&ui_dir().join("theme.slint"));
+
+        // (a) `out property <duration> motion-fast: 90ms;`
+        let mut declared: Vec<(String, usize)> = Vec::new();
+        for (index, line) in theme.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("").trim();
+            let Some(rest) = code.strip_prefix("out property <duration> ") else {
+                continue;
+            };
+            let Some(colon) = rest.find(':') else {
+                continue;
+            };
+            let name = rest[..colon].trim();
+            if !name.is_empty() {
+                declared.push((name.to_string(), index + 1));
+            }
+        }
+        assert!(
+            declared.len() >= 2,
+            "theme.slint should declare the motion tokens, found {}",
+            declared.len()
+        );
+
+        // (b) each token is read from at least one file that is not the theme.
+        let others: Vec<(String, String)> = page_files()
+            .into_iter()
+            .filter(|path| path.file_name().and_then(|n| n.to_str()) != Some("theme.slint"))
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                (name, read(&path))
+            })
+            .collect();
+        let mut unused = Vec::new();
+        for (token, line) in &declared {
+            if !others.iter().any(|(_, source)| reads_token(source, token)) {
+                unused.push(format!(
+                    "theme.slint:{line}: Theme.{token} is declared but no other file reads it"
+                ));
+            }
+        }
+        assert!(
+            unused.is_empty(),
+            "a motion token nothing reads is a rule that stopped applying:\n{}",
+            unused.join("\n")
+        );
+
+        // (c) every `duration:` inside an `animate` block names a token.
+        let mut literals = Vec::new();
+        for (name, source) in &others {
+            for (line, value) in animate_durations(source) {
+                if !value.starts_with("Theme.") {
+                    literals.push(format!("{name}:{line}: duration: {value}"));
+                }
+            }
+        }
+        assert!(
+            literals.is_empty(),
+            "an animation takes its duration from Theme.motion-fast or Theme.motion:\n{}",
+            literals.join("\n")
+        );
+    }
+
+    /// True when `source` reads `Theme.<token>`, and not a token that merely
+    /// starts with it: `Theme.motion` is a prefix of `Theme.motion-fast`.
+    fn reads_token(source: &str, token: &str) -> bool {
+        let needle = format!("Theme.{token}");
+        source.lines().any(|line| {
+            let code = line.split("//").next().unwrap_or("");
+            code.match_indices(&needle).any(|(at, _)| {
+                !matches!(
+                    code[at + needle.len()..].chars().next(),
+                    Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_'
+                )
+            })
+        })
+    }
+
+    /// Every `duration:` inside an `animate` block, as `(line, value)`.
+    ///
+    /// The block is walked by braces, not by line, so the multi-line form
+    /// (`animate opacity {` / `duration: 120ms;` / `}`) is caught as well as the
+    /// one-line form the components use. A line whose `animate` sits inside a
+    /// comment is skipped: mentioning the keyword is not animating anything.
+    fn animate_durations(source: &str) -> Vec<(usize, String)> {
+        let mut found = Vec::new();
+        for (start, _) in source.match_indices("animate ") {
+            let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+            let line_end = source[start..]
+                .find('\n')
+                .map_or(source.len(), |at| start + at);
+            if !source[line_start..line_end].contains("animate ")
+                || source[line_start..start].contains("//")
+            {
+                continue;
+            }
+            let Some(open) = source[start..].find('{').map(|at| start + at) else {
+                continue;
+            };
+            let mut depth = 0usize;
+            let mut end = source.len();
+            for (offset, ch) in source[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + offset;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut cursor = 0usize;
+            for text in source[open..end].split('\n') {
+                let code = text.split("//").next().unwrap_or("");
+                if let Some(at) = code.find("duration:") {
+                    let value: String = code[at + "duration:".len()..]
+                        .chars()
+                        .take_while(|c| *c != ';' && *c != '}')
+                        .collect();
+                    let line = source[..open + cursor + at].matches('\n').count() + 1;
+                    found.push((line, value.trim().to_string()));
+                }
+                cursor += text.len() + 1;
+            }
+        }
+        found
+    }
 }

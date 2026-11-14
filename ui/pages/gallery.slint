@@ -238,7 +238,7 @@ export component GalleryPage inherits Rectangle {
             }
 
             Rectangle {
-                height: 132px;
+                height: Theme.artist-strip-height;
                 clip: true;
 
                 ScrollView {
@@ -252,7 +252,7 @@ export component GalleryPage inherits Rectangle {
                         alignment: start;
                         for u in root.recommend-users : UserCard {
                             item: u;
-                            card-width: 210px;
+                            card-width: Theme.artist-card-width;
                             open => { root.open-user(u.id); }
                             toggle-follow => { }
                         }

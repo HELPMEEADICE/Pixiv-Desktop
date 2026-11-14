@@ -145,6 +145,14 @@ export global Theme {
     /// sits underneath the thumb.
     out property <length> scrollbar-gutter: 10px;
 
+    // ---- recommended-artist strip --------------------------------------
+    // The artist band on 首页 and 发现: one tile 210 wide inside a 132-tall
+    // strip that scrolls horizontally. Both numbers were literals in two pages
+    // and in `UserCard`; they must stay equal (the tile is as tall as the strip
+    // it sits in) so the strip cannot clip its own cards.
+    out property <length> artist-card-width: 210px;
+    out property <length> artist-strip-height: 132px;
+
     // ---- type ----------------------------------------------------------
     // WinUI 3's ramp, compressed for a dense browse client: the settings rows
     // and list rows WinUI draws at 14px stay at 14px, captions drop to 11 so a
@@ -190,7 +198,11 @@ export global Theme {
     out property <length> nav-item-height: 36px;
 
     // ---- motion --------------------------------------------------------
-    // Short and linear-ish: a desktop tool should never feel animated.
+    // Short and linear-ish: a desktop tool should never feel animated. Every
+    // animation in the UI names one of these two, no `animate` carries a
+    // duration literal, and no token may be declared without a user;
+    // `every_declared_motion_token_is_referenced_and_no_animate_uses_a_literal_duration`
+    // holds both halves of that.
     out property <duration> motion-fast: 90ms;
     out property <duration> motion: 150ms;
 }
