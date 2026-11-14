@@ -845,7 +845,7 @@ mod tests {
         // `self.items` (render_feed set it), and 4 column models on screen.
         let mut kept: Vec<Illust> = (1..=24).map(work).collect();
         let mut on_screen: Vec<Illust> = (1..=24).map(work).collect();
-        let heights = vec![100.0_f32; 4];
+        let heights = [100.0_f32; 4];
         let columns = columns(4);
 
         // The second page arrives: one row is a duplicate the feed already shows.
