@@ -43,7 +43,12 @@ param(
     # on: they are the home page plus a deep link, one to a demo work that loads
     # and one to an id the demo catalogue does not have, which is the only
     # deterministic way to reach the error state the page renders.
-    [string[]]$Pages = @("home", "discovery", "ranking", "search", "bookmarks", "history", "downloads", "settings", "detail", "detail-error"),
+    # Round nine adds five fixture-driven states: the shell can be asked for them
+    # with PIXIV_DESKTOP_FIXTURE (plan §7, G24), so each one is captured the same
+    # way every other page is and becomes a baseline like the rest. They are a
+    # page in this list, not a separate script, because a state nobody photographs
+    # is a state that can regress quietly - which is what U6 did for eight rounds.
+    [string[]]$Pages = @("home", "discovery", "ranking", "search", "bookmarks", "history", "downloads", "settings", "detail", "detail-error", "detail-ugoira", "palette", "selection", "suggestion", "downloads-queue"),
     [string[]]$Themes = @("light", "dark"),
     [string]$Size = "1024x768",
     [int]$Tolerance = 6,
@@ -248,12 +253,29 @@ if (-not (Test-Path $BaselineDir)) { New-Item -ItemType Directory -Force -Path $
 
 $env:PIXIV_DESKTOP_DEMO = "1"
 
+$fixturePages = @{
+    "detail-ugoira"   = @{ Start = "home";      Fixture = "ugoira" }
+    "palette"         = @{ Start = "home";      Fixture = "palette" }
+    "selection"       = @{ Start = "home";      Fixture = "selection" }
+    "suggestion"      = @{ Start = "home";      Fixture = "suggestion" }
+    "downloads-queue" = @{ Start = "downloads"; Fixture = "downloads" }
+}
+
 $results = @()
 foreach ($theme in $Themes) {
     foreach ($page in $Pages) {
         $name = "{0}-{1}" -f $page, $theme
         $png = Join-Path $currentDir "$name.png"
         $startPage = if ($page -like "detail*") { "home" } else { $page }
+        # A fixture page names the state, not a widget: the app opens the work, the
+        # panel or the queue itself, so this table never guesses a deep link.
+        $fixture = $null
+        if ($fixturePages.ContainsKey($page)) {
+            $startPage = $fixturePages[$page].Start
+            $fixture = $fixturePages[$page].Fixture
+        }
+        if ($fixture) { $env:PIXIV_DESKTOP_FIXTURE = $fixture }
+        else { Remove-Item Env:PIXIV_DESKTOP_FIXTURE -ErrorAction SilentlyContinue }
         $shotArgs = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $startPage, "-Mode", "size", "-Size", $Size, "-Out", $png, "-Exe", $Exe)
         if ($theme -eq "dark") { $shotArgs += "-Dark" }
         if ($page -eq "detail") { $shotArgs += @("-Illust", "700000003") }
