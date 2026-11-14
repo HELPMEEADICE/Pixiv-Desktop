@@ -77,3 +77,13 @@ if ($bad.Count) {
     $bad | Format-Table -AutoSize | Out-String | Write-Host
     exit 1
 }
+# G11: zero checks is not a pass. With no page or no size selected this script used
+# to fall off the end at exit 0 printing "0 checks, 0 not OK" - measured at HEAD with
+# "-Pages , -Sizes ,": a gate that was asked for nothing and reported success. 77 is
+# the documented "cannot run on this host" code, which tools/gates.ps1 reports as
+# SKIP rather than PASS.
+if ($results.Count -eq 0) {
+    Write-Host ("SKIP: nothing was checked - the selection resolved to {0} page(s) x {1} size(s)" -f $Pages.Count, $Sizes.Count) -ForegroundColor Yellow
+    Write-Host "      Select at least one page and one size (-Pages home -Sizes 1024x768): a run with no check cannot pass." -ForegroundColor Yellow
+    exit 77
+}

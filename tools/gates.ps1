@@ -42,10 +42,20 @@
 # about anyone else's.
 #
 # Usage:
-#   pwsh -File tools/gates.ps1                 # paths, fmt, test, lint, release build
+#   pwsh -File tools/gates.ps1                 # paths, fmt, test, lint, selftest, release build
 #   pwsh -File tools/gates.ps1 -SkipBuild      # the fast loop
 #   pwsh -File tools/gates.ps1 -Lint Clippy    # force the toolchain clippy
-#   pwsh -File tools/gates.ps1 -Ui             # also run the measured UI gates
+#   pwsh -File tools/gates.ps1 -Ui             # also run the six measured UI gates
+#
+# G17: this list was incomplete. It called four of the seven verifiers, so
+# tools/verify-icons.ps1, tools/verify-layout.ps1 and tools/selftest-gates.ps1 - the
+# last of which is the negative experiment the whole acceptance argument rests on -
+# were invoked by nothing at all while README.md and UI-NOTES.md described all three
+# as gates. The UI section now runs a11y, visual, focus, dpi, icons and layout; the
+# selftest runs in the non-UI flow, because it needs no desktop.
+#
+# G19: the three cargo steps pass --locked, so a stale Cargo.lock fails here instead
+# of passing locally and failing on a CI runner that resolves the graph.
 #
 # -Ui is opt-in because it needs an interactive desktop: it launches the app,
 # reads the UI Automation tree, presses real Tab keys and captures the screen. On
@@ -175,7 +185,9 @@ Invoke-Gate "cargo fmt --check" { cargo fmt --all -- --check 2>&1 | Out-Host } |
 # crates/pixiv-api/tests/live.rs is inert unless PIXIV_LIVE_PHPSESSID is set. ----
 if (-not $failed -and -not $SkipTest) {
     Invoke-Gate "cargo test --workspace" {
-        cargo test --workspace 2>&1 |
+        # --locked (G19): a stale Cargo.lock must fail here as it would in CI, not
+        # pass locally because cargo silently re-resolved the graph.
+        cargo test --workspace --locked 2>&1 |
             Select-String -Pattern "test result|^error|panicked" |
             ForEach-Object { $_.Line } | Out-Host
     } | Out-Null
@@ -205,7 +217,7 @@ if (-not $failed -and $Lint -ne "Off") {
                 # No pattern filter: see the header. The log is bounded by line count
                 # instead, and the exit code is put back by hand because the last
                 # statement in this block is the one the gate measures.
-                $log = @(cargo check --workspace --all-targets --message-format short 2>&1 | ForEach-Object { "$_" })
+                $log = @(cargo check --workspace --all-targets --locked --message-format short 2>&1 | ForEach-Object { "$_" })
                 $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
                 $log | Select-Object -First 200 | Out-Host
                 if ($log.Count -gt 200) { Write-Host ("  ... {0} more line(s) suppressed" -f ($log.Count - 200)) }
@@ -225,7 +237,7 @@ if (-not $failed -and $Lint -ne "Off") {
             # Same rule as the Driver branch: -D warnings on the command line, and the
             # whole log bounded by line count rather than by a filter that only ever
             # matched the summary.
-            $log = @(cargo clippy --workspace --all-targets --message-format short -- -D warnings 2>&1 | ForEach-Object { "$_" })
+            $log = @(cargo clippy --workspace --all-targets --locked --message-format short -- -D warnings 2>&1 | ForEach-Object { "$_" })
             $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
             $log | Select-Object -First 200 | Out-Host
             if ($log.Count -gt 200) { Write-Host ("  ... {0} more line(s) suppressed" -f ($log.Count - 200)) }
@@ -234,7 +246,18 @@ if (-not $failed -and $Lint -ne "Off") {
     }
 }
 
-# ---- 4. the measured UI gates. Opt-in: see the header. ----
+# ---- 4. the gates' own negative experiments. No desktop needed: selftest-gates diffs
+# tracked baselines with -SkipCapture and reads this file statically. Here rather than
+# with the UI gates because it must run on a host with no session - it is the proof
+# that the other gates can fail, and a proof that only runs where they run is no proof
+# (G17: it was invoked by nothing while two documents described it as a gate). ----
+if (-not $failed) {
+    Invoke-Gate "tools/selftest-gates.ps1" {
+        pwsh -File tools/selftest-gates.ps1 2>&1 | Select-Object -Last 30 | Out-Host
+    } | Out-Null
+}
+
+# ---- 5. the measured UI gates. Opt-in: see the header. ----
 if (-not $failed -and $Ui) {
     # The two harnesses drive target/debug, which the release gate above does not
     # produce, so build it here rather than assuming it is current.
@@ -261,9 +284,22 @@ if (-not $failed -and $Ui) {
             pwsh -File tools/verify-dpi.ps1 2>&1 | Select-Object -Last 40 | Out-Host
         } | Out-Null
     }
+    # G17: verify-icons and verify-layout were described as gates by README.md and
+    # UI-NOTES.md and invoked by nothing, so the one measurement that reads glyph ink
+    # and the 24-check layout matrix had not run since the round that wrote them.
+    if (-not $failed) {
+        Invoke-Gate "tools/verify-icons.ps1" {
+            pwsh -File tools/verify-icons.ps1 2>&1 | Select-Object -Last 25 | Out-Host
+        } | Out-Null
+    }
+    if (-not $failed) {
+        Invoke-Gate "tools/verify-layout.ps1" {
+            pwsh -File tools/verify-layout.ps1 2>&1 | Select-Object -Last 35 | Out-Host
+        } | Out-Null
+    }
 }
 
-# ---- 5. the shipped artefact. Last, because it is by far the slowest. ----
+# ---- 6. the shipped artefact. Last, because it is by far the slowest. ----
 if (-not $failed -and -not $SkipBuild) {
     Invoke-Gate "cargo build --release" {
         cargo build --release 2>&1 | Select-Object -Last 3 | Out-Host

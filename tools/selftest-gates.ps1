@@ -11,6 +11,15 @@
 #   case erase   - the control for the same comparator: a 200x200 block of a
 #                  capture replaced with black is a real difference and must say
 #                  DIFF, so "SHIFT" cannot be a verdict everything gets.
+#   case blob    - G16/G10: a 12x12 rectangle (144 px, 0.0081 % of a 1536x1152
+#                  capture) replaced with black is exactly the difference the
+#                  percentage budget used to admit - 0.02 % is 354 px - so the gate
+#                  must say DIFF on the pixel ceiling. Proved against the old
+#                  comparator with -VerifyScript (see the usage note below).
+#   case capture - G7: a capture whose child process failed must be that row's FAIL,
+#                  never a comparison against the PNG the previous run left behind.
+#   case noscale - G14: a sidecar that declares no scale cannot judge anything, so it
+#                  must be SKIP instead of switching the scale guard off.
 #   case skip    - G1: a baseline whose sidecar declares another scale cannot judge
 #                  the capture. All comparisons skipped means nothing was compared,
 #                  so the gate must exit 77 with "0 compared", not print a green
@@ -95,6 +104,15 @@ function Invoke-VisualGate {
     return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $text }
 }
 
+# The same gate with the capture step enabled against an executable that does not
+# exist: the child fails, and what the gate then says about the comparison is the
+# question case capture asks.
+function Invoke-VisualCapture {
+    param([pscustomobject]$Case, [string]$Exe)
+    $text = & pwsh -NoProfile -File $VerifyScript -SkipCapture:$false -Exe $Exe -Pages home -Themes light -Tolerance $Tolerance -BaselineDir $Case.Baseline -OutDir $Case.Out 2>&1 | Out-String
+    return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $text }
+}
+
 <#
   Displace the whole capture by one pixel and fill what the move uncovers with
   black. This is UI-NOTES 12d as a picture: nothing changed size, every element sits
@@ -122,7 +140,9 @@ function New-ShiftedPng {
 }
 
 # The control: a region of the capture erased to black. A difference no comparator
-# can absorb, so a comparator that passes this is not comparing anything.
+# can absorb, so a comparator that passes this is not comparing anything. The case
+# blob reuses it with a 12x12 rectangle - same operation, different area, and that
+# area is the whole point.
 function New-ErasedPng {
     param([string]$Source, [string]$Target, [int]$X, [int]$Y, [int]$Width, [int]$Height)
     $src = [System.Drawing.Image]::FromFile($Source)
@@ -176,6 +196,36 @@ New-ErasedPng -Source (Join-Path $case.Baseline "home-light.png") -Target (Join-
 $run = Invoke-VisualGate -Case $case
 $row = @($run.Output -split "\r?\n" | Where-Object { $_ -match "^\s+home\s+light" }) -join " / "
 Add-Case -Name "erase" -Wanted "exit 1 and DIFF" -Ok ($run.Code -eq 1 -and $run.Output -match "DIFF") -Evidence ("exit={0} {1}" -f $run.Code, $row.Trim())
+
+# ---- case blob: a 12x12 icon-sized difference must not fit inside the budget ----
+# 144 px on a 1536x1152 capture is 0.0081 %, which the percentage budget (0.02 % =
+# 354 px) admits with room to spare. This is the case the absolute pixel ceiling
+# exists for; against the percentage-only comparator it reports OK and this case
+# FAILs, which is how the ceiling is proved to be doing work.
+$case = New-Case -Name "blob"
+New-ErasedPng -Source (Join-Path $case.Baseline "home-light.png") -Target (Join-Path $case.Current "home-light.png") -X 200 -Y 200 -Width 12 -Height 12
+$run = Invoke-VisualGate -Case $case
+$row = @($run.Output -split "\r?\n" | Where-Object { $_ -match "^\s+home\s+light" }) -join " / "
+Add-Case -Name "blob" -Wanted "exit 1 and DIFF on the 144 px blob" -Ok ($run.Code -eq 1 -and $run.Output -match "DIFF" -and $run.Output -match "pixel ceiling") -Evidence ("exit={0} {1}" -f $run.Code, $row.Trim())
+
+# ---- case capture: a failed capture is that row's FAIL, not the old PNG ----
+# G7. The fixture already holds a perfectly matching "capture" - that is the previous
+# run's file, which is what the broken gate diffed and reported as OK.
+$case = New-Case -Name "capture"
+$run = Invoke-VisualCapture -Case $case -Exe "target\debug\nope.exe"
+$row = @($run.Output -split "\r?\n" | Where-Object { $_ -match "^\s+home\s+light" }) -join " / "
+Add-Case -Name "capture" -Wanted "exit 1 and CAPTURE" -Ok ($run.Code -eq 1 -and $run.Output -match "CAPTURE" -and $run.Output -match "nothing was compared") -Evidence ("exit={0} {1}" -f $run.Code, $row.Trim())
+
+# ---- case noscale: an unreadable sidecar is SKIP, never "same scale" ----
+# G14. The capture sidecar is rewritten without a scale: the old guard read
+# "$baseScale -ne 0 -and ..." on a value that had defaulted to 0, so it switched
+# itself off and compared anyway.
+$case = New-Case -Name "noscale"
+$metaNoScale = [ordered]@{ page = "home"; theme = "light"; size = "1024x768"; width = 1536; height = 1152 }
+($metaNoScale | ConvertTo-Json -Compress) | Set-Content -Path (Join-Path $case.Current "home-light.json") -Encoding utf8
+$run = Invoke-VisualGate -Case $case
+$row = @($run.Output -split "\r?\n" | Where-Object { $_ -match "^\s+home\s+light" }) -join " / "
+Add-Case -Name "noscale" -Wanted "exit 77 and SKIP: unreadable sidecar" -Ok ($run.Code -eq 77 -and $run.Output -match "unreadable sidecar") -Evidence ("exit={0} {1}" -f $run.Code, $row.Trim())
 
 # ---- case skip: a baseline that cannot judge the capture must not be green ----
 $case = New-Case -Name "skip" -BaselineScale 1.0 -LiveScale 1.5

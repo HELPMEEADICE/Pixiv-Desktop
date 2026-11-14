@@ -27,6 +27,12 @@
 # gate fails, because a render that only lines up when the reference is moved is
 # a moved render, not a matching one.
 #
+# What a row means: a capture is judged only if shot.ps1 exited 0 (a failed capture is
+# that row's FAIL, never a comparison against whatever PNG had its name), only if both
+# sidecars declare a scale (an unreadable one is SKIP, not "same scale"), and only if
+# it is inside *both* budgets - the percentage and the absolute pixel ceiling beside
+# it, because 0.02 % of a 1536x1152 capture is 354 arbitrary pixels.
+#
 # Usage:
 #   pwsh -File tools/verify-visual.ps1                  # capture, diff, assert
 #   pwsh -File tools/verify-visual.ps1 -Update          # re-baseline after a fix
@@ -42,6 +48,16 @@ param(
     [string]$Size = "1024x768",
     [int]$Tolerance = 6,
     [double]$MaxDiffPercent = 0.02,
+    # G10: the percentage alone is a budget that grows with the capture. 0.02 % of a
+    # tracked 1536x1152 baseline is 354 pixels, so a whole 12x12 icon could vanish
+    # inside it and the run still printed "within 0.02 %". The pixel ceiling is the
+    # bound that does not move with the capture, and 96 is chosen from two measured
+    # numbers, not from taste: a planted 12x12 rectangle scores 101 px through the
+    # neighbour-absorbing counter (144 px minus the 2-px ring the absorbing test
+    # forgives), and every one of the 20 tracked baselines scores 0 px today. The
+    # ceiling applies to the band the percentage is blind to; a difference big enough
+    # to fail the percentage is already DIFF for the percentage's reason.
+    [int]$MaxDiffPixels = 96,
     [string]$Exe = "target\debug\pixiv-desktop.exe",
     [string]$BaselineDir = "docs/screenshots/baseline",
     [string]$OutDir = "target/visual",
@@ -221,6 +237,12 @@ $Pages = @($Pages | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim(
 $Themes = @($Themes | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 $currentDir = Join-Path $OutDir "current"
+# G7: the capture directory is emptied before the first shot. A capture that failed
+# and wrote nothing used to be compared against the *previous* run's file of the same
+# name - one run with -Exe target\debug\nope.exe printed twenty OK rows and exited 0
+# - and the only reason it could was that the stale PNG was still there. -SkipCapture
+# is exempt: diffing what is on disk is the whole point of that switch.
+if (-not $SkipCapture) { Remove-Item -Recurse -Force $currentDir -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force -Path $currentDir | Out-Null
 if (-not (Test-Path $BaselineDir)) { New-Item -ItemType Directory -Force -Path $BaselineDir | Out-Null }
 
@@ -239,15 +261,26 @@ foreach ($theme in $Themes) {
 
         if (-not $SkipCapture) {
             & pwsh @shotArgs | Out-Null
+            # G7: the child's exit code decides the capture. It used to go into
+            # "| Out-Null" and the code asked only whether the PNG existed, so a shot
+            # that failed was judged as whatever PNG had that name on disk.
+            $shotExit = $LASTEXITCODE
+            if ($shotExit -ne 0) {
+                $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "CAPTURE"; Detail = ("shot.ps1 exited {0}: not captured, so nothing was compared" -f $shotExit) }
+                continue
+            }
             if (-not (Test-Path $png)) {
-                $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "CAPTURE"; Detail = "no capture" }
+                $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "CAPTURE"; Detail = "shot.ps1 exited 0 but wrote no capture" }
                 continue
             }
         }
 
         $shotMeta = [System.IO.Path]::ChangeExtension($png, ".json")
-        $scale = 0
-        if (Test-Path $shotMeta) { $scale = (Get-Content $shotMeta -Raw | ConvertFrom-Json).scale }
+        $scale = $null
+        if (Test-Path $shotMeta) {
+            $declared = (Get-Content $shotMeta -Raw | ConvertFrom-Json).scale
+            if ($null -ne $declared) { $scale = [double]$declared }
+        }
 
         $basePng = Join-Path $BaselineDir "$name.png"
         $baseMeta = Join-Path $BaselineDir "$name.json"
@@ -258,6 +291,9 @@ foreach ($theme in $Themes) {
             $meta = [ordered]@{ page = $page; theme = $theme; size = $Size; scale = $scale; width = $bitmap.Width; height = $bitmap.Height }
             $bitmap.Dispose()
             ($meta | ConvertTo-Json -Compress) | Set-Content -Path $baseMeta -Encoding utf8
+            if ($null -eq $scale) {
+                Write-Host ("  warning: {0} carries no scale, so the baseline written here can never be judged - re-run -Update on a host where shot.ps1 writes its sidecar" -f $shotMeta) -ForegroundColor Yellow
+            }
             $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = 0; Max = 0; Mean = 0; Verdict = "BASE"; Detail = "baseline written" }
             continue
         }
@@ -267,9 +303,28 @@ foreach ($theme in $Themes) {
             continue
         }
 
-        $baseScale = 0
-        if (Test-Path $baseMeta) { $baseScale = (Get-Content $baseMeta -Raw | ConvertFrom-Json).scale }
-        if ($baseScale -ne 0 -and $scale -ne 0 -and [math]::Abs($baseScale - $scale) -gt 0.01) {
+        # G14: this used to default the baseline scale to 0 and then test
+        # "$baseScale -ne 0 -and ...", so a sidecar that was missing, unparsable or
+        # had no scale *switched the guard off* and the capture was compared as if
+        # both sides agreed. Unreadable is now SKIP: a comparison whose two scale
+        # factors cannot be shown to agree judged nothing, and SKIP is neither a pass
+        # nor a silent pass.
+        $baseScale = $null
+        if (Test-Path $baseMeta) {
+            try {
+                $declaredBase = (Get-Content $baseMeta -Raw | ConvertFrom-Json).scale
+                if ($null -ne $declaredBase) { $baseScale = [double]$declaredBase }
+            }
+            catch { $baseScale = $null }
+        }
+        if ($null -eq $scale -or $null -eq $baseScale) {
+            $which = if ($null -eq $scale -and $null -eq $baseScale) { "neither sidecar declares a scale" }
+                     elseif ($null -eq $scale) { "the capture sidecar declares no scale" }
+                     else { "the baseline sidecar declares no scale (re-baseline with -Update)" }
+            $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "SKIP"; Detail = ("unreadable sidecar: {0}" -f $which) }
+            continue
+        }
+        if ([math]::Abs($baseScale - $scale) -gt 0.01) {
             $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "SKIP"; Detail = ("scale {0} vs {1}" -f $scale, $baseScale) }
             continue
         }
@@ -281,9 +336,43 @@ foreach ($theme in $Themes) {
             $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "SHAPE"; Detail = $parts[0] }
             continue
         }
-        $verdict = if ($over -le $MaxDiffPercent) { "OK" } else { "DIFF" }
+        # G10: two bounds, because the percentage is a budget that grows with the
+        # capture and the pixel ceiling does not. The verdict names the bound that
+        # failed instead of printing a percentage that reads as a hundredth of a
+        # percent while admitting 354 pixels.
+        $liveImage = [System.Drawing.Image]::FromFile($png)
+        $pixels = [double]$liveImage.Width * $liveImage.Height
+        $liveImage.Dispose()
+        $overPixels = [int][math]::Round($over * $pixels / 100.0)
+        $failPercent = $over -gt $MaxDiffPercent
+        $failPixels = $overPixels -gt $MaxDiffPixels
         $detail = ""
-        if ($verdict -eq "OK") {
+        if ($failPercent) {
+            # Big enough to fail the percentage: that is the reason to report, and the
+            # ceiling is reported beside it only when it also failed.
+            $verdict = "DIFF"
+            $detail = if ($failPixels) {
+                ("{0} px differ ({1:N4} %): over both the {2} % budget and the {3}-pixel ceiling" -f $overPixels, $over, $MaxDiffPercent, $MaxDiffPixels)
+            }
+            else {
+                ("{0} px differ ({1:N4} %): over the {2} % budget, under the {3}-pixel ceiling" -f $overPixels, $over, $MaxDiffPercent, $MaxDiffPixels)
+            }
+        }
+        elseif ($failPixels) {
+            # Inside the percentage, over the ceiling: the band the percentage is blind
+            # to. A wholesale one-pixel displacement lands here too (measured 102 px on
+            # the tracked baselines), so the one-pixel question is asked before the
+            # ceiling is convicted - SHIFT names that cause and still fails the run.
+            $verdict = "DIFF"
+            $detail = ("{0} px differ ({1:N4} %): under the {2} % budget but over the {3}-pixel ceiling" -f $overPixels, $over, $MaxDiffPercent, $MaxDiffPixels)
+            $shift = Test-Shifted -Base $basePng -Live $png -Tolerance $Tolerance -BudgetPercent $MaxDiffPercent
+            if ($shift.Shifted) {
+                $verdict = "SHIFT"
+                $detail = ("matches only when the baseline moves {0},{1}: {2} px explained of {3}" -f $shift.Dx, $shift.Dy, $shift.Recovered, $shift.Still)
+            }
+        }
+        else {
+            $verdict = "OK"
             $shift = Test-Shifted -Base $basePng -Live $png -Tolerance $Tolerance -BudgetPercent $MaxDiffPercent
             if ($shift.Shifted) {
                 $verdict = "SHIFT"
@@ -322,7 +411,7 @@ if ($judged.Count -eq 0) {
         # Every capture was skipped: nothing was compared, so nothing was judged.
         # 77 is the documented "this host cannot run this gate" code that
         # tools/gates.ps1 reports as SKIP - never green.
-        Write-Host ("0 compared, {0} skipped (scale differs from the baseline): nothing was judged, so this run cannot pass - re-baseline on this host with -Update" -f $skipped.Count) -ForegroundColor Yellow
+        Write-Host ("0 compared, {0} skipped (not judged): nothing was judged, so this run cannot pass - see the reason on each row" -f $skipped.Count) -ForegroundColor Yellow
         exit 77
     }
     if ($results.Count -eq 0) {
@@ -333,8 +422,8 @@ if ($judged.Count -eq 0) {
     exit 0
 }
 if ($skipped.Count -gt 0) {
-    Write-Host ("{0} compared within {1}% of the baseline; {2} skipped (not judged)" -f $judged.Count, $MaxDiffPercent, $skipped.Count) -ForegroundColor Yellow
+    Write-Host ("{0} compared within {1}% and {2} px of the baseline; {3} skipped (not judged)" -f $judged.Count, $MaxDiffPercent, $MaxDiffPixels, $skipped.Count) -ForegroundColor Yellow
     exit 0
 }
-Write-Host ("{0} captures within {1}% of the baseline" -f $results.Count, $MaxDiffPercent) -ForegroundColor Green
+Write-Host ("{0} captures within {1}% and {2} px of the baseline" -f $results.Count, $MaxDiffPercent, $MaxDiffPixels) -ForegroundColor Green
 exit 0

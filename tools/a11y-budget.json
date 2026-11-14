@@ -1,5 +1,5 @@
 {
-  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. Written by tools/verify-a11y.ps1 -Update; the numbers are measured, not chosen. invokable = elements with an InvokePattern, distinctTab = distinct stops a real Tab walk reached.",
+  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. Written by tools/verify-a11y.ps1 -Update, which ratchets: each floor is max(previous, measured), so a re-pin on a degraded build cannot lower one. invokable = elements with an InvokePattern, distinctTab = distinct stops the Tab walk reached before its (Name, Type) pair repeated.",
   "default": {
     "minInvokable": 1,
     "minFocusable": 2,
@@ -12,42 +12,42 @@
     "home": {
       "minInvokable": 34,
       "minFocusable": 44,
-      "minTabStops": 10
+      "minTabStops": 51
     },
     "discovery": {
       "minInvokable": 24,
       "minFocusable": 35,
-      "minTabStops": 10
+      "minTabStops": 38
     },
     "ranking": {
       "minInvokable": 31,
       "minFocusable": 43,
-      "minTabStops": 10
+      "minTabStops": 71
     },
     "search": {
       "minInvokable": 19,
       "minFocusable": 21,
-      "minTabStops": 10
+      "minTabStops": 21
     },
     "bookmarks": {
       "minInvokable": 20,
       "minFocusable": 30,
-      "minTabStops": 10
+      "minTabStops": 24
     },
     "history": {
       "minInvokable": 12,
       "minFocusable": 14,
-      "minTabStops": 10
+      "minTabStops": 14
     },
     "downloads": {
       "minInvokable": 16,
       "minFocusable": 18,
-      "minTabStops": 10
+      "minTabStops": 18
     },
     "settings": {
       "minInvokable": 16,
       "minFocusable": 20,
-      "minTabStops": 10
+      "minTabStops": 23
     }
   }
 }

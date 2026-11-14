@@ -73,18 +73,51 @@ function Read-LayoutConstant {
 $cardMin = Read-LayoutConstant "CARD_MIN_WIDTH"
 $cardMax = Read-LayoutConstant "CARD_MAX_WIDTH"
 
-$images = Get-Content "src\images.rs" -Raw
-if ($images -notmatch 'div_ceil\((\d+)\)\s*\*\s*(\d+)') {
-    throw "src/images.rs no longer rounds the decode target with div_ceil; this gate cannot mirror it"
+# The decode mirror is read by *declaration*, not by the shape of one expression.
+# It used to be two regexes over the whole file, and both stopped matching when the
+# rounding moved into tier_up(): measured at HEAD, the script threw (old :78) before
+# it measured anything, so the gate an earlier round tells the reader to consult
+# about DPI could not run at all. Each piece is now read by name, the way
+# Read-LayoutConstant above already reads src/layout.rs, and a piece that cannot be
+# read is exit 77 ("cannot run here") - never an exception, and never a guess: a
+# mirror invented on top of a formula this gate cannot parse would be the gate
+# asserting its own arithmetic instead of the product's (plan G13).
+function Read-ImagesConstant {
+    param([string]$Name)
+    $line = Select-String -Path "src\images.rs" -Pattern ("pub const " + $Name + ":") | Select-Object -First 1
+    if ($null -eq $line) { return $null }
+    if ($line.Line -notmatch '=\s*([0-9]+)') { return $null }
+    return [int]$Matches[1]
 }
-$round = [int]$Matches[1]
-if ($images -notmatch 'rounded\.clamp\((\d+),\s*(\d+)\)') {
-    throw "src/images.rs no longer clamps the decode target; this gate cannot mirror it"
-}
-$floor = [int]$Matches[1]
-$cap = [int]$Matches[2]
 
-Write-Host ("source: card {0}..{1} px, decode target rounds up to a {2}px multiple, clamped to {3}..{4}" -f $cardMin, $cardMax, $round, $floor, $cap)
+# images::target_width_up_to ends in
+#     tier_up(physical).clamp(128, cap.max(128))
+# so the granule is the TIER_STEP constant, the floor is the first clamp argument,
+# and the ceiling is the caller's cap - CARD_MAX_WIDTH for target_width, which is
+# the ceiling the numeric table below is about.
+$round = Read-ImagesConstant "TIER_STEP"
+$cardCap = Read-ImagesConstant "CARD_MAX_WIDTH"
+$floor = $null
+$capGuard = $null
+$images = Get-Content "src\images.rs" -Raw
+if ($images -match 'tier_up\(physical\)\.clamp\(\s*(\d+)\s*,\s*cap\.max\(\s*(\d+)\s*\)\s*\)') {
+    $floor = [int]$Matches[1]
+    $capGuard = [int]$Matches[2]
+}
+
+$mirrorGap = @()
+if ($null -eq $round) { $mirrorGap += "src/images.rs declares no constant 'TIER_STEP'" }
+if ($null -eq $cardCap) { $mirrorGap += "src/images.rs declares no constant 'CARD_MAX_WIDTH'" }
+if ($null -eq $floor) { $mirrorGap += "src/images.rs has no 'tier_up(physical).clamp(N, cap.max(N))'" }
+if ($mirrorGap.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("SKIP: the decode mirror cannot be built from src/images.rs - {0}" -f ($mirrorGap -join "; ")) -ForegroundColor DarkYellow
+    Write-Host "      Nothing below this line would be measuring the product, so this run reports SKIP rather than a number."
+    exit 77
+}
+$cap = [math]::Max($cardCap, $capGuard)
+
+Write-Host ("source: card {0}..{1} px, decode target rounds up to a {2}px multiple, clamped to {3}..{4} (TIER_STEP / CARD_MAX_WIDTH / target_width_up_to, read from src/images.rs)" -f $cardMin, $cardMax, $round, $floor, $cap)
 
 # images::target_width, mirrored. One definition, so the table, the sweep and the
 # live check cannot disagree about the formula they are testing.
@@ -251,12 +284,33 @@ $summary = [ordered]@{
 ($summary | ConvertTo-Json -Depth 6) | Set-Content -Path (Join-Path $OutDir "dpi-summary.json") -Encoding utf8
 
 Write-Host ""
-if ($failures.Count -eq 0 -and $rows.Count -eq 0 -and $skips.Count -gt 0) {
-    Write-Host ("SKIP: the scale ladder could not run here - {0}" -f ($skips -join "; ")) -ForegroundColor DarkYellow
+
+# G12: exit 0 means *every requested scale was measured*, not "nothing failed".
+# The old test was "no failures and zero rows and some skips", so a run with one
+# rung of the ladder missing - and -NumericOnly, which measures no scale at all -
+# printed "N scales measured live" and exited 0. A scale nobody measured is not a
+# scale that held.
+function Test-ScaleMeasured {
+    param([double]$Scale)
+    foreach ($row in $rows) {
+        if ([math]::Abs($row.Asked - $Scale) -lt 0.001) { return $true }
+    }
+    return $false
+}
+
+$missing = @()
+foreach ($scale in $Scales) {
+    if (-not (Test-ScaleMeasured -Scale $scale)) { $missing += $scale }
+}
+
+if ($failures.Count -eq 0 -and $missing.Count -gt 0) {
+    $why = if ($NumericOnly) { "this run was -NumericOnly, so it measured no scale at all" } else { "the ladder did not produce a trace line for it" }
+    Write-Host ("SKIP: {0} of {1} requested scales measured ({2} missing: {3}) - the numeric mirror is not the ladder, so this run cannot claim the ladder held - {4}" -f ($Scales.Count - $missing.Count), $Scales.Count, $missing.Count, ($missing -join ", "), $why) -ForegroundColor DarkYellow
+    if ($skips.Count -gt 0) { Write-Host ("      skipped: {0}" -f ($skips -join "; ")) -ForegroundColor DarkYellow }
     exit 77
 }
 if ($failures.Count -eq 0) {
-    Write-Host ("{0} scales measured live, {1} numeric rows and {2} sweep points: no decode target below the draw size" -f $rows.Count, $table.Count, $sweepCount) -ForegroundColor Green
+    Write-Host ("{0} of {1} requested scales measured live, {2} numeric rows and {3} sweep points: no decode target below the draw size" -f $rows.Count, $Scales.Count, $table.Count, $sweepCount) -ForegroundColor Green
     exit 0
 }
 $failures | Select-Object -First 12 | ForEach-Object { Write-Host ("  FAIL " + $_) -ForegroundColor Red }

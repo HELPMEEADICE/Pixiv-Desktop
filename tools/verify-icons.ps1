@@ -60,7 +60,10 @@ if ($offScreen -or [math]::Abs([double]$meta.logicalW - $wantW) -gt 4 -or [math]
     }
     Write-Host $msg -ForegroundColor Yellow
     Write-Host "      Not measured: icon geometry read from a truncated frame would prove nothing."
-    exit 0
+    # G8: this path used to exit 0, and tools/gates.ps1 reads 0 as PASS, so the one
+    # gate that measures glyph ink reported a pass for a run that measured nothing.
+    # 77 is the documented "this host cannot run this gate" code (gates.ps1:101).
+    exit 77
 }
 $map = Get-PixelMap $shot
 
