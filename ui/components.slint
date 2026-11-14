@@ -464,9 +464,14 @@ export component TextField inherits Rectangle {
         tint: input.has-focus ? Theme.accent-fill : Theme.text-secondary;
     }
 
+    // The text box is inset 2px top and bottom: the bottom 2px is the focus
+    // underline's band and the top 2px is its mirror, so the text's centre line
+    // falls on the control's — (root.height - 4px) / 2 + 2px == root.height / 2.
+    // At y: 0px it sat at 14 in a 32px field while both icon groups centred at
+    // 16, which is the 2px every field's text rode above its own glyphs.
     input := TextInput {
         x: root.text-x;
-        y: 0px;
+        y: 2px;
         width: max(0px, root.width - root.text-x - root.trailing-extent);
         height: root.height - 4px;
         enabled: root.enabled;
@@ -494,7 +499,9 @@ export component TextField inherits Rectangle {
     // minimum for the whole field.
     if root.text == "" : Text {
         x: root.text-x;
-        y: 0px;
+        // Same box, same centre line as the TextInput above: the placeholder is
+        // drawn *underneath* the real text and the two must not drift apart.
+        y: 2px;
         width: max(0px, root.width - root.text-x - root.trailing-extent);
         height: root.height - 4px;
         overflow: elide;
@@ -1326,7 +1333,15 @@ component BookmarkPill inherits Rectangle {
     width: 28px;
     height: 28px;
     border-radius: Theme.radius-pill;
-    background: ta.has-hover ? Theme.layer : #ffffffd9;
+    // The surface is fixed in both themes and does not react to hover. The
+    // unmarked glyph is a fixed `#2b2b2b` — this pill floats on somebody's
+    // artwork, where the theme has no opinion, so neither colour may follow it —
+    // and a hover surface that *can* equal that ink erases it: `Theme.layer` is
+    // #2b2b2b in dark mode, contrast 1.00:1. Hover is carried by the border,
+    // which changes nothing inside the pill and cannot reach the glyph.
+    // `bookmark_pill_keeps_its_glyph_visible` in `src/uiaudit.rs` fails if this
+    // surface ever becomes hover- or theme-dependent again.
+    background: #ffffffd9;
     border-width: 1px;
     border-color: ta.has-hover ? Theme.border-strong : transparent;
 
@@ -1336,8 +1351,11 @@ component BookmarkPill inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         // Filled-in is impossible with a stroke-only path set, so "marked" is
-        // signalled by colour alone: no layout shift, no glyph swap.
-        tint: root.marked ? Theme.accent-fill : #2b2b2b;
+        // signalled by colour alone: no layout shift, no glyph swap. Both inks are
+        // fixed, because the surface under them is: `accent-fill` is #4cb0f5 in dark
+        // mode and reaches 2.38:1 on the near-white pill, so the marked state uses
+        // `pill-ink-marked` (5.07:1 in both themes).
+        tint: root.marked ? Theme.pill-ink-marked : #2b2b2b;
     }
 
     ta := TouchArea {
@@ -1374,6 +1392,15 @@ export component IllustCard inherits Rectangle {
     in property <bool> show-author: true;
     /// Column width; the card sizes itself from it.
     in property <length> column-width: 220px;
+    /// Pinned cover height; `0px` keeps the cover derived from the column width.
+    ///
+    /// The grid needs the derived form: `src/layout.rs` balances the masonry
+    /// columns against `width * clamped-aspect`, so a card in a column must keep
+    /// exactly that height. A single-row strip has nothing to balance and may
+    /// state the cover instead — Pixiv serves 1.4–1.6 aspects, so at 140 px the
+    /// derived cover alone is 196–224 px, taller than the strip's box, and the
+    /// caption band (title, author, avatar) began below it and was clipped away.
+    in property <length> cover-height-override: 0px;
     callback open();
     callback open-author();
     callback toggle-bookmark();
@@ -1393,7 +1420,9 @@ export component IllustCard inherits Rectangle {
             ? 1.0
             : Math.max(0.55, Math.min(1.6, root.item.height * 1.0 / (root.item.width * 1.0)));
 
-    out property <length> cover-height: Math.max(48px, root.column-width * root.clamped-aspect);
+    out property <length> cover-height: root.cover-height-override > 0px
+        ? root.cover-height-override
+        : Math.max(48px, root.column-width * root.clamped-aspect);
     width: root.column-width;
     height: root.cover-height + Theme.card-caption-height;
 

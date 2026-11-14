@@ -145,9 +145,6 @@ export component AppWindow inherits Window {
         triggered => { root.page-entrance = 1.0; }
     }
 
-    /// Content box width (window minus the navigation pane), pushed from Rust so
-    /// pages never have to read the window width from inside their own layout.
-    in property <length> content-width: 880px;
     in property <bool> demo-mode: false;
     /// Debug-only anchor for one tooltip, set from `PIXIV_DESKTOP_TIP`. Hover
     /// cannot be synthesised here, so this is how the overlay is measured.
@@ -871,7 +868,14 @@ export component AppWindow inherits Window {
                         width: parent.width;
                         height: parent.height;
                         visible: root.page == Destination.Detail;
-                        available-width: root.content-width;
+                        // Derived, not pushed. This used to read a `content-width`
+                        // property that Rust wrote from the width-changed callback,
+                        // so collapsing the rail left the page 180 px narrower than
+                        // reality and it kept its stacked layout until the window was
+                        // resized. The page host above states its width as the same
+                        // expression, so the page reads the box it is really in —
+                        // including while the rail animates.
+                        available-width: root.width - rail-pane.width;
                         title: root.detail-title;
                         author: root.detail-author;
                         author-id: root.detail-author-id;

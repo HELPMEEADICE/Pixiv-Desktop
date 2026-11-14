@@ -85,6 +85,16 @@ export component HomePage inherits Rectangle {
     in property <string> latest-title: "";
     in property <int> latest-state: 1;
     in property <string> latest-message: "";
+    /// Cover height of the 最新作品 strip, stated once and read by both the card
+    /// and the box it sits in.
+    ///
+    /// The grid derives a card's cover from its column width
+    /// (`column-width * clamped-aspect`), which is what `src/layout.rs` balances.
+    /// This strip is one row, so there is nothing to balance: without a stated
+    /// cover, the 1.4–1.6 aspects Pixiv serves make a 140 px card 196–224 px of
+    /// cover alone, and the 194 px box clipped the title, the author and the
+    /// avatar away entirely.
+    property <length> latest-cover: 150px;
 
     in property <[RecommendUserItem]> artists: [];
     in property <int> artists-state: 1;
@@ -286,10 +296,12 @@ export component HomePage inherits Rectangle {
                 retry => { root.refresh(); }
             }
 
+            // Both states of the band state the same height, so the page does not
+            // jump by a caption band when the strip's first payload lands.
             if root.latest-state == 1 : HorizontalLayout {
                 spacing: Theme.card-gap;
                 alignment: start;
-                height: 150px;
+                height: root.latest-cover + Theme.card-caption-height + Theme.scrollbar-gutter;
                 for n in [0, 1, 2, 3, 4] : Skeleton {
                     width: 130px;
                     height: 150px;
@@ -298,7 +310,12 @@ export component HomePage inherits Rectangle {
             }
 
             if root.latest-state == 0 : Rectangle {
-                height: 150px + Theme.card-caption-height;
+                // The card's real height — the same cover the card below is told to
+                // use, plus its caption band — and then one overlay-scrollbar band:
+                // the bar is 14 px and paints over the bottom of the ScrollView,
+                // and the caption's own ink (the author row) ends 4 px above its
+                // band, so the 10 px gutter keeps every glyph clear of it.
+                height: root.latest-cover + Theme.card-caption-height + Theme.scrollbar-gutter;
                 clip: true;
 
                 ScrollView {
@@ -313,6 +330,7 @@ export component HomePage inherits Rectangle {
                         for it in root.latest : IllustCard {
                             item: it;
                             column-width: 140px;
+                            cover-height-override: root.latest-cover;
                             show-author: true;
                             open => { root.open-illust(it.id); }
                             open-author => { root.open-author(it.author-id); }

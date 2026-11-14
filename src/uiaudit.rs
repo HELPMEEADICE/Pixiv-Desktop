@@ -222,48 +222,7 @@ mod tests {
     /// here instead of shipping.
     #[test]
     fn theme_text_pairs_clear_wcag_aa() {
-        let source = read(&ui_dir().join("theme.slint"));
-
-        // `out property <color> name: dark ? #x : #y;` -> (dark, light) per name.
-        let mut palette: std::collections::BTreeMap<String, (String, String)> =
-            std::collections::BTreeMap::new();
-        for line in source.lines() {
-            let code = line.split("//").next().unwrap_or("");
-            let Some(rest) = code.trim().strip_prefix("out property <color> ") else {
-                continue;
-            };
-            let Some((name, expr)) = rest.split_once(':') else {
-                continue;
-            };
-            let expr = expr.trim().trim_end_matches(';');
-            match expr.strip_prefix("dark ?") {
-                Some(branches) => {
-                    let Some((dark, light)) = branches.split_once(':') else {
-                        continue;
-                    };
-                    palette.insert(
-                        name.trim().to_string(),
-                        (
-                            dark.trim().to_string(),
-                            light.trim().trim_end_matches(';').trim().to_string(),
-                        ),
-                    );
-                }
-                // A colour that is the same in both themes (e.g. `on-accent`) is
-                // still part of the palette and still has to clear contrast.
-                None => {
-                    palette.insert(
-                        name.trim().to_string(),
-                        (expr.to_string(), expr.to_string()),
-                    );
-                }
-            }
-        }
-        assert!(
-            palette.len() > 20,
-            "theme palette looks empty ({} entries)",
-            palette.len()
-        );
+        let palette = theme_palette();
 
         // (foreground, background, minimum ratio, description)
         // 4.5 = WCAG AA body text; 3.0 = large text and non-text UI.
@@ -322,22 +281,37 @@ mod tests {
         // below enforces that no UI file reaches for it, so there is nothing to
         // assert here; `accent-fill` and `accent-ink` are what carry content.
 
+        // Pairs whose colours are written as literals rather than palette names.
+        // These are artwork overlays, which must keep fixed colours in both themes
+        // (see `ARTWORK_OVERLAY` above), so their contrast cannot be derived from
+        // `theme.slint` at all — which is how U2 shipped. That pair is this one,
+        // and nothing measured it: the pill's hover surface used to be
+        // `Theme.layer`, which *is* `#2b2b2b` in dark mode, drawn behind a
+        // `#2b2b2b` glyph. 1.00:1, no rendering needed to know.
+        let literal_pairs = [
+            (
+                "#2b2b2b",
+                "#ffffffd9",
+                3.0,
+                "bookmark glyph on its pill surface",
+            ),
+            (
+                "#0071c2",
+                "#ffffffd9",
+                4.5,
+                "marked bookmark glyph on its pill surface",
+            ),
+        ];
+
         let mut failures = Vec::new();
         for theme_dark in [false, true] {
-            for (fg, bg, minimum, what) in pairs {
-                let (Some(fg), Some(bg)) = (palette.get(fg), palette.get(bg)) else {
-                    failures.push(format!("missing palette entry for {what}"));
+            for &(fg, bg, minimum, what) in pairs.iter().chain(literal_pairs.iter()) {
+                let (Some(fg_value), Some(bg_value)) = (
+                    resolve(fg, &palette, theme_dark),
+                    resolve(bg, &palette, theme_dark),
+                ) else {
+                    failures.push(format!("missing palette entry for {what} ({fg} / {bg})"));
                     continue;
-                };
-                let fg_value = if theme_dark {
-                    fg.0.as_str()
-                } else {
-                    fg.1.as_str()
-                };
-                let bg_value = if theme_dark {
-                    bg.0.as_str()
-                } else {
-                    bg.1.as_str()
                 };
                 let (Some(fg_rgb), Some(bg_rgb)) = (parse_colour(fg_value), parse_colour(bg_value))
                 else {
@@ -358,6 +332,184 @@ mod tests {
             failures.is_empty(),
             "theme contrast failures:\n{}",
             failures.join("\n")
+        );
+    }
+
+    /// The theme palette: `out property <color> name: dark ? #x : #y;` ->
+    /// (dark, light) per name. A colour that is the same in both themes (e.g.
+    /// `on-accent`) is still part of the palette and still has to clear contrast.
+    fn theme_palette() -> std::collections::BTreeMap<String, (String, String)> {
+        let source = read(&ui_dir().join("theme.slint"));
+
+        let mut palette: std::collections::BTreeMap<String, (String, String)> =
+            std::collections::BTreeMap::new();
+        for line in source.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            let Some(rest) = code.trim().strip_prefix("out property <color> ") else {
+                continue;
+            };
+            let Some((name, expr)) = rest.split_once(':') else {
+                continue;
+            };
+            let expr = expr.trim().trim_end_matches(';');
+            match expr.strip_prefix("dark ?") {
+                Some(branches) => {
+                    let Some((dark, light)) = branches.split_once(':') else {
+                        continue;
+                    };
+                    palette.insert(
+                        name.trim().to_string(),
+                        (
+                            dark.trim().to_string(),
+                            light.trim().trim_end_matches(';').trim().to_string(),
+                        ),
+                    );
+                }
+                None => {
+                    palette.insert(
+                        name.trim().to_string(),
+                        (expr.to_string(), expr.to_string()),
+                    );
+                }
+            }
+        }
+        assert!(
+            palette.len() > 20,
+            "theme palette looks empty ({} entries)",
+            palette.len()
+        );
+        palette
+    }
+
+    /// One side of a contrast pair resolved for one theme: a palette token's
+    /// value, or a literal used exactly as written. Literals are how the artwork
+    /// overlays are stated, and they are the only colours the theme cannot speak
+    /// for.
+    fn resolve<'a>(
+        name: &'a str,
+        palette: &'a std::collections::BTreeMap<String, (String, String)>,
+        dark: bool,
+    ) -> Option<&'a str> {
+        if name.starts_with('#') {
+            return Some(name);
+        }
+        let (dark_value, light_value) = palette.get(name)?;
+        Some(if dark {
+            dark_value.as_str()
+        } else {
+            light_value.as_str()
+        })
+    }
+
+    /// Every colour an expression paints with: `#rrggbb[aa]` literals as written,
+    /// and `Theme.<token>` references by their palette name.
+    ///
+    /// Stops at the terminating `;`, so the next property never leaks in.
+    fn colours_in(expr: &str) -> Vec<String> {
+        let expr = expr.split(';').next().unwrap_or(expr);
+        let mut out = Vec::new();
+        let mut rest = expr;
+        while let Some(at) = rest.find('#') {
+            let hex: String = rest[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit() || *c == '#')
+                .collect();
+            rest = &rest[at + hex.len()..];
+            if hex.len() >= 4 {
+                out.push(hex);
+            }
+        }
+        let mut rest = expr;
+        while let Some(at) = rest.find("Theme.") {
+            rest = &rest[at + "Theme.".len()..];
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if ident.is_empty() {
+                break;
+            }
+            rest = &rest[ident.len()..];
+            out.push(ident);
+        }
+        out
+    }
+
+    /// Rule: every surface the bookmark pill paints clears the glyph it carries.
+    ///
+    /// U2, verbatim: dark-mode hover set the pill's surface to `Theme.layer` while
+    /// the unmarked glyph is a fixed `#2b2b2b` — and `Theme.layer` *is* `#2b2b2b`
+    /// in dark. Contrast 1.00:1, so the glyph vanished, in the one state a pointer
+    /// produces and no capture outside a hover ever shows. Both colours are
+    /// deliberately fixed artwork overlays, so the palette table alone cannot see
+    /// the pair; this reads what the component paints instead. The rule is that
+    /// *no* surface the pill paints may reach its own ink, in either theme.
+    #[test]
+    fn bookmark_pill_keeps_its_glyph_visible() {
+        let palette = theme_palette();
+        let source = read(&ui_dir().join("components.slint"));
+        let Some(start) = source
+            .lines()
+            .position(|line| declared_component(line).as_deref() == Some("BookmarkPill"))
+        else {
+            panic!("components.slint declares no BookmarkPill; this rule has nothing to check");
+        };
+        let body = component_body(&source, start);
+
+        // The ink that does not follow the theme: the fixed literal the `tint`
+        // falls back to when unmarked. (`Theme.accent-fill` there is the *marked*
+        // ink — a question about that token, not about the surface.)
+        let mut ink: Vec<String> = Vec::new();
+        // Every colour the pill paints its own surface with, hover included.
+        let mut surfaces: Vec<String> = Vec::new();
+        for line in body.lines() {
+            let Some((name, expr)) = line.trim().split_once(':') else {
+                continue;
+            };
+            let colours = colours_in(expr);
+            match name.trim() {
+                // Every colour the glyph can be painted with, themed or literal:
+                // the marked ink used to be `Theme.accent-fill`, which is #4cb0f5 in
+                // dark mode and 2.38:1 on the pill. Filtering to literals hid it.
+                "tint" => ink.extend(colours),
+                "background" => surfaces.extend(colours),
+                _ => {}
+            }
+        }
+        assert!(!ink.is_empty(), "the pill paints no fixed glyph colour");
+        assert!(!surfaces.is_empty(), "the pill paints no surface");
+
+        let mut failures = Vec::new();
+        for theme_dark in [false, true] {
+            let mode = if theme_dark { "dark" } else { "light" };
+            for ink_name in &ink {
+                let Some(ink_rgb) = resolve(ink_name, &palette, theme_dark).and_then(parse_colour)
+                else {
+                    failures.push(format!("unresolvable glyph colour {ink_name}"));
+                    continue;
+                };
+                for surface_name in &surfaces {
+                    let Some(surface_rgb) =
+                        resolve(surface_name, &palette, theme_dark).and_then(parse_colour)
+                    else {
+                        failures.push(format!("unresolvable pill surface {surface_name}"));
+                        continue;
+                    };
+                    let ratio = contrast_ratio(ink_rgb, surface_rgb);
+                    if ratio < 3.0 {
+                        failures.push(format!(
+                            "{mode}: glyph {ink_name} on surface {surface_name} is {ratio:.2}:1"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "a pill whose surface reaches its own glyph is an invisible control; signal hover              with the border, never with a surface that can equal the ink:
+{}",
+            failures.join("
+")
         );
     }
 
