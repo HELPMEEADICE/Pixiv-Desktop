@@ -894,8 +894,10 @@ export component DetailPage inherits Rectangle {
             vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
 
             body := VerticalLayout {
-                // The content box, not the window: the vertical scrollbar is an
-                // overlay, so a child sized from the window would paint under it.
+                // The viewport width, the same expression `PageScroll` states for its own
+                // body. Slint's Fluent scrollbar is an overlay, so this is also the full
+                // width — but stating it from the viewport and not from the window keeps
+                // the content column out of any dependence on the scrollbar.
                 width: max(0px, body-scroll.visible-width);
 
                 if root.state == 1 : Rectangle {

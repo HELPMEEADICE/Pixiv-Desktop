@@ -203,24 +203,48 @@ export component GalleryPage inherits Rectangle {
                     overflow: elide;
                 }
 
-                if root.count-label != "" : Text {
-                    text: root.count-label;
-                    color: Theme.text-tertiary;
-                    font-size: Theme.font-small;
-                    vertical-alignment: center;
-                }
-
                 // The pointer-only way into selection mode, and the reason F2 does not
-                // depend on modifiers surviving `TouchArea.pointer-event`: one 32 px
-                // control that flips the mode the bar and the cards already understand.
-                // `kind` swaps so the button reads as a toggle, as WinUI's does.
-                AppButton {
-                    label: root.selection-mode ? "退出多选" : "多选";
-                    icon: root.selection-mode ? "close" : "check";
-                    kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
-                    compact: true;
-                    row-height: 32px;
-                    clicked => { root.toggle-selection-mode(); }
+                // depend on modifiers surviving `TouchArea.pointer-event`: one control
+                // that flips the mode the bar and the cards already understand. `kind`
+                // swaps so the button reads as a toggle, as WinUI's does.
+                //
+                // It is `compact` (26 px) and carries no `row-height`, and it shares one
+                // cell with the count label instead of becoming a third child of this
+                // `space-between` row: a 32 px control made the *row* 32 px tall (the
+                // 20 px title is 27), so every pixel below — the whole masonry — moved
+                // down with it. Measured by the visual gate: discovery 20.87 % over,
+                // rows 107..1112, which is a shifted page, not a new control.
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    alignment: end;
+
+                    if root.count-label != "" : Text {
+                        text: root.count-label;
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-small;
+                        vertical-alignment: center;
+                    }
+
+                    // A zero-height cell, so the 26 px pill cannot dictate the height of
+                    // a row whose height is the 20 px title\'s (23.3 px): measured, a
+                    // 32 px control in this row moved every pixel below it down by 10
+                    // logical px — discovery 20.87 % over, rows 107..1112, a shifted page
+                    // rather than a new control. The cell is `height: 0px` and the button
+                    // is lifted by one 4 px step onto the title\'s centre line; it overflows
+                    // its cell, which is legal because nothing here clips.
+                    Rectangle {
+                        width: select-toggle.width;
+                        height: 0px;
+
+                        select-toggle := AppButton {
+                            label: root.selection-mode ? "退出多选" : "多选";
+                            icon: root.selection-mode ? "close" : "check";
+                            kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
+                            compact: true;
+                            y: -Theme.space-1;
+                            clicked => { root.toggle-selection-mode(); }
+                        }
+                    }
                 }
             }
 
