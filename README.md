@@ -36,12 +36,17 @@ technology can reach are **measured, not reviewed**:
 of them drifts from its row; `tools/verify-visual.ps1` diffs 20 forced-demo
 captures against tracked baselines; `tools/verify-a11y.ps1` reads the UI
 Automation tree (roles, names, invokable patterns) and walks ten Tab stops with
-real keystrokes; and `cargo test` checks WCAG contrast ratios, the "no raw glyph
-outside the icon containers" rule, the `#RRGGBBAA` byte order of translucent
+real keystrokes; `tools/verify-focus.ps1` captures what those keystrokes produce and
+measures the 2px focus ring at each stop, reading the colour out of `ui/theme.slint`
+rather than restating it; `tools/verify-dpi.ps1` runs the scale ladder at 100/125/150/200%
+through Slint's own `SLINT_SCALE_FACTOR` and fails any scale whose decode target is
+below the drawn card size; and `cargo test` checks WCAG contrast ratios, the "no raw
+glyph outside the icon containers" rule, the `#RRGGBBAA` byte order of translucent
 colours, that every interactive component declares a role, that a focus scope sits
-under the click target, and that no `key-pressed` handler compares against a key
-*name*. All of it is described in [`docs/UI-NOTES.md`](docs/UI-NOTES.md) § 7–9
-and § 12.
+under the click target, that no `key-pressed` handler compares against a key
+*name*, and that every declared motion token has a user and no `animate` carries a
+literal duration. All of it is described in [`docs/UI-NOTES.md`](docs/UI-NOTES.md)
+§ 7–9, § 12 and § 13.
 
 The engineering record for the layout work — root causes, fixes and what could
 not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
@@ -182,6 +187,17 @@ pwsh -File tools/verify-visual.ps1
 # (roles, names, invokable patterns) and then walks ten Tab stops with real
 # keystrokes, asserting the numbers pinned in tools/a11y-budget.json.
 pwsh -File tools/verify-a11y.ps1          # -Report to measure without failing
+
+# ...and what those keystrokes produce on screen: presses Tab across three pages,
+# reads each focused element's rect from UI Automation and counts pixels of the
+# focus ring. Captures are additive, so an existing baseline is never overwritten.
+pwsh -File tools/verify-focus.ps1          # -MinPixels to force the failure path
+
+# the DPI ladder, both halves: four real scale factors measured from the app's own
+# trace, and a numeric sweep (1060 points, 168-300 logical px, 1/1.25/1.5/2x) that
+# fails any row whose decode target is below the drawn card. Exits 77 (SKIP) when
+# the app cannot start at all - a gate that cannot run here did not fail.
+pwsh -File tools/verify-dpi.ps1
 ```
 
 Hover and keyboard interaction are synthesised, not assumed: `tools/drive.ps1`
@@ -200,14 +216,15 @@ about layout.
 # every gate, in order, with per-gate timing - this is the list
 pwsh -File tools/gates.ps1
 
-# ...and the two measured UI gates as well. They are opt-in because they launch
+# ...and the four measured UI gates as well. They are opt-in because they launch
 # the app, read its accessibility tree and copy the screen, which a CI runner
-# without an interactive desktop cannot do.
+# without an interactive desktop cannot do. A gate that exits 77 is reported as
+# SKIP, not FAIL.
 pwsh -File tools/gates.ps1 -Ui
 
 # or one at a time
 cargo fmt --all -- --check
-cargo test --workspace                       # 269 tests, 13 of them source rules
+cargo test --workspace                       # 291 tests, 14 of them source rules
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)

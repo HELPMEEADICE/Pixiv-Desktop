@@ -5,6 +5,14 @@ what was already fixed. Rounds one to five measured the shell, the layout, the t
 the pointer and the accessible tree. This document says what is still wrong, in what
 order to fix it, and how each fix is proved.
 
+> **Status.** Phases 0 to 2 landed in this same session: F8, F1, F3, F9, F2 and the
+> verification half of F7 are fixed and guarded, and `docs/UI-NOTES.md` § 13 is the
+> record of how. Still open and unchanged by this round: F4 (populated download
+> queue), F5 (search-history wrap), F6 (the 8 px residue), and the tab order, which
+> turned out to be the more interesting defect (§ 13f). The remaining sections are
+> kept as written, because a plan edited after the fact stops being evidence of what
+> was planned.
+
 Every finding below cites a line in the current tree. A finding without a citation is
 an opinion and does not belong here.
 

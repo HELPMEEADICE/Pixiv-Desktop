@@ -681,6 +681,174 @@ now returns an empty history; the store is not read, not cleared.
 
 ---
 
+## 13. Round six: the two halves of the cover defect
+
+Round five ended by naming two items for the next round: the cover decode width and
+the 5 173-line `src/app.rs`. It named only half of the first one, and the half it
+missed was the worse half.
+
+### 13a. A cover was soft for one frame and stale for the life of the process
+
+Three faults had to line up, and they did.
+
+| Fault | Where | What it did |
+| --- | --- | --- |
+| the decode width came from a **guess** | `self.geometry` was seeded from `GridGeometry::for_width(858.0)`, and `spawn_covers` read `self.geometry.card_width` | covers were decoded for a card width no window had |
+| the geometry fix never reached the images | `on_measured` recomputed the geometry and never re-planned a cover | a cover decoded at the guessed tier stayed at that tier |
+| the cache called an undersized entry a **hit** | `load_sized`: "A cache hit needs pixels no wider than the request" | so even a re-request would have been answered with the same soft pixels |
+
+The third is the one that would have voided the fix. `ImageCache::forget` has to be
+called before every upgrade, and `a_wider_decode_through_the_cache_requires_a_forget_first`
+proves it against the real cache with a stub fetcher: 320 → request 352 → still 320,
+one fetch; `forget` → 352, two fetches.
+
+The seed was wrong in **both** directions, which is why softness was reported at some
+window sizes and not others:
+
+| window @150% | card (logical) | drawn (physical) | decode before | decode after | before | after |
+| --- | --- | --- | --- | --- | --- | --- |
+| 620x768 | 251.0 | 377 | 320 | **384** | magnified 1.18x | sharp |
+| 800x768 | 222.0 | 333 | 320 | **352** | magnified 1.04x | sharp |
+| 1024x768 | 173.5 | 261 | 320 | **288** | over-decoded 1.23x | 1.10x, sharp |
+| 1536x1152 | 195.7 | 294 | 320 | 320 | 1.09x | 1.09x |
+
+**This corrects § 12i.** Its numbers only reproduce at an 800-wide window: a 222
+logical card is what puts a cover in a 333 physical box, and 1024 is not that width.
+The label was wrong; the measurement under it was right.
+
+**Fix.** `ImageCache::pick(url, want)` returns the pixels *and* a `needs_upgrade`
+flag - the smallest entry at least `want` wide is a clean hit, otherwise the largest
+entry that still reaches three quarters comes back flagged, otherwise `None` so the
+caller decodes at the right size. `src/images.rs` holds the policy as pure functions
+(`tier_up`, `needs_redecode`, `Replan`); `CoverLoader` records the tier each drawn
+cover was decoded at, separately from the in-flight slots, because a re-plan frees a
+slot while the card still holds the old pixels; `on_measured` re-plans once per
+*settle* - a thread-local `slint::Timer` restarted by every measurement, 180 ms, where
+the restart *is* the debounce - and only when that settle crossed a tier; and both
+draw paths consult `pick`, so a cover that exists only in the cache is drawn *and*
+scheduled for upgrade.
+
+Nothing gates the first frame on a measurement. Requesting immediately at the current
+tier and upgrading on a crossing is strictly better than waiting, and it has no stall
+case - a page that never lays out would otherwise show nothing forever.
+
+Guards: `the_settled_target_never_undershoots_the_drawn_box` (8 body widths x 4
+scales, asserting `target_width >= ceil(card * scale)`),
+`decode_target_versus_drawn_card_width` (the table above, as a test), and the
+`forget` test named above.
+
+### 13b. Four pages moved, and the split is the evidence
+
+Re-baselining is where a round like this lies to itself, so the report is in shapes
+rather than in reassurance. After the fix `tools/verify-visual.ps1` reported **8 of
+20 captures differ**: `home`, `discovery`, `ranking` and `bookmarks`, in both themes,
+0.145-0.253 % of pixels over tolerance. `search`, `history`, `downloads`, `settings`,
+`detail` and `detail-error` were **byte-identical**.
+
+That split is the argument. The six that did not move are the pages with no cover
+grid; the four that did are the pages whose pixels *are* covers. No chrome, caption
+or rail pixel is in the diff.
+
+The cause is a property of the fixture, not of the renderer: a demo cover is
+generated *at the decode target* (`demo_raw(id, target, target, 0)`), so correcting
+the target re-renders the artwork. The direction is the point - 1024 goes from a 320
+decode to a 288 one, still above the 261 box so still sharp, with 19 % fewer pixels
+per cover; 800 goes from a 320 decode under a 333 box to a 352 one, which is the
+actual defect being fixed. Baselines were written by `-Update` from that measurement.
+
+### 13c. Two motion tokens, one `animate`, twelve now
+
+`Theme.motion-fast` and `Theme.motion` were declared in round one and `Theme.motion`
+was referenced nowhere; the whole UI had one `animate`. Five sites use them now -
+`ui/main.slint:642` (rail width), `ui/main.slint:745` (page host),
+`ui/components.slint:1442` and `:1838` (card covers), `:938` (InfoBar) - plus the
+focus ring on six primitives. Every duration is a token, every curve is `ease-out`,
+none is longer than 150 ms.
+
+**The safety argument is a number that did not move.** Before any re-baseline, 18 of
+20 captures were byte-identical and the other two (`settings`, which carries a live
+cache figure) differed by 0.0038 %, inside a 0.02 % tolerance. That is only possible
+if every animated property had reached its rest value. A page host whose entrance
+timer never fired would have produced a blank baseline, not a subtle diff - which is
+why the risk was allowed in the first place.
+
+Guard: `every_declared_motion_token_is_referenced_and_no_animate_uses_a_literal_duration`,
+proved in both directions by deliberate break - a literal `90ms` at `main.slint:745`
+and an unused `motion-unused-probe` token each failed with the file and the line named.
+The reference check is not a `contains`: `Theme.motion` is a prefix of
+`Theme.motion-fast`, so a dead `motion` token would have passed on its sibling's
+strength.
+
+### 13d. The file that no longer exists
+
+`src/app.rs` - 5 173 lines, `install_callbacks` 782 - is now 20 files under
+`src/app/`, the largest 664 lines, with `install_callbacks` a seven-line sequence of
+family calls. The largest file under `src/` overall is now `src/uiaudit.rs` at 1 085.
+
+Pure movement is a claim, so it was measured twice: the multiset of `fn` names in the
+old file and in the new tree is identical except for seven new `install` entry points,
+and the per-target test counts are unchanged (291 workspace-wide, +15 from this
+round).
+
+### 13e. Gates for two things five rounds said could not be measured
+
+§ 10 and § 12i both said keyboard and DPI were out of reach. Both statements were
+already partly stale, and neither had ever been tested to the end.
+
+* `tools/verify-focus.ps1` presses real Tab keys across three pages, reads each
+  focused element's UI Automation rect and counts pixels of the focus colour parsed
+  live out of `ui/theme.slint`. 30 stops: 27 show the ring, 3 are `Edit` fields that
+  pass on the field's `accent-fill` rule instead, 0 invisible. It captures each stop
+  additively. The failure path is real, not asserted: `-MinPixels 100000` makes every
+  stop `NONE` and exits 1.
+* `tools/verify-dpi.ps1` settles the DPI question. Slint reads `SLINT_SCALE_FACTOR` at
+  window creation (`i-slint-backend-winit-1.18.1/winitwindowadapter.rs:602`) and then
+  ignores the platform's own scale change, so the ladder *can* run here: four scales
+  measured live with `gap=0`, plus a numeric half that sweeps 1 060 points across
+  168-300 logical px at 1/1.25/1.5/2x and fails any row whose decode target is below
+  the drawn size. 0 rows.
+* the worktree gate runs first in `tools/gates.ps1` and fails on any path containing
+  `%`, the class a directory literally named `%SystemDrive%` came from. Proved by
+  creating one (`FAIL %X%`, exit 1) and removing it (pass).
+
+`tools/gates.ps1` now maps exit 77 to SKIP, because a gate that cannot run on this
+host is not a gate that failed, and prints both counts in the footer.
+
+**What the new gates cannot decide.** The focus walk reaches the same ten stops on
+every page: the command bar and the rail. `verify-a11y.ps1` reports `focusable` of
+14-44, so stops exist below the chrome and Tab never reaches them. The gate proves
+the ring, not the tab order. And the DPI table proves the *arithmetic* of
+`target_width` against the settled geometry - it cannot see the ordering bug in § 13a,
+because that one was about *when* the request happened, not how big it was.
+
+### 13f. What is still not verified here
+
+* **Tab does not reach a card.** Ten distinct stops on all eight pages against
+  `focusable` counts up to 44. Cards declare a `FocusScope` (§ 12b) and are announced
+  as `ListItem`, but nothing has ever focused one - not a capture, not a keystroke
+  walk. This is the next round's first item, and it is § 12a's shape again: the
+  semantic exists, the way to reach it does not.
+* **A populated download queue.** Unchanged from § 12i: the state mapping is tested,
+  the rows are patched in place, and no capture shows real rows.
+* **Hover.** Unchanged from § 10. `verify-focus.ps1` moves focus with real keys; a
+  pointer still cannot be synthesised, so a hover tint is still unmeasured.
+* **A real screen reader** reading the tree § 12a produced.
+* **Linux and macOS input paths.**
+* Resident cost: the 34 focus captures are 12.3 MB of tracked PNG. Worth trimming to
+  one representative stop per page before this directory doubles again.
+
+### 13g. One duplication found in review and closed
+
+`RawImage::to_slint` and the new `feed::cached_texture` had grown the same
+length-versus-height clamp with the same warning, because `RawImage`'s fields are
+private to `helpers.rs` and the draw path has to be synchronous. Two copies of an
+invariant drift, and this particular invariant exists because a short buffer used to
+shear every row (§ 12f). Both now call `helpers::rgba_to_slint`; the `debug_assert`
+stays on the decoded path only, where the decoder guarantees it. All 20 captures were
+byte-identical afterwards, which is the whole output a refactor like that should have.
+
+---
+
 ## Appendix: round-one limits (kept for the record)
 
 ### Not verified in round one
