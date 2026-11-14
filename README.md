@@ -104,6 +104,15 @@ worse than one that says what it does not know.
    `target/lint` so it always has artifacts to produce; a deliberate
    `bool_comparison` probe was used to prove it reports lints. CI runs plain
    `cargo clippy -D warnings` on an MSVC toolchain instead.
+
+   A second catch, found by pushing: **the local toolchain and CI's are different
+   versions, and one lint existed in only one of them.** `Atomic::<u64>::fetch_update`
+   is deprecated in 1.99 (renamed `try_update`) and is the only name in the 1.98 this
+   machine builds with, so a green local run pushed a red `Clippy` job. The code no
+   longer names either (a compare-exchange loop), and `tools/gates.ps1` re-runs its
+   lint gate through the newer toolchain when one is installed, reporting both
+   versions in the table. Planted back as a defect, the 1.98 gate passes and the 1.99
+   gate fails with the message CI printed — that experiment is what makes it a guard.
 3. **Bookmark and follow POSTs were confirmed end-to-end against a live account** — add,
    delete, follow and unfollow all mutate the real account, recorded in
    `docs/NETWORK-TEST-REPORT.md` row 8. They still never fake success: an error surfaces as
