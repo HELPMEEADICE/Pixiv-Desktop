@@ -1,0 +1,328 @@
+use super::*;
+
+/// One sentence a user can act on, per failure class.
+///
+/// The three cases that used to collapse into "网络错误" are genuinely different:
+/// a rejected cookie needs a new cookie, an unreachable host needs a network
+/// check, and a changed payload needs a bug report. Saying which one it is is the
+/// difference between a fixable problem and a shrug.
+/// Turn one stored history row into a feed card.
+///
+/// The history table only kept the id, title, author and cover URL, so every
+/// other field stays at its default instead of being fabricated — asking the
+/// network to enrich a local list would make the page fail whenever it is offline.
+pub(crate) fn history_illust(entry: &HistoryEntry) -> Illust {
+    Illust {
+        id: entry.illust_id.parse::<u64>().map(Id).unwrap_or(Id(0)),
+        title: entry.title.clone(),
+        kind: IllustKind::Illustration,
+        page_count: 1,
+        width: 0,
+        height: 0,
+        urls: IllustUrls {
+            regular: entry.thumb_url.clone(),
+            ..IllustUrls::default()
+        },
+        author: Author {
+            id: Id(0),
+            name: entry.author.clone(),
+            account: String::new(),
+            avatar: None,
+        },
+        tags: Vec::new(),
+        description: String::new(),
+        create_date: None,
+        bookmark: Bookmark::default(),
+        stats: IllustStats::default(),
+        x_restrict: 0,
+        sl: 0,
+        is_masked: false,
+        is_bookmarkable: true,
+    }
+}
+
+/// Re-validate the session loaded from disk before trusting it.
+///
+/// A stored cookie is a claim, not a fact: it may have been revoked in the
+/// browser months ago. This asks the server once at startup, quietly refreshes
+/// the account id and CSRF token when it is still good, and demotes the app to
+/// demo mode with an explanation when it is not.
+///
+/// A *network* failure is deliberately not treated as a dead session — being
+/// True when the capture harness asked for the demo data source.
+pub(crate) fn forced_demo() -> bool {
+    std::env::var_os("PIXIV_DESKTOP_DEMO").is_some()
+}
+
+/// Run `f` with the app handle on the UI thread.
+pub(crate) fn on_ui<F>(f: F)
+where
+    F: FnOnce(&Shared) + Send + 'static,
+{
+    let _ = invoke_from_event_loop(move || {
+        APP.with(|slot| {
+            let borrowed = slot.borrow();
+            if let Some(shared) = borrowed.as_ref() {
+                f(shared);
+            }
+        });
+    });
+}
+
+/// Raw pixels of a decoded image. `Send`, unlike `slint::Image`, and shares the
+/// cache's `Arc<[u8]>` instead of copying it.
+pub(crate) struct RawImage {
+    width: u32,
+    height: u32,
+    rgba: Arc<[u8]>,
+}
+
+impl RawImage {
+    pub(crate) fn to_slint(&self) -> slint::Image {
+        // The buffer is the only source of truth for how many pixels exist. A
+        // declared size that disagrees with it used to be copied with
+        // min(expected, len), which silently drew garbage: a buffer one row
+        // short left the last row black, and one row long sheared every row
+        // after the first. Neither is a picture and neither reported anything,
+        // so the invariant is checked here and the size is *derived* from the
+        // data instead of trusted.
+        debug_assert_eq!(
+            self.rgba.len(),
+            (self.width as usize) * (self.height as usize) * 4,
+            "cover buffer must be exactly width*height*4 bytes"
+        );
+        let width = self.width.max(1);
+        let mut height = self.height.max(1);
+        let stride = width as usize * 4;
+        let available = self.rgba.len() / stride;
+        if (height as usize) > available {
+            tracing::warn!(
+                width,
+                height,
+                bytes = self.rgba.len(),
+                "cover buffer is shorter than its declared size; drawing whole rows only"
+            );
+            height = available.max(1) as u32;
+        }
+        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+        let expected = (width as usize) * (height as usize) * 4;
+        let bytes = buffer.make_mut_bytes();
+        let len = expected.min(self.rgba.len());
+        bytes[..len].copy_from_slice(&self.rgba[..len]);
+        slint::Image::from_rgba8(buffer)
+    }
+}
+
+impl App {
+    pub(crate) fn ui(&self) -> AppWindow {
+        self.ui.upgrade().expect("window alive")
+    }
+}
+
+impl App {
+    /// Show a shell-level notification. The shell renders it above the status bar
+    /// so it is visible on every page — a bookmark result happens on the detail
+    /// page, a cache result on the settings page, and a page-local bar meant the
+    /// other one was silently invisible.
+    ///
+    /// Auto-dismisses after a few seconds, but only if the message has not been
+    /// replaced in the meantime (compared by value, so a second identical notice
+    /// still gets its own full timeout).
+    pub(crate) fn notify(&self, kind: i32, message: impl Into<slint::SharedString>) {
+        let message: slint::SharedString = message.into();
+        let ui = self.ui();
+        ui.set_notice(message.clone());
+        ui.set_notice_kind(kind);
+
+        let weak = self.ui.clone();
+        self.notice_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(4500),
+            move || {
+                if let Some(ui) = weak.upgrade()
+                    && ui.get_notice() == message
+                {
+                    ui.set_notice("".into());
+                }
+            },
+        );
+    }
+}
+
+/// Current page's intrinsic size, needed to clamp panning.
+pub(crate) fn current_image_size(ui: &AppWindow, app: &App) -> (f32, f32) {
+    let index = ui.get_detail_page_index().max(0) as usize;
+    if let Some(models) = &app.detail_models
+        && let Some(page) = models.row_data(index)
+    {
+        return (page.width.max(1) as f32, page.height.max(1) as f32);
+    }
+    (1.0, 1.0)
+}
+
+// ---------------------------------------------------------------- helpers
+
+/// Which image URL a reload of `index` should fetch.
+///
+/// A work with a page list has one real URL per page; a work without one has
+/// exactly one image, at the largest size the detail payload offered. Anything
+/// else is an index the page list does not have, and refusing is the honest
+/// answer - guessing a URL would download the wrong picture.
+pub(crate) fn retry_url(pages: &[PageMeta], largest: &str, index: usize) -> Option<String> {
+    match pages.get(index) {
+        Some(meta) => Some(meta.urls.regular.to_string()),
+        None if index == 0 => Some(largest.to_string()),
+        None => None,
+    }
+}
+
+/// Keep the covers the top of `order` still references; returns how many went.
+///
+/// `covers` holds one decoded texture per work ever shown and nothing removed an
+/// entry, so an hour of browsing kept every cover alive for the rest of the
+/// session. `keep` bounds it even for an endless feed: the top of the feed is what
+/// a column rebuild can paint without waiting.
+pub(crate) fn prune_covers(
+    covers: &mut HashMap<String, slint::Image>,
+    order: impl Iterator<Item = String>,
+    keep: usize,
+) -> usize {
+    let live: HashSet<String> = order.take(keep).collect();
+    let before = covers.len();
+    covers.retain(|id, _| live.contains(id));
+    before - covers.len()
+}
+
+/// The column that should take the next card: the shortest one, ties to the left.
+///
+/// `layout::distribute` makes the same choice when it lays out a whole feed;
+/// appending needs the rule on its own, against the heights already accumulated.
+/// (Passing a one-element slice to `distribute` looks equivalent and is not: every
+/// total starts at zero, so the tie always resolves to column 0.)
+pub(crate) fn shortest_column(heights: &[f32]) -> usize {
+    heights
+        .iter()
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+pub(crate) fn ranking_index(kind: RankingKind) -> i32 {
+    RankingKind::ALL
+        .iter()
+        .position(|candidate| *candidate == kind)
+        .map(|index| index as i32)
+        .unwrap_or(0)
+}
+
+pub(crate) fn persisted(store: &Store, key: &str) -> Option<String> {
+    store.get_setting(key).ok().flatten()
+}
+
+pub(crate) fn human_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{} MB", bytes / (1024 * 1024))
+    } else {
+        format!("{} KB", bytes / 1024)
+    }
+}
+
+pub(crate) fn illust_to_item(illust: &Illust, rank: i32) -> IllustItem {
+    IllustItem {
+        id: illust.id.to_string().into(),
+        title: illust.title.clone().into(),
+        author: illust.author.name.clone().into(),
+        author_id: illust.author.id.to_string().into(),
+        cover: slint::Image::default(),
+        kind: illust.kind.code(),
+        page_count: illust.page_count as i32,
+        bookmarked: illust.bookmark.bookmarked,
+        rank,
+        width: illust.width as i32,
+        height: illust.height as i32,
+        state: 1,
+        author_avatar: slint::Image::default(),
+        author_avatar_url: illust.author.avatar.clone().unwrap_or_default().into(),
+        // 1 while the payload named an avatar URL and it has not arrived yet; 2
+        // when there is no URL at all, which is the only case where drawing the
+        // initial is honest.
+        author_avatar_state: if illust.author.avatar.is_some() { 1 } else { 2 },
+    }
+}
+
+pub(crate) fn extension_for(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    for candidate in ["png", "webp", "gif", "jpeg", "jpg"] {
+        if lower.contains(&format!(".{candidate}")) {
+            return candidate.to_string();
+        }
+    }
+    "jpg".to_string()
+}
+
+pub(crate) async fn fetch_sized(cache: &ImageCache, url: &str, target: u32) -> Option<RawImage> {
+    if url.is_empty() {
+        return None;
+    }
+    let decoded = cache
+        .load_sized(url, Priority::Visible, Some(target))
+        .await
+        .ok()?;
+    Some(RawImage {
+        width: decoded.width,
+        height: decoded.height,
+        rgba: Arc::clone(&decoded.rgba),
+    })
+}
+
+pub(crate) async fn fetch_sized_viewer(cache: &ImageCache, url: &str) -> Option<RawImage> {
+    if url.is_empty() {
+        return None;
+    }
+    let decoded = cache
+        .load_sized(url, Priority::Visible, Some(VIEWER_MAX_WIDTH))
+        .await
+        .ok()?;
+    Some(RawImage {
+        width: decoded.width,
+        height: decoded.height,
+        rgba: Arc::clone(&decoded.rgba),
+    })
+}
+
+/// Decode a procedurally generated demo cover off the UI thread.
+pub(crate) async fn demo_raw(seed_id: Id, width: u32, height: u32, page: u64) -> Option<RawImage> {
+    let seed = seed_id.get().wrapping_add(page.wrapping_mul(7919));
+    let png = tokio::task::spawn_blocking(move || {
+        pixiv_demo::render_placeholder(width.clamp(64, 1400), height.clamp(64, 1400), seed)
+    })
+    .await
+    .ok()?;
+    let decoded = image::load_from_memory(&png).ok()?.to_rgba8();
+    let (w, h) = decoded.dimensions();
+    Some(RawImage {
+        width: w,
+        height: h,
+        rgba: Arc::from(decoded.into_raw()),
+    })
+}
+
+pub(crate) fn data_dir() -> PathBuf {
+    directories::ProjectDirs::from("dev", "pixivdesktop", "PixivDesktop")
+        .map(|dirs| dirs.data_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub(crate) fn downloads_dir() -> PathBuf {
+    directories::UserDirs::new()
+        .and_then(|dirs| dirs.picture_dir().map(|path| path.join("PixivDesktop")))
+        .unwrap_or_else(|| PathBuf::from("PixivDesktop"))
+}
+
+pub(crate) fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
