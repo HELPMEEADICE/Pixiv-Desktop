@@ -334,11 +334,24 @@ impl DiskTier {
     /// exceed what the counter still credits, so a bare `fetch_sub` would wrap to
     /// a value near `u64::MAX` and switch trimming off for good.
     fn subtract(&self, amount: u64) -> u64 {
-        self.bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(amount))
-            })
-            .unwrap_or(0)
+        // A compare-exchange loop rather than `fetch_update`: that method is
+        // deprecated in the toolchain CI pins (renamed `try_update`) and still the
+        // only name in the older one this machine builds with, so naming either
+        // would fail on the other. The loop needs neither, and it is the same
+        // arithmetic: clamp at zero, retry against whatever a racing writer left.
+        let mut current = self.bytes.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(amount);
+            match self.bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return current,
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 

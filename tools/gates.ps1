@@ -95,6 +95,15 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
 $driver = "C:\msys64\ucrt64\bin\clippy-driver.exe"
+# The version of Rust the CI runner installs, if this machine happens to carry it.
+#
+# Why this exists: the local MSYS2 toolchain is 1.98.1 and CI's `rust-toolchain@stable`
+# is newer. A lint that only the newer one knows is invisible here and fatal there -
+# measured: `Atomic::<u64>::fetch_update` is deprecated in 1.99 (`try_update`) and not
+# in 1.98, so a green local run pushed a red CI job. When this directory exists the
+# lint step re-runs the same check through it and reports both versions, so the
+# difference is a number in the gate output instead of a surprise after a push.
+$newerToolchain = "C:\Users\Administrator\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin"
 $results = @()
 $failed = $false
 
@@ -230,6 +239,42 @@ if (-not $failed -and $Lint -ne "Off") {
             $env:RUSTC_WORKSPACE_WRAPPER = $previous
             $env:CARGO_TARGET_DIR = $previousTarget
             $env:RUSTFLAGS = $previousFlags
+        }
+
+        # The same check through the newer toolchain, when this machine has one. It is
+        # skipped, not failed, when it is absent: a host without the toolchain cannot
+        # answer the question, and a SKIP is the honest verdict for that.
+        if (Test-Path (Join-Path $newerToolchain "cargo.exe")) {
+            $pRustc = $env:RUSTC
+            $pDoc = $env:RUSTDOC
+            $pWrap = $env:RUSTC_WORKSPACE_WRAPPER
+            $pTarget = $env:CARGO_TARGET_DIR
+            $pFlags = $env:RUSTFLAGS
+            $env:RUSTC = Join-Path $newerToolchain "rustc.exe"
+            $env:RUSTDOC = Join-Path $newerToolchain "rustdoc.exe"
+            $env:RUSTC_WORKSPACE_WRAPPER = Join-Path $newerToolchain "clippy-driver.exe"
+            $env:CARGO_TARGET_DIR = "target\lint-newer"
+            $env:RUSTFLAGS = "-D warnings"
+            try {
+                $newerVersion = (& (Join-Path $newerToolchain "rustc.exe") --version) -replace "rustc ", "" -replace " .*", ""
+                Invoke-Gate ("cargo check (clippy-driver) on rustc {0}, the version CI pins" -f $newerVersion) {
+                    $log = @(& (Join-Path $newerToolchain "cargo.exe") check --workspace --all-targets --locked --message-format short 2>&1 | ForEach-Object { "$_" })
+                    $code = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }
+                    $log | Select-Object -First 200 | Out-Host
+                    if ($log.Count -gt 200) { Write-Host ("  ... {0} more line(s) suppressed" -f ($log.Count - 200)) }
+                    $global:LASTEXITCODE = $code
+                } | Out-Null
+            }
+            finally {
+                $env:RUSTC = $pRustc
+                $env:RUSTDOC = $pDoc
+                $env:RUSTC_WORKSPACE_WRAPPER = $pWrap
+                $env:CARGO_TARGET_DIR = $pTarget
+                $env:RUSTFLAGS = $pFlags
+            }
+        }
+        else {
+            Write-Host ("  skipped: no second toolchain at {0}, so the CI version cannot be checked here" -f $newerToolchain) -ForegroundColor DarkYellow
         }
     }
     else {
