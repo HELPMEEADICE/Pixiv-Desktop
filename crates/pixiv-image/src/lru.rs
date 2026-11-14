@@ -8,6 +8,13 @@
 //! Each URL owns up to two slots — the uncapped pixels from [`crate::ImageCache::load`]
 //! and one downscaled variant from [`crate::ImageCache::load_sized`] — so a grid
 //! card and a full-screen viewer sharing a URL do not evict each other.
+//!
+//! Two selection rules live here, and they answer different questions.
+//! `MemoryTier::get` is the *load* path: the caller is about to store a result,
+//! so pixels already no wider than the request are a usable hit, and the entry
+//! it returns is never upscaled. `MemoryTier::probe_best` is the *draw* path:
+//! it asks whether what is cached is big enough for the box it is about to fill,
+//! and reports a shortfall instead of hiding it behind a clean hit.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -118,6 +125,87 @@ impl MemoryTier {
             .sized
             .filter(|idx| fits(*idx))
             .or_else(|| bucket.full.filter(|idx| fits(*idx)))
+    }
+
+    /// Probe for the best entry a `width`-wide box deserves, reporting a shortfall.
+    ///
+    /// Unlike `get`, a shortfall is a *fallback*, not a hit: the pixels come back
+    /// with `needs_upgrade` set, so the caller can schedule a decode at the right
+    /// size instead of magnifying a thumbnail for the life of the entry. Like
+    /// `get` it refreshes recency, and like `pick` it compares at most two slots,
+    /// so it never allocates.
+    pub(crate) fn probe_best(
+        &mut self,
+        url: &str,
+        width: u32,
+    ) -> Option<(Arc<DecodedImage>, bool)> {
+        let (idx, needs_upgrade) = {
+            let bucket = self.index.get(url)?;
+            Self::best_fit(bucket, &self.slots, width)?
+        };
+        let image = Arc::clone(&self.slots.get(idx)?.as_ref()?.image);
+        self.touch(idx);
+        Some((image, needs_upgrade))
+    }
+
+    /// The draw-path selection rule: which entry serves a `width`-wide box, and
+    /// is it actually big enough?
+    ///
+    /// Three outcomes, in order:
+    ///
+    /// 1. The *smallest* entry at least `width` wide. A clean hit: it is already
+    ///    big enough, so it is neither upscaled nor upgraded.
+    /// 2. Otherwise the largest entry, but only when it reaches three quarters of
+    ///    `width`. A 320 px entry in a 352 px box is 91% of the box, which the eye
+    ///    forgives for the frame a decode takes — but the caller is told, because
+    ///    the entry will never grow on its own.
+    /// 3. Otherwise nothing. A 280 px entry in a 400 px box is 70%, and a briefly
+    ///    empty card beats a blurry one: the caller should decode at 400.
+    fn best_fit(bucket: &Bucket, slots: &[Option<Slot>], width: u32) -> Option<(usize, bool)> {
+        // At most two candidates per URL, so this is a pair of comparisons and
+        // never touches the allocator.
+        let mut reaching: Option<(usize, u32)> = None;
+        let mut largest: Option<(usize, u32)> = None;
+        let mut source_is_small = false;
+        for idx in [bucket.sized, bucket.full].into_iter().flatten() {
+            let Some(slot) = slots.get(idx).and_then(Option::as_ref) else {
+                continue;
+            };
+            let natural = slot.image.width;
+            if natural >= width {
+                if reaching.is_none_or(|(_, best)| natural < best) {
+                    reaching = Some((idx, natural));
+                }
+            } else {
+                if slot.variant == Variant::Full {
+                    // Uncapped pixels narrower than the request: the artwork
+                    // itself is that small, so no decode can reach `width`.
+                    source_is_small = true;
+                }
+                if largest.is_none_or(|(_, best)| natural > best) {
+                    largest = Some((idx, natural));
+                }
+            }
+        }
+
+        if let Some((idx, _)) = reaching {
+            return Some((idx, false));
+        }
+        let (idx, natural) = largest?;
+        // Cross-multiplied rather than divided: no float on the hot path, and the
+        // boundary lands exactly on three quarters instead of a rounded 0.749.
+        if u64::from(natural) * 4 < u64::from(width) * 3 {
+            return None;
+        }
+        // `source_is_small` outranks the variant. A Full entry of 300 px means a
+        // 352 px decode would come back at 300 as well; only a Sized entry left
+        // short of its target has a wider source to go and get.
+        let upgrade = !source_is_small
+            && slots
+                .get(idx)
+                .and_then(Option::as_ref)
+                .is_some_and(|slot| slot.variant == Variant::Sized && slot.target_width < width);
+        Some((idx, upgrade))
     }
 
     /// Insert (or replace) one flavour of `url` and enforce the budget.

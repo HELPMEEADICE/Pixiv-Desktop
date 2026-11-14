@@ -41,6 +41,27 @@
 //! hot path (once per visible card per frame) and costs one mutex acquisition,
 //! one hash lookup, and four pointer writes — no allocation, ever.
 //!
+//! `peek` answers "is anything cached for this URL". [`ImageCache::pick`] answers
+//! the question a grid actually has: "is what is cached *big enough* for this
+//! box", and it answers it out loud. The rule:
+//!
+//! ```text
+//! pick(url, want) -> Option<Pick { image, needs_upgrade }>
+//!   smallest entry with width >= want      -> hit,      needs_upgrade = false
+//!   largest entry, if width * 4 >= want*3  -> fallback, needs_upgrade = true
+//!   nothing reaching three quarters        -> None — decode at `want` instead
+//! ```
+//!
+//! The middle row is the one that used to be silent. A 320 px variant once
+//! satisfied a 352 px request as a clean hit and was never replaced, so a cover
+//! stayed soft for the life of the cache entry rather than for one frame. Two
+//! refinements keep the flag honest: a hit is never upscaled, because an entry
+//! already at least `want` wide is handed back untouched; and a **Full** entry
+//! narrower than `want` reports `needs_upgrade = false`, because uncapped
+//! pixels that narrow mean the artwork itself is that small and a wider decode
+//! cannot help — only a **Sized** entry left short of its own target has a
+//! bigger source to go and fetch.
+//!
 //! # Testability
 //!
 //! The network step sits behind [`BytesFetcher`], so a test can inject a
@@ -281,6 +302,21 @@ impl fmt::Debug for Inner {
     }
 }
 
+/// The best cached pixels for a box, and whether they are big enough for it.
+///
+/// Returned by [`ImageCache::pick`]. The flag is the point: a caller that draws
+/// `image` and ignores `needs_upgrade` is drawing a magnified thumbnail and
+/// will keep doing so until the entry is evicted.
+#[derive(Debug, Clone)]
+pub struct Pick {
+    /// Pixels to draw now.
+    pub image: Arc<DecodedImage>,
+    /// `true` when `image` is narrower than the requested width but close
+    /// enough to draw (at least three quarters of it). The caller should
+    /// schedule a decode at the full width rather than keep this entry.
+    pub needs_upgrade: bool,
+}
+
 /// The cache itself.
 ///
 /// Cheap to clone: every clone shares one set of tiers, one flight table, and
@@ -337,6 +373,37 @@ impl ImageCache {
     #[must_use]
     pub fn peek(&self, url: &str) -> Option<Arc<DecodedImage>> {
         self.inner.memory.lock().get_any(url, None)
+    }
+
+    /// Best cached pixels for a `want`-wide box, saying whether they are enough.
+    ///
+    /// [`ImageCache::peek`] answers "is anything cached for this URL"; this
+    /// answers "is what is cached big enough", which is a different question and
+    /// the one a grid has. Same cost profile as `peek` — one mutex acquisition,
+    /// one hash lookup, two slot comparisons, no allocation — and the same
+    /// recency refresh, so what is on screen is what survives eviction. Like
+    /// `peek` it does not bump [`CacheStats::memory_hits`], because a frame
+    /// builder can call it per card per frame.
+    ///
+    /// ```text
+    /// smallest entry with width >= want      -> Some, needs_upgrade = false
+    /// largest entry, if width * 4 >= want*3  -> Some, needs_upgrade = true
+    /// nothing reaching three quarters        -> None — decode at `want`
+    /// ```
+    ///
+    /// The fallback row is the defect this method was added for: a 320 px
+    /// variant used to satisfy a 352 px request as a clean hit and was never
+    /// replaced, so the cover stayed soft for the life of the entry. A caller
+    /// that sees `needs_upgrade` should decode once at `want` and store the
+    /// result; the flag clears itself, because the entry that comes back then
+    /// reaches `want` and reports `false`.
+    #[must_use]
+    pub fn pick(&self, url: &str, want: u32) -> Option<Pick> {
+        let (image, needs_upgrade) = self.inner.memory.lock().probe_best(url, want)?;
+        Some(Pick {
+            image,
+            needs_upgrade,
+        })
     }
 
     /// Load an image: memory, then disk, then network. Coalesced per URL.
@@ -899,6 +966,126 @@ mod tests {
         assert_eq!(guarded.width, 32);
         assert_eq!(guarded.height, 16);
         assert!(Arc::ptr_eq(&guarded.rgba, &source.rgba));
+    }
+
+    /// A cache holding exactly one entry for `url`, populated through the real
+    /// load path so the fixtures carry the variant and `target_width` a live
+    /// entry would: `Some(w)` stores a Sized entry, `None` the uncapped one.
+    async fn cached(url: &str, source_width: u32, sized: Option<u32>) -> ImageCache {
+        let body = png_bytes(source_width, (source_width / 2).max(1), 4);
+        let fetcher = StubFetcher::new().with_body(url, body);
+        let cache = ImageCache::with_fetcher(memory_only(1 << 24, 1), fetcher);
+        cache
+            .load_sized(url, Priority::Visible, sized)
+            .await
+            .expect("load fixture");
+        cache
+    }
+
+    /// The defect this whole path exists for: a 320 px variant used to satisfy a
+    /// 352 px request as a *clean* hit and was never replaced, so a cover stayed
+    /// soft for the life of the entry. 320/352 is 91 % — drawable, not enough.
+    #[tokio::test]
+    async fn a_sized_entry_short_of_the_request_is_reported_as_an_upgrade() {
+        let cache = cached(URL_A, 320, Some(320)).await;
+        let pick = cache
+            .pick(URL_A, 352)
+            .expect("a 91% entry is still drawable");
+        assert_eq!(pick.image.width, 320);
+        assert!(
+            pick.needs_upgrade,
+            "a Sized entry under its target must ask for a wider decode"
+        );
+    }
+
+    /// The clean hit: pixels decoded for exactly this width.
+    #[tokio::test]
+    async fn a_sized_entry_at_the_request_width_is_a_clean_hit() {
+        let cache = cached(URL_A, 800, Some(352)).await;
+        let pick = cache.pick(URL_A, 352).expect("352 serves 352");
+        assert_eq!(pick.image.width, 352);
+        assert!(!pick.needs_upgrade);
+    }
+
+    /// An entry wider than the request is handed back untouched: no upscale, and
+    /// deliberately no downgrade to the nearer smaller entry either.
+    #[tokio::test]
+    async fn a_wider_entry_serves_the_request_without_being_touched() {
+        let cache = cached(URL_A, 800, Some(400)).await;
+        let pick = cache.pick(URL_A, 352).expect("400 serves 352");
+        assert_eq!(pick.image.width, 400, "the 400 entry is the one returned");
+        assert!(!pick.needs_upgrade);
+    }
+
+    /// A 280 px entry for a 400 px box is 70 %: below the tolerance, so the card
+    /// takes a placeholder for one frame instead of a blur for its lifetime.
+    #[tokio::test]
+    async fn an_entry_three_tenths_short_is_a_miss() {
+        let cache = cached(URL_A, 280, Some(280)).await;
+        assert!(
+            cache.pick(URL_A, 400).is_none(),
+            "a 30% shortfall must be a miss, not a quiet upscale"
+        );
+    }
+
+    /// Uncapped pixels narrower than the request are the artwork being small.
+    /// No decode can reach the width, so nothing is scheduled.
+    #[tokio::test]
+    async fn a_full_entry_narrower_than_the_request_needs_no_upgrade() {
+        let cache = cached(URL_A, 300, None).await;
+        let pick = cache.pick(URL_A, 352).expect("300 is 85% of 352");
+        assert_eq!(pick.image.width, 300);
+        assert!(
+            !pick.needs_upgrade,
+            "the source itself is 300px wide; a wider decode cannot help"
+        );
+    }
+
+    /// The tolerance boundary, exact: 300/400 is three quarters and accepted,
+    /// 299/400 is not. Written as a cross-multiplication in the rule, so this
+    /// test pins the arithmetic rather than a rounded divisor.
+    #[tokio::test]
+    async fn the_three_quarter_boundary_is_exact() {
+        let at = cached(URL_A, 300, Some(300)).await;
+        let pick = at.pick(URL_A, 400).expect("exactly 75% is inside");
+        assert_eq!(pick.image.width, 300);
+        assert!(pick.needs_upgrade, "Sized under its target still upgrades");
+
+        let below = cached(URL_B, 299, Some(299)).await;
+        assert!(below.pick(URL_B, 400).is_none(), "74.75% is outside");
+    }
+
+    /// Best fit, not recency and not insertion order: with a 320 px and a 400 px
+    /// entry for one URL, a 352 px box takes the 400 one both ways round.
+    #[tokio::test]
+    async fn best_fit_beats_insertion_order() {
+        let body = png_bytes(400, 200, 5);
+        let fetcher = StubFetcher::new()
+            .with_body(URL_A, body.clone())
+            .with_body(URL_B, body);
+        let cache = ImageCache::with_fetcher(memory_only(1 << 24, 1), fetcher);
+
+        // One URL sized then capped-full, the other the other way round, so
+        // neither ordering can be mistaken for "whatever was touched last".
+        cache
+            .load_sized(URL_A, Priority::Visible, Some(320))
+            .await
+            .expect("sized");
+        cache.load(URL_A, Priority::Visible).await.expect("full");
+        cache.load(URL_B, Priority::Visible).await.expect("full");
+        cache
+            .load_sized(URL_B, Priority::Visible, Some(320))
+            .await
+            .expect("sized");
+
+        for url in [URL_A, URL_B] {
+            let pick = cache.pick(url, 352).expect("a 400px entry reaches 352");
+            assert_eq!(
+                pick.image.width, 400,
+                "{url}: the smallest entry at least 352 wide is the 400 one"
+            );
+            assert!(!pick.needs_upgrade);
+        }
     }
 
     #[tokio::test]
