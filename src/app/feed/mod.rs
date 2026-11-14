@@ -524,25 +524,10 @@ impl App {
 /// that function - `RawImage`'s fields are private to `helpers.rs` - and this path
 /// has to be synchronous, because it runs while a column is being built.
 fn cached_texture(image: &pixiv_image::DecodedImage) -> slint::Image {
-    let width = image.width.max(1);
-    let mut height = image.height.max(1);
-    let stride = width as usize * 4;
-    let available = image.rgba.len() / stride;
-    if (height as usize) > available {
-        tracing::warn!(
-            width,
-            height,
-            bytes = image.rgba.len(),
-            "cached cover is shorter than its declared size; drawing whole rows only"
-        );
-        height = available.max(1) as u32;
-    }
-    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-    let expected = width as usize * height as usize * 4;
-    let bytes = buffer.make_mut_bytes();
-    let len = expected.min(image.rgba.len());
-    bytes[..len].copy_from_slice(&image.rgba[..len]);
-    slint::Image::from_rgba8(buffer)
+    // One implementation for both draw paths: a cache-served cover and a freshly
+    // decoded one must not disagree about what a short buffer means (UI-NOTES
+    // section 12f). Keep this a delegation; the clamp lives in helpers.
+    crate::app::helpers::rgba_to_slint(image.width, image.height, &image.rgba)
 }
 
 /// The four independent bands of the home page.

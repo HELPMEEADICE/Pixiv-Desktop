@@ -77,39 +77,49 @@ pub(crate) struct RawImage {
     rgba: Arc<[u8]>,
 }
 
+/// Draw RGBA bytes, deriving the height from the data instead of trusting it.
+///
+/// The buffer is the only source of truth for how many pixels exist. A declared
+/// size that disagrees with it used to be copied with `min(expected, len)`, which
+/// silently drew garbage: a buffer one row short left the last row black, and one
+/// row long sheared every row after the first. Neither is a picture and neither
+/// reported anything, so the size is clamped to whole rows and the clamp warns.
+///
+/// Both draw paths go through here - a freshly decoded cover (`RawImage`) and one
+/// served from the cache (`feed::cached_texture`) - because two copies of an
+/// invariant drift, and this one was already written twice in one round.
+pub(crate) fn rgba_to_slint(width: u32, height: u32, rgba: &[u8]) -> slint::Image {
+    let width = width.max(1);
+    let mut height = height.max(1);
+    let stride = width as usize * 4;
+    let available = rgba.len() / stride;
+    if (height as usize) > available {
+        tracing::warn!(
+            width,
+            height,
+            bytes = rgba.len(),
+            "image is shorter than its declared size; drawing whole rows only"
+        );
+        height = available.max(1) as u32;
+    }
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+    let expected = (width as usize) * (height as usize) * 4;
+    let bytes = buffer.make_mut_bytes();
+    let len = expected.min(rgba.len());
+    bytes[..len].copy_from_slice(&rgba[..len]);
+    slint::Image::from_rgba8(buffer)
+}
+
 impl RawImage {
     pub(crate) fn to_slint(&self) -> slint::Image {
-        // The buffer is the only source of truth for how many pixels exist. A
-        // declared size that disagrees with it used to be copied with
-        // min(expected, len), which silently drew garbage: a buffer one row
-        // short left the last row black, and one row long sheared every row
-        // after the first. Neither is a picture and neither reported anything,
-        // so the invariant is checked here and the size is *derived* from the
-        // data instead of trusted.
+        // The decoded path can assert what the cached path cannot: this buffer
+        // was produced by the decoder for exactly this size.
         debug_assert_eq!(
             self.rgba.len(),
             (self.width as usize) * (self.height as usize) * 4,
             "cover buffer must be exactly width*height*4 bytes"
         );
-        let width = self.width.max(1);
-        let mut height = self.height.max(1);
-        let stride = width as usize * 4;
-        let available = self.rgba.len() / stride;
-        if (height as usize) > available {
-            tracing::warn!(
-                width,
-                height,
-                bytes = self.rgba.len(),
-                "cover buffer is shorter than its declared size; drawing whole rows only"
-            );
-            height = available.max(1) as u32;
-        }
-        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-        let expected = (width as usize) * (height as usize) * 4;
-        let bytes = buffer.make_mut_bytes();
-        let len = expected.min(self.rgba.len());
-        bytes[..len].copy_from_slice(&self.rgba[..len]);
-        slint::Image::from_rgba8(buffer)
+        rgba_to_slint(self.width, self.height, &self.rgba)
     }
 }
 
