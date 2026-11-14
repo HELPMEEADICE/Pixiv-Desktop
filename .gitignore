@@ -23,3 +23,6 @@ target-rel/
 
 # Local probe / harness scratch (never part of the project).
 tools/_*
+
+# A path built from a literal, unexpanded %VARIABLE% is a bug in whatever wrote it, not a folder.
+%*/
