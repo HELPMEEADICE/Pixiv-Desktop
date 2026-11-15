@@ -932,7 +932,15 @@ mod tests {
                 if code.contains("background:") && code.contains("Theme.accent-fill") {
                     fills_with_accent = true;
                 }
-                if code.contains("Text {") {
+                // Label and BodyText are the app's text primitives (components.slint),
+                // so a component that draws through them draws text just as much as one
+                // that names Text directly. Without this line the rule silently stopped
+                // seeing the primitive the same commit standardised on, and a rule that
+                // checks nothing cannot fail.
+                if code.contains("Text {")
+                    || code.contains("Label {")
+                    || code.contains("BodyText {")
+                {
                     draws_text = true;
                 }
                 // The decidable half: ink written as a literal on a surface the
@@ -1369,5 +1377,204 @@ mod tests {
             }
         }
         found
+    }
+
+    // -----------------------------------------------------------------------
+    // Text alignment (round ten)
+    // -----------------------------------------------------------------------
+
+    /// One element block in a .slint file, by the byte range of its body.
+    struct ElementBlock {
+        name: String,
+        start: usize,
+        end: usize,
+        body: String,
+    }
+
+    /// Every "Name { ... }" block in a source, brace-matched and string/comment aware.
+    ///
+    /// The alignment rule below needs to know which *layout* a Text sits in, and that
+    /// is a nesting question the compiler will not answer for us. The scan records the
+    /// element name that precedes each opening brace and the byte range it owns, which
+    /// is all "is this text a direct child of a horizontal layout" needs.
+    fn element_blocks(source: &str) -> Vec<ElementBlock> {
+        let bytes = source.as_bytes();
+        let mut blocks = Vec::new();
+        let mut stack: Vec<(String, usize)> = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            let ch = bytes[cursor] as char;
+            // Skip line comments: prose in this project mentions braces.
+            if ch == '/' && bytes.get(cursor + 1) == Some(&b'/') {
+                while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                    cursor += 1;
+                }
+                continue;
+            }
+            // Skip string literals: a placeholder or a tip may carry a brace.
+            if ch == '"' {
+                cursor += 1;
+                while cursor < bytes.len() && bytes[cursor] != b'"' {
+                    if bytes[cursor] == b'\\' {
+                        cursor += 1;
+                    }
+                    cursor += 1;
+                }
+                cursor += 1;
+                continue;
+            }
+            if ch == '{' {
+                // The name is the identifier before the brace, so "if c : Text {" and
+                // a plain "Text {" both report Text.
+                let mut back = cursor;
+                while back > 0 && (bytes[back - 1] as char).is_whitespace() {
+                    back -= 1;
+                }
+                let mut start = back;
+                while start > 0 {
+                    let c = bytes[start - 1] as char;
+                    if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                        start -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                stack.push((source[start..back].to_string(), cursor));
+            } else if ch == '}' {
+                if let Some((name, open)) = stack.pop() {
+                    blocks.push(ElementBlock {
+                        name,
+                        start: open,
+                        end: cursor,
+                        body: source[open..cursor].to_string(),
+                    });
+                }
+            }
+            cursor += 1;
+        }
+        blocks.sort_by_key(|block| block.start);
+        blocks
+    }
+
+    /// The innermost block that encloses the given one.
+    fn enclosing_block<'a>(blocks: &'a [ElementBlock], block: &ElementBlock) -> Option<&'a ElementBlock> {
+        blocks
+            .iter()
+            .filter(|candidate| candidate.start < block.start && candidate.end > block.end)
+            .min_by_key(|candidate| candidate.end - candidate.start)
+    }
+
+    /// Rule: a Text that is a direct child of a HorizontalLayout states its
+    /// cross-axis alignment.
+    ///
+    /// The icon layer already has this rule applied to glyphs (a fixed-height child of
+    /// a horizontal layout is aligned to the start of the cross axis, not centred);
+    /// this is the same fact about text. A Text that is handed a height - which every
+    /// caption inside a 44px card footer is - puts its first line at the top of that
+    /// box, so the label sits 3-6px above the count beside it and the row reads as
+    /// misaligned. No offset fixes it: the box has to say where the line goes.
+    ///
+    /// "vertical-alignment: center" answers one line, "top" answers a wrapped
+    /// paragraph, and an explicit "y:" answers both by positioning the box. Text in a
+    /// VerticalLayout is exempt by construction: there the vertical axis is the
+    /// layout main axis, so the layout places the box.
+    #[test]
+    fn text_in_a_horizontal_row_states_its_cross_axis_alignment() {
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            for block in blocks.iter().filter(|block| block.name == "Text") {
+                let Some(parent) = enclosing_block(&blocks, block) else {
+                    continue;
+                };
+                if parent.name != "HorizontalLayout" {
+                    continue;
+                }
+                checked += 1;
+                let declares = block.body.contains("vertical-alignment")
+                    || block.body.lines().any(|line| {
+                        let code = line.split("//").next().unwrap_or("");
+                        code.trim_start().starts_with("y:")
+                    });
+                if !declares {
+                    let line = source[..block.start].lines().count() + 1;
+                    offenders.push(format!("{}:{}", path.display(), line));
+                }
+            }
+        }
+        assert!(
+            checked >= 4,
+            "expected to inspect several Text nodes directly inside a HorizontalLayout, found {checked}; the scan is broken, not the UI"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these Text nodes sit directly in a HorizontalLayout without stating where their line goes (add vertical-alignment: center for one line, top for a paragraph, or use Label): {offenders:?}"
+        );
+    }
+
+
+    /// Rule: the reader bounds are one pair of numbers in both languages.
+    ///
+    /// Theme declares the clamp bounds the settings sliders show;
+    /// crates/pixiv-novel/src/prefs.rs declares the ones that actually clamp the
+    /// stored value. Two copies of one range cannot be caught by the Slint compiler,
+    /// because the two live in different languages, so the gate reads both texts.
+    #[test]
+    fn reader_bounds_match_the_preference_model() {
+        let theme = read(&ui_dir().join("theme.slint"));
+        let prefs = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/pixiv-novel/src/prefs.rs"),
+        )
+        .expect("the reader preference model must exist");
+        // Only the declaration line: the name also appears in the clamp expression,
+        // where the next number belongs to a different constant.
+        let token = |source: &str, name: &str| -> f32 {
+            let line = source
+                .lines()
+                .find(|line| {
+                    let code = line.split("//").next().unwrap_or("");
+                    code.contains(name) && (code.contains('=') || code.contains(':'))
+                })
+                .unwrap_or_else(|| panic!("missing a declaration of {name}"));
+            // The *last* number on the declaration line, not the first: the type is
+            // "f32", whose digits would otherwise be read as the value (that is
+            // exactly what this rule reported before it was fixed: 14.0 read as 32).
+            let mut runs: Vec<String> = Vec::new();
+            let mut current = String::new();
+            for ch in line.chars() {
+                if ch.is_ascii_digit() || (ch == '.' && !current.is_empty()) {
+                    current.push(ch);
+                } else if !current.is_empty() {
+                    runs.push(std::mem::take(&mut current));
+                }
+            }
+            if !current.is_empty() {
+                runs.push(current);
+            }
+            let digits = runs
+                .pop()
+                .unwrap_or_else(|| panic!("no number on the declaration of {name}"));
+            digits.parse().unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
+        let pairs = [
+            ("reader-font-min", "MIN_FONT_SIZE"),
+            ("reader-font-max", "MAX_FONT_SIZE"),
+            ("reader-measure-min", "MIN_MAX_WIDTH"),
+            ("reader-measure-max", "MAX_MAX_WIDTH"),
+        ];
+        let mut mismatched = Vec::new();
+        for (theme_name, prefs_name) in pairs {
+            let shown = token(&theme, theme_name);
+            let enforced = token(&prefs, prefs_name);
+            if (shown - enforced).abs() > f32::EPSILON {
+                mismatched.push(format!("{theme_name}={shown} but {prefs_name}={enforced}"));
+            }
+        }
+        assert!(
+            mismatched.is_empty(),
+            "the reader sliders and the model that clamps them disagree: {mismatched:?}"
+        );
     }
 }
