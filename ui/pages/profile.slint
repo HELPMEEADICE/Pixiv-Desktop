@@ -6,11 +6,8 @@
 // detail call for the thumbnails. Nothing here is invented: a field the endpoint
 // did not send is simply not shown.
 
-import { Theme, Type } from "../theme.slint";
-import {
-    AppButton, ButtonKind, IconButton, IconSlot, PageScroll, StateView, StateKind, Skeleton,
-    ProgressBar, LoadingRow, Avatar, IllustItem, ProfileStatItem, BatchBar,
-} from "../components.slint";
+import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
+import { AppButton, ButtonKind, IconButton, IconSlot, PageScroll, StateView, StateKind, Skeleton, ProgressBar, LoadingRow, Avatar, IllustItem, ProfileStatItem, BatchBar, Label, BodyText } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
 
 export component ProfilePage inherits Rectangle {
@@ -197,13 +194,11 @@ export component ProfilePage inherits Rectangle {
                         spacing: Theme.space-2;
                         alignment: start;
 
-                        Text {
+                        Label {
+                            role: TextRole.Page;
+                            emphasis: Emphasis.Semibold;
                             text: root.user-name;
                             color: Theme.text;
-                            font-size: Theme.font-page;
-                            font-weight: Type.semibold;
-                            overflow: elide;
-                            vertical-alignment: center;
                         }
                         if root.premium : Rectangle {
                             width: premium-label.width + 12px;
@@ -223,12 +218,11 @@ export component ProfilePage inherits Rectangle {
                         }
                     }
 
-                    Text {
+                    Label {
+                        role: TextRole.Small;
                         text: (root.user-account == "" ? "" : "@" + root.user-account)
                             + (root.user-id == "" ? "" : "   UID " + root.user-id);
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-small;
-                        overflow: elide;
                     }
                 }
             }
@@ -308,28 +302,24 @@ export component ProfilePage inherits Rectangle {
                         for stat in root.stats : HorizontalLayout {
                             spacing: 4px;
                             alignment: start;
-                            Text {
+                            Label {
+                                role: TextRole.Small;
+                                emphasis: Emphasis.Semibold;
                                 text: stat.value;
                                 color: Theme.text;
-                                font-size: Theme.font-small;
-                                font-weight: Type.semibold;
-                                vertical-alignment: center;
-                                overflow: elide;
                             }
-                            Text {
+                            Label {
+                                role: TextRole.Caption;
                                 text: stat.label;
                                 color: Theme.text-tertiary;
-                                font-size: Theme.font-caption;
-                                vertical-alignment: center;
                             }
                         }
                     }
 
-                    if root.count-label != "" : Text {
+                    if root.count-label != "" : Label {
+                        role: TextRole.Caption;
                         text: root.count-label;
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-caption;
-                        vertical-alignment: center;
                     }
                 }
             }

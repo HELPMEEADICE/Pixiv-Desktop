@@ -13,12 +13,8 @@
 // back to it here is what made "为你推荐" show the same 50 works as 排行榜.
 
 import { ScrollView } from "std-widgets.slint";
-import { Theme, Type } from "../theme.slint";
-import {
-    AppButton, ButtonKind, IconSlot, TagChip, PageScroll, StateView, StateKind, Skeleton,
-    ProgressBar, LoadingRow, IllustItem, IllustCard, RecommendTagItem, RecommendUserItem, UserCard,
-    BatchBar,
-} from "../components.slint";
+import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
+import { AppButton, ButtonKind, IconSlot, TagChip, PageScroll, StateView, StateKind, Skeleton, ProgressBar, LoadingRow, IllustItem, IllustCard, RecommendTagItem, RecommendUserItem, UserCard, BatchBar, Label, BodyText } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
 
 /// A band header: title, one line of provenance, and an optional action.
@@ -40,19 +36,16 @@ component BandHeader inherits Rectangle {
             slot: Theme.icon-size;
             tint: Theme.accent-fill;
         }
-        Text {
+        Label {
+            role: TextRole.Small;
+            emphasis: Emphasis.Semibold;
             text: root.title;
             color: Theme.text;
-            font-size: Theme.font-small;
-            font-weight: Type.semibold;
-            vertical-alignment: center;
         }
-        Text {
+        Label {
+            role: TextRole.Caption;
             text: root.note;
             color: Theme.text-tertiary;
-            font-size: Theme.font-caption;
-            vertical-alignment: center;
-            overflow: elide;
             horizontal-stretch: 1;
         }
         if root.show-retry : AppButton {
@@ -194,19 +187,16 @@ export component HomePage inherits Rectangle {
                             slot: Theme.icon-size-lg;
                             tint: Theme.accent-fill;
                         }
-                        Text {
+                        Label {
+                            role: TextRole.Page;
+                            emphasis: Emphasis.Semibold;
                             text: "为你推荐";
                             color: Theme.text;
-                            font-size: Theme.font-page;
-                            font-weight: Type.semibold;
-                            vertical-alignment: center;
-                            overflow: elide;
                         }
-                        if root.count-label != "" : Text {
+                        if root.count-label != "" : Label {
+                            role: TextRole.Small;
                             text: root.count-label;
                             color: Theme.text-tertiary;
-                            font-size: Theme.font-small;
-                            vertical-alignment: center;
                         }
                     }
 
@@ -415,12 +405,11 @@ export component HomePage inherits Rectangle {
             // reached the header note. Both follow the artists band twelve lines
             // below: one 40 px line carrying the band's own message, so the band
             // does not collapse to a bare heading.
-            if root.latest-state == 2 : Text {
+            if root.latest-state == 2 : Label {
+                role: TextRole.Small;
                 height: 40px;
                 text: root.latest-message;
                 color: Theme.text-tertiary;
-                font-size: Theme.font-small;
-                vertical-alignment: center;
             }
 
             // The error line carries its own retry inside the band. BandHeader's
@@ -431,13 +420,11 @@ export component HomePage inherits Rectangle {
                 spacing: Theme.space-2;
                 alignment: start;
 
-                Text {
+                Label {
+                    role: TextRole.Small;
                     text: root.latest-message;
                     color: Theme.text-secondary;
-                    font-size: Theme.font-small;
-                    vertical-alignment: center;
                     horizontal-stretch: 1;
-                    overflow: elide;
                 }
                 AppButton {
                     label: "重试";
@@ -496,12 +483,11 @@ export component HomePage inherits Rectangle {
                 }
             }
 
-            if root.artists-state == 2 : Text {
+            if root.artists-state == 2 : Label {
+                role: TextRole.Small;
                 height: 40px;
                 text: root.artists-message;
                 color: Theme.text-tertiary;
-                font-size: Theme.font-small;
-                vertical-alignment: center;
             }
         }
 

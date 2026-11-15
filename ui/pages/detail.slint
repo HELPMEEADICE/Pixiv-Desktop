@@ -10,13 +10,9 @@
 // and Rust owns the transform, where it is unit tested in `src/zoom.rs`.
 
 import { ScrollView } from "std-widgets.slint";
-import { Theme, Type } from "../theme.slint";
+import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
 
-import {
-    AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind, Avatar,
-    Skeleton, HoverTip, InfoBar, InfoKind, PageScroll, ProgressBar, LoadingRow, SectionHeader,
-    IconPresenter, IconSlot, BookmarkMenu,
-} from "../components.slint";
+import { AppButton, IconButton, ButtonKind, TagChip, Badge, Divider, StateView, StateKind, Avatar, Skeleton, HoverTip, InfoBar, InfoKind, PageScroll, ProgressBar, LoadingRow, SectionHeader, IconPresenter, IconSlot, BookmarkMenu, Label, BodyText } from "../components.slint";
 
 /// One viewable page. `thumb` is the thumbnail-strip image; `source` is either
 /// the tier the cache currently has or empty while it loads.
@@ -136,10 +132,9 @@ export component ZoomViewer inherits Rectangle {
             }
             Rectangle { horizontal-stretch: 1; }
         }
-        Text {
+        Label {
             text: "图片加载失败";
             color: Theme.text-secondary;
-            font-size: Theme.font-body;
             horizontal-alignment: center;
         }
         HorizontalLayout {
@@ -163,10 +158,10 @@ export component ZoomViewer inherits Rectangle {
             Skeleton { width: 96px; height: 6px; radius: Theme.radius-pill; }
             Rectangle { horizontal-stretch: 1; }
         }
-        Text {
+        Label {
+            role: TextRole.Small;
             text: "正在载入图片…";
             color: Theme.text-tertiary;
-            font-size: Theme.font-small;
             horizontal-alignment: center;
         }
     }
@@ -226,11 +221,10 @@ export component ZoomViewer inherits Rectangle {
                 row-height: 36px;
                 clicked => { root.set-zoom(Math.max(0.2, root.zoom * 0.8)); }
             }
-            Text {
+            Label {
+                role: TextRole.Caption;
                 text: Math.round(root.scale * 100) + "%";
                 color: Theme.text-secondary;
-                font-size: Theme.font-caption;
-                vertical-alignment: center;
                 min-width: 44px;
                 horizontal-alignment: center;
             }
@@ -352,18 +346,15 @@ component InfoBody inherits VerticalLayout {
                 VerticalLayout {
                     alignment: center;
                     spacing: 0px;
-                    Text {
+                    Label {
+                        emphasis: Emphasis.Medium;
                         text: root.author;
                         color: Theme.text;
-                        font-size: Theme.font-body;
-                        font-weight: Type.medium;
-                        overflow: elide;
                     }
-                    Text {
+                    Label {
+                        role: TextRole.Caption;
                         text: "ID " + root.author-id;
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-caption;
-                        overflow: elide;
                     }
                 }
             }
@@ -496,11 +487,11 @@ component InfoBody inherits VerticalLayout {
 
     if root.tags.length > 0 : VerticalLayout {
         spacing: Theme.space-2;
-        Text {
+        Label {
+            role: TextRole.Caption;
+            emphasis: Emphasis.Semibold;
             text: "标签";
             color: Theme.text-tertiary;
-            font-size: Theme.font-caption;
-            font-weight: Type.semibold;
         }
         // Two chips per row, emitted as explicit cells. A horizontal ScrollView
         // was tried first (a strip fixed at 60px that grows a scrollbar as soon
@@ -788,13 +779,10 @@ export component DetailPage inherits Rectangle {
                     clicked => { root.back(); }
                 }
 
-                Text {
+                Label {
+                    emphasis: Emphasis.Medium;
                     text: root.title;
                     color: Theme.text;
-                    font-size: Theme.font-body;
-                    font-weight: Type.medium;
-                    vertical-alignment: center;
-                    overflow: elide;
                     horizontal-stretch: 1;
                 }
 
@@ -831,12 +819,11 @@ export component DetailPage inherits Rectangle {
                         root.toggle-playback();
                     }
                 }
-                if root.film-ready && root.film-count > 0 : Text {
+                if root.film-ready && root.film-count > 0 : Label {
+                    role: TextRole.Caption;
                     text: "第 " + Math.min(root.film-index + 1, root.film-count)
                         + " / " + root.film-count + " 帧";
                     color: Theme.text-secondary;
-                    font-size: Theme.font-caption;
-                    vertical-alignment: center;
                 }
 
                 IconButton {

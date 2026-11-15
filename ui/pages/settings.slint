@@ -14,11 +14,8 @@
 // stores only the resulting session cookie, validated against a real endpoint
 // before it is trusted.
 
-import { Theme, Type, ThemeMode } from "../theme.slint";
-import {
-    AppButton, ButtonKind, ToggleSwitch, Divider, Badge, TextField, InfoBar, InfoKind,
-    PageScroll, SettingsCard, SettingsRow, SegmentedControl, IconSlot,
-} from "../components.slint";
+import { Theme, Type, ThemeMode, Emphasis, TextRole } from "../theme.slint";
+import { AppButton, ButtonKind, ToggleSwitch, Divider, Badge, TextField, InfoBar, InfoKind, PageScroll, SettingsCard, SettingsRow, SegmentedControl, IconSlot, Label, BodyText } from "../components.slint";
 
 export component SettingsPage inherits Rectangle {
     // No theme mirror here: the page reads `Theme.mode` / `Theme.dark` straight
@@ -77,11 +74,11 @@ export component SettingsPage inherits Rectangle {
         VerticalLayout {
             spacing: Theme.space-1;
             padding-top: Theme.space-1;
-            Text {
+            Label {
+                role: TextRole.Page;
+                emphasis: Emphasis.Semibold;
                 text: "设置";
                 color: Theme.text;
-                font-size: Theme.font-page;
-                font-weight: Type.semibold;
             }
             Text {
                 text: "账户、外观、缓存、下载与本地数据";
@@ -203,10 +200,9 @@ export component SettingsPage inherits Rectangle {
 
             VerticalLayout {
                 spacing: Theme.space-2;
-                Text {
+                Label {
                     text: "主题";
                     color: Theme.text;
-                    font-size: Theme.font-body;
                 }
                 Text {
                     text: Theme.mode == ThemeMode.System
@@ -255,12 +251,11 @@ export component SettingsPage inherits Rectangle {
                 label: "内存上限";
                 available-width: page.body-width;
                 hint: "超出后按最近最少使用淘汰";
-                Text {
+                Label {
+                    role: TextRole.Small;
                     text: root.memory-mb + " MB";
                     color: Theme.text-secondary;
-                    font-size: Theme.font-small;
                     horizontal-alignment: right;
-                    vertical-alignment: center;
                 }
             }
             Divider { }
@@ -268,12 +263,11 @@ export component SettingsPage inherits Rectangle {
                 label: "磁盘上限";
                 available-width: page.body-width;
                 hint: "超出后自动清理最旧的缓存文件";
-                Text {
+                Label {
+                    role: TextRole.Small;
                     text: root.disk-mb + " MB";
                     color: Theme.text-secondary;
-                    font-size: Theme.font-small;
                     horizontal-alignment: right;
-                    vertical-alignment: center;
                 }
             }
         }
@@ -296,10 +290,9 @@ export component SettingsPage inherits Rectangle {
             Divider { }
             VerticalLayout {
                 spacing: Theme.space-2;
-                Text {
+                Label {
                     text: "文件名模板";
                     color: Theme.text;
-                    font-size: Theme.font-body;
                 }
                 Text {
                     text: "可用占位符：{illust_id} {title} {author} {page} {page_count}";
@@ -385,12 +378,10 @@ export component SettingsPage inherits Rectangle {
             HorizontalLayout {
                 spacing: Theme.space-2;
                 alignment: start;
-                Text {
+                Label {
+                    emphasis: Emphasis.Semibold;
                     text: "Pixiv Desktop";
                     color: Theme.text;
-                    font-size: Theme.font-body;
-                    font-weight: Type.semibold;
-                    vertical-alignment: center;
                 }
                 Badge { label: root.app-version; fill: Theme.layer-alt; ink: Theme.text-secondary; }
             }

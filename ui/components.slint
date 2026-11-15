@@ -12,10 +12,81 @@
 //     cause of the horizontal-scrollbar/blank-space class of bugs — so every
 //     text node here has an explicit width or an overflow policy.
 
-import { Theme, Type } from "theme.slint";
+import { Theme, Type, Emphasis, TextRole } from "theme.slint";
 import { Tip, TipSide } from "tip.slint";
 import { FluentGlyph } from "icons.slint";
 import { ScrollView } from "std-widgets.slint";
+
+// ======================================================================
+// Type — the two ways the app is allowed to size text
+// ======================================================================
+//
+// Everything else in this file, and every page, draws text through one of these
+// two. The reason is not tidiness: before them each call site repeated
+// `font-size: Theme.font-small; vertical-alignment: center;` and the copies had
+// already drifted - a caption that filled its row, a subtitle that did not, one
+// label bold in the rail and regular in the palette. A role names the step; the
+// component supplies the metrics that must travel with it.
+//
+// Two components, not one, because the split is a *rendering* decision in Slint:
+//   * `Label` is single-line (elided) and keeps the natural line height. That is
+//     what keeps it on Slint's simple-text path, which the feed needs: one
+//     masonry column draws ~40 of them.
+//   * `BodyText` wraps, and wrapping is the only case where a line-height factor
+//     buys anything. It is what a paragraph, an about text and the reader use.
+
+/// One line of UI text, sized and weighted by role.
+///
+/// `vertical-alignment: center` is not cosmetic and not overridable by accident:
+/// a `Text` given a fixed height is placed at the *start* of its box, so a 14px
+/// label in a 36px row sits 11px above the row's centre line, and that is the
+/// class of defect this whole layer exists to remove. A caller that genuinely
+/// wants top alignment asks `BodyText` instead.
+export component Label inherits Text {
+    in property <TextRole> role: TextRole.Body;
+    in property <Emphasis> emphasis: Emphasis.Regular;
+
+    font-size: root.role == TextRole.Caption ? Theme.font-caption
+        : root.role == TextRole.Small ? Theme.font-small
+        : root.role == TextRole.Body ? Theme.font-body
+        : root.role == TextRole.Subhead ? Theme.font-subhead
+        : root.role == TextRole.Title ? Theme.font-title
+        : root.role == TextRole.Page ? Theme.font-page
+        : Theme.font-display;
+    font-weight: root.emphasis == Emphasis.Medium ? Type.medium
+        : root.emphasis == Emphasis.Semibold ? Type.semibold
+        : root.emphasis == Emphasis.Bold ? Type.bold
+        : Type.regular;
+    vertical-alignment: center;
+    overflow: elide;
+    wrap: no-wrap;
+}
+
+/// Wrapped text: a paragraph, a description, a reader block.
+///
+/// The role picks the size and the leading together (`Theme.line-body`,
+/// `Theme.line-small`) so a wrapped block can never be set solid while its
+/// sibling is not. `vertical-alignment: top` because a paragraph grows downward
+/// from its first line - centring it would move the first line whenever the last
+/// one wrapped.
+export component BodyText inherits Text {
+    in property <TextRole> role: TextRole.Body;
+    in property <Emphasis> emphasis: Emphasis.Regular;
+
+    font-size: root.role == TextRole.Caption ? Theme.font-caption
+        : root.role == TextRole.Small ? Theme.font-small
+        : root.role == TextRole.Subhead ? Theme.font-subhead
+        : root.role == TextRole.Title ? Theme.font-title
+        : Theme.font-body;
+    font-weight: root.emphasis == Emphasis.Medium ? Type.medium
+        : root.emphasis == Emphasis.Semibold ? Type.semibold
+        : root.emphasis == Emphasis.Bold ? Type.bold
+        : Type.regular;
+    line-height-factor: root.role == TextRole.Caption || root.role == TextRole.Small
+        ? Theme.line-small : Theme.line-body;
+    vertical-alignment: top;
+    wrap: word-wrap;
+}
 
 // ======================================================================
 // Icons — the one place a glyph is positioned
@@ -241,15 +312,12 @@ export component AppButton inherits Rectangle {
                 enabled: root.enabled;
             }
 
-            Text {
+            Label {
+                emphasis: Emphasis.Medium;
                 text: root.label;
                 color: (root.kind == ButtonKind.Primary) ? Theme.on-accent
                     : (root.kind == ButtonKind.Danger) ? Theme.danger
                     : Theme.text;
-                font-size: Theme.font-body;
-                font-weight: Type.medium;
-                vertical-alignment: center;
-                overflow: elide;
             }
         }
 
@@ -499,18 +567,15 @@ export component TextField inherits Rectangle {
     // TextInput has no placeholder of its own, so it is drawn underneath with an
     // explicit width: a bare Text would report the full placeholder width as a
     // minimum for the whole field.
-    if root.text == "" : Text {
+    if root.text == "" : Label {
         x: root.text-x;
         // Same box, same centre line as the TextInput above: the placeholder is
         // drawn *underneath* the real text and the two must not drift apart.
         y: 2px;
         width: max(0px, root.width - root.text-x - root.trailing-extent);
         height: root.height - 4px;
-        overflow: elide;
         text: root.placeholder;
         color: Theme.text-tertiary;
-        font-size: Theme.font-body;
-        vertical-alignment: center;
     }
 
     if root.text != "" && root.enabled : IconButton {
@@ -676,13 +741,11 @@ export component SegmentedControl inherits Rectangle {
                 padding-left: Theme.space-3;
                 padding-right: Theme.space-3;
                 alignment: center;
-                Text {
+                Label {
+                    role: TextRole.Small;
                     text: item;
                     color: i == root.current ? Theme.text : Theme.text-secondary;
-                    font-size: Theme.font-small;
                     font-weight: i == root.current ? Type.semibold : Type.regular;
-                    vertical-alignment: center;
-                    overflow: elide;
                 }
             }
 
@@ -729,12 +792,11 @@ export component Badge inherits Rectangle {
         padding-left: 6px;
         padding-right: 6px;
         alignment: center;
-        Text {
+        Label {
+            role: TextRole.Caption;
+            emphasis: Emphasis.Semibold;
             text: root.label;
             color: root.ink;
-            font-size: Theme.font-caption;
-            font-weight: Type.semibold;
-            vertical-alignment: center;
         }
     }
 }
@@ -797,17 +859,14 @@ export component NavItem inherits Rectangle {
         tint: root.selected ? Theme.accent-ink : Theme.text-secondary;
     }
 
-    if !root.compact : Text {
+    if !root.compact : Label {
         x: root.inset + Theme.icon-size + Theme.space-3;
         y: 0px;
         width: max(0px, root.width - self.x - (root.badge > 0 ? 44px : Theme.space-2));
         height: root.height;
         text: root.label;
         color: root.selected ? Theme.accent-ink : Theme.text;
-        font-size: Theme.font-body;
         font-weight: root.selected ? Type.semibold : Type.regular;
-        vertical-alignment: center;
-        overflow: elide;
     }
 
     if !root.compact && root.badge > 0 : Badge {
@@ -945,12 +1004,10 @@ export component TagChip inherits Rectangle {
         padding-left: Theme.space-3;
         padding-right: Theme.space-3;
         alignment: center;
-        Text {
+        Label {
+            role: TextRole.Small;
             text: root.label;
             color: root.active ? Theme.accent-ink : Theme.text-secondary;
-            font-size: Theme.font-small;
-            vertical-alignment: center;
-            overflow: elide;
             // A chip must never be squeezed by the strip it sits in: without this
             // the horizontal scroller compressed every chip to fit the viewport and
             // elided the labels ("…"), which also meant the strip had nothing to
@@ -1018,20 +1075,16 @@ export component SectionHeader inherits Rectangle {
             alignment: center;
             spacing: 2px;
             horizontal-stretch: 1;
-            Text {
+            Label {
+                role: TextRole.Title;
+                emphasis: Emphasis.Semibold;
                 text: root.title;
                 color: Theme.text;
-                font-size: Theme.font-title;
-                font-weight: Type.semibold;
-                vertical-alignment: center;
-                overflow: elide;
             }
-            if root.subtitle != "" : Text {
+            if root.subtitle != "" : Label {
+                role: TextRole.Small;
                 text: root.subtitle;
                 color: Theme.text-tertiary;
-                font-size: Theme.font-small;
-                vertical-alignment: center;
-                overflow: elide;
             }
         }
 
@@ -1193,10 +1246,10 @@ export component LoadingRow inherits Rectangle {
             Rectangle { horizontal-stretch: 1; }
         }
 
-        if root.label != "" : Text {
+        if root.label != "" : Label {
+            role: TextRole.Caption;
             text: root.label;
             color: Theme.text-tertiary;
-            font-size: Theme.font-caption;
             horizontal-alignment: center;
         }
     }
@@ -1682,10 +1735,10 @@ export component IllustCard inherits Rectangle {
                         }
                         Rectangle { horizontal-stretch: 1; }
                     }
-                    Text {
+                    Label {
+                        role: TextRole.Caption;
                         text: "加载失败";
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-caption;
                         horizontal-alignment: center;
                     }
                 }
@@ -1786,17 +1839,15 @@ export component IllustCard inherits Rectangle {
         Rectangle {
             height: Theme.card-caption-height;
 
-            Text {
+            Label {
+                role: TextRole.Small;
+                emphasis: Emphasis.Medium;
                 x: 0px;
                 y: 4px;
                 width: parent.width;
                 height: 18px;
                 text: root.item.title;
                 color: Theme.text;
-                font-size: Theme.font-small;
-                font-weight: Type.medium;
-                overflow: elide;
-                vertical-alignment: center;
             }
             if root.show-author : Rectangle {
                 x: 0px;
@@ -1813,15 +1864,13 @@ export component IllustCard inherits Rectangle {
                     fallback: root.item.author;
                     border-width: 0px;
                 }
-                Text {
+                Label {
+                    role: TextRole.Caption;
                     x: 21px;
                     y: 0px;
                     width: max(0px, parent.width - 21px);
                     text: root.item.author;
                     color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    overflow: elide;
-                    vertical-alignment: center;
                 }
                 // The author's own hit target, declared last so it wins the
                 // hit-test against the card's open-on-click area.
@@ -1913,12 +1962,11 @@ export component SettingsCard inherits Rectangle {
             title-block := VerticalLayout {
                 spacing: 2px;
                 horizontal-stretch: 1;
-                Text {
+                Label {
+                    role: TextRole.Subhead;
+                    emphasis: Emphasis.Semibold;
                     text: root.title;
                     color: Theme.text;
-                    font-size: Theme.font-subhead;
-                    font-weight: Type.semibold;
-                    overflow: elide;
                 }
                 if root.description != "" : Text {
                     text: root.description;
@@ -1966,12 +2014,9 @@ export component SettingsRow inherits Rectangle {
             // would shrink to its own width and float in the middle of the label
             // column, which is what put settings labels ~180px in from the card
             // edge. Labels are left-aligned; only their inline box is centred.
-            Text {
+            Label {
                 text: root.label;
                 color: Theme.text;
-                font-size: Theme.font-body;
-                vertical-alignment: center;
-                overflow: elide;
             }
             if root.hint != "" : Text {
                 text: root.hint;
@@ -2120,18 +2165,16 @@ export component UserCard inherits Rectangle {
             VerticalLayout {
                 spacing: 0px;
                 horizontal-stretch: 1;
-                Text {
+                Label {
+                    role: TextRole.Small;
+                    emphasis: Emphasis.Semibold;
                     text: root.item.name;
                     color: Theme.text;
-                    font-size: Theme.font-small;
-                    font-weight: Type.semibold;
-                    overflow: elide;
                 }
-                Text {
+                Label {
+                    role: TextRole.Caption;
                     text: root.item.account == "" ? "" : "@" + root.item.account;
                     color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    overflow: elide;
                 }
             }
         }
@@ -2231,15 +2274,13 @@ export component BatchBar inherits Rectangle {
         spacing: Theme.space-2;
         alignment: start;
 
-        Text {
+        Label {
+            role: TextRole.Small;
+            emphasis: Emphasis.Semibold;
             // The count is the only thing in the bar that may shrink: every button
             // keeps its own width, so a narrow page never elides a verb.
             text: "已选择 " + root.count + " 项";
             color: Theme.text;
-            font-size: Theme.font-small;
-            font-weight: Type.semibold;
-            vertical-alignment: center;
-            overflow: elide;
             min-width: 64px;
         }
 
@@ -2337,12 +2378,10 @@ component MenuRow inherits Rectangle {
             }
         }
 
-        Text {
+        Label {
+            role: TextRole.Small;
             text: root.label;
             color: root.destructive ? Theme.danger : (root.checked ? Theme.accent-ink : Theme.text);
-            font-size: Theme.font-small;
-            vertical-alignment: center;
-            overflow: elide;
             horizontal-stretch: 1;
         }
     }

@@ -13,12 +13,8 @@
 // exactly as wide as the viewport (see `PageScroll` in components.slint).
 
 import { ScrollView } from "std-widgets.slint";
-import { Theme, Type } from "../theme.slint";
-import {
-    IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton,
-    ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard,
-    BatchBar,
-} from "../components.slint";
+import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
+import { IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton, ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard, BatchBar, Label, BodyText } from "../components.slint";
 
 /// The masonry columns themselves. No scroll view, no header: callers embed this
 /// inside their own scroll body so the grid can sit under page-specific content.
@@ -202,13 +198,11 @@ export component GalleryPage inherits Rectangle {
                 // preferred width and the whole header drifted to the right edge.
                 alignment: space-between;
 
-                Text {
+                Label {
+                    role: TextRole.Page;
+                    emphasis: Emphasis.Semibold;
                     text: root.title;
                     color: Theme.text;
-                    font-size: Theme.font-page;
-                    font-weight: Type.semibold;
-                    vertical-alignment: center;
-                    overflow: elide;
                 }
 
                 // The pointer-only way into selection mode, and the reason F2 does not
@@ -226,11 +220,10 @@ export component GalleryPage inherits Rectangle {
                     spacing: Theme.space-2;
                     alignment: end;
 
-                    if root.count-label != "" : Text {
+                    if root.count-label != "" : Label {
+                        role: TextRole.Small;
                         text: root.count-label;
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-small;
-                        vertical-alignment: center;
                     }
 
                     // A zero-height cell, so the 26 px pill cannot dictate the height of
@@ -256,11 +249,10 @@ export component GalleryPage inherits Rectangle {
                 }
             }
 
-            if root.subtitle != "" : Text {
+            if root.subtitle != "" : Label {
+                role: TextRole.Small;
                 text: root.subtitle;
                 color: Theme.text-secondary;
-                font-size: Theme.font-small;
-                overflow: elide;
             }
         }
 
@@ -332,20 +324,17 @@ export component GalleryPage inherits Rectangle {
             HorizontalLayout {
                 spacing: Theme.space-2;
                 alignment: start;
-                Text {
+                Label {
+                    role: TextRole.Small;
+                    emphasis: Emphasis.Semibold;
                     text: "推荐画师";
                     color: Theme.text;
-                    font-size: Theme.font-small;
-                    font-weight: Type.semibold;
-                    vertical-alignment: center;
                 }
-                Text {
+                Label {
+                    role: TextRole.Caption;
                     text: "来自 /ajax/discovery/users，点击进入作者主页";
                     color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    vertical-alignment: center;
                     horizontal-stretch: 1;
-                    overflow: elide;
                 }
             }
 
@@ -387,20 +376,17 @@ export component GalleryPage inherits Rectangle {
                 spacing: Theme.space-2;
                 alignment: start;
 
-                Text {
+                Label {
+                    role: TextRole.Small;
+                    emphasis: Emphasis.Semibold;
                     text: "推荐画师";
                     color: Theme.text;
-                    font-size: Theme.font-small;
-                    font-weight: Type.semibold;
-                    vertical-alignment: center;
                 }
-                Text {
+                Label {
+                    role: TextRole.Caption;
                     text: root.recommend-users-message;
                     color: Theme.text-secondary;
-                    font-size: Theme.font-caption;
-                    vertical-alignment: center;
                     horizontal-stretch: 1;
-                    overflow: elide;
                 }
                 AppButton {
                     label: "重试";
@@ -476,11 +462,11 @@ export component GalleryPage inherits Rectangle {
                 if root.state == 2 && root.recent-searches.length > 0 : VerticalLayout {
                     spacing: Theme.space-2;
 
-                    Text {
+                    Label {
+                        role: TextRole.Caption;
+                        emphasis: Emphasis.Semibold;
                         text: "最近搜索";
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-caption;
-                        font-weight: Type.semibold;
                         horizontal-alignment: center;
                     }
 

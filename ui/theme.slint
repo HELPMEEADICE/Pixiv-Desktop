@@ -178,6 +178,40 @@ export global Theme {
     out property <length> font-page: 20px;
     out property <length> font-display: 24px;
 
+    // Line-height factors, from Slint's `line-height-factor`.
+    //
+    // It is a multiple of the font's *natural* line height (ascent + descent), not
+    // a CSS length, so 1.5 on 14px Segoe UI Variable is ~21px of leading and stays
+    // proportional at every DPI. These exist because the app had no leading at all:
+    // every wrapped paragraph was set solid at 1.0, which reads as cramped next to
+    // WinUI's own body text and made the novel reader's line-spacing setting the
+    // only place where line height was even expressible.
+    //
+    // Only wrapped text reads these. A single-line label keeps the natural factor
+    // on purpose: a non-default `line-height-factor` moves a `Text` onto Slint's
+    // complex-text path, and the feed draws ~200 single-line labels (card titles,
+    // authors, counts) for every paragraph it draws.
+    out property <float> line-small: 1.35;
+    out property <float> line-body: 1.5;
+    out property <float> line-title: 1.3;
+    out property <float> line-page: 1.25;
+
+    // ---- reading (novel reader) -----------------------------------------
+    // The reader draws text at a size the *user* chose, so its ramp is separate from
+    // the UI ramp above. These are the bounds the settings sliders clamp to and the
+    // values the page recomputes from; the preference model in
+    // `crates/pixiv-novel/src/prefs.rs` carries the same numbers, and
+    // `reader_bounds_match_the_preference_model` (uiaudit) fails if they drift.
+    out property <length> reader-font-min: 14px;
+    out property <length> reader-font-max: 32px;
+    out property <length> reader-measure-min: 420px;
+    out property <length> reader-measure-max: 1400px;
+    /// Widest the settings panel is allowed to get before it reads as a dialog
+    /// instead of a flyout.
+    out property <length> reader-panel-width: 340px;
+    /// Height of the reader's own toolbar (back, title, Aa, progress).
+    out property <length> reader-bar-height: 44px;
+
     // ---- radii ---------------------------------------------------------
     out property <length> radius-sm: 4px;
     out property <length> radius-md: 6px;
@@ -240,4 +274,29 @@ export global Type {
     out property <int> medium: 500;
     out property <int> semibold: 600;
     out property <int> bold: 700;
+}
+
+/// Named weight, so a call site says what the text *is* rather than what number to
+/// set. `Label` and `BodyText` map it to `Type`; nothing else should need an int.
+export enum Emphasis {
+    Regular,
+    Medium,
+    Semibold,
+    Bold,
+}
+
+/// Named size step, so a page picks a role instead of a pixel value.
+///
+/// The names match the WinUI ramp as the app uses it, not as WinUI documents it:
+/// `Caption` is the 11px metadata step, `Small` the 12px secondary step, `Body`
+/// the 14px UI step, `Title` a 16px section heading, `Page` the 20px page title
+/// and `Display` the 24px hero line.
+export enum TextRole {
+    Caption,
+    Small,
+    Body,
+    Subhead,
+    Title,
+    Page,
+    Display,
 }

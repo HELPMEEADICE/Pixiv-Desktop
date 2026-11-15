@@ -10,11 +10,8 @@
 // control the row height (`IconButton.row-height`) or wraps it in a full-height
 // cell, so the badge, the buttons and the state glyph all share one centre line.
 
-import { Theme, Type } from "../theme.slint";
-import {
-    AppButton, IconButton, ButtonKind, Divider, StateView, StateKind, Badge, InfoBar,
-    InfoKind, PageScroll, ProgressBar, SettingsCard, IconPresenter, IconSlot,
-} from "../components.slint";
+import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
+import { AppButton, IconButton, ButtonKind, Divider, StateView, StateKind, Badge, InfoBar, InfoKind, PageScroll, ProgressBar, SettingsCard, IconPresenter, IconSlot, Label, BodyText } from "../components.slint";
 
 export struct DownloadRow {
     id: int,
@@ -102,18 +99,14 @@ component TaskRow inherits Rectangle {
             // centre each line in the column instead of aligning it to the edge.
             alignment: center;
 
-            Text {
+            Label {
                 text: root.entry.title;
                 color: Theme.text;
-                font-size: Theme.font-body;
-                overflow: elide;
-                vertical-alignment: center;
             }
-            Text {
+            Label {
+                role: TextRole.Caption;
                 text: root.entry.author + " · " + root.entry.subtitle;
                 color: Theme.text-tertiary;
-                font-size: Theme.font-caption;
-                overflow: elide;
             }
 
             // The meter stays while a task is paused: U13 was "the progress bar has
@@ -124,11 +117,10 @@ component TaskRow inherits Rectangle {
                 indeterminate: root.entry.progress < 0 && !root.paused;
                 width: 100%;
             }
-            if root.entry.state == 3 && root.entry.message != "" : Text {
+            if root.entry.state == 3 && root.entry.message != "" : Label {
+                role: TextRole.Caption;
                 text: root.entry.message;
                 color: Theme.danger;
-                font-size: Theme.font-caption;
-                overflow: elide;
             }
         }
 
@@ -264,20 +256,18 @@ export component DownloadsPage inherits Rectangle {
                 spacing: Theme.space-3;
                 alignment: space-between;
 
-                Text {
+                Label {
+                    role: TextRole.Page;
+                    emphasis: Emphasis.Semibold;
                     text: "下载管理";
                     color: Theme.text;
-                    font-size: Theme.font-page;
-                    font-weight: Type.semibold;
-                    vertical-alignment: center;
                 }
 
-                Text {
+                Label {
+                    role: TextRole.Small;
                     text: "进行中 " + root.active-count + " · 已完成 " + root.done-count + " 项"
                         + " · 失败 " + root.failed-count;
                     color: Theme.text-tertiary;
-                    font-size: Theme.font-small;
-                    vertical-alignment: center;
                 }
             }
 
@@ -302,7 +292,8 @@ export component DownloadsPage inherits Rectangle {
                     }
                 }
 
-                Text {
+                Label {
+                    role: TextRole.Small;
                     // "页", because the row counter three lines up counts rows: two
                     // numbers labelled the same thing on one screen is a defect even
                     // when both are true.
@@ -310,17 +301,14 @@ export component DownloadsPage inherits Rectangle {
                         ? ("已下载 " + root.queue-done + " / " + root.queue-total + " 页")
                         : "队列为空";
                     color: Theme.text-secondary;
-                    font-size: Theme.font-small;
-                    vertical-alignment: center;
                 }
 
                 // Empty while unknown: a throughput line that reads "0 B/s" when the
                 // window has no samples yet is a lie about a stalled queue.
-                if root.throughput != "" : Text {
+                if root.throughput != "" : Label {
+                    role: TextRole.Small;
                     text: root.throughput;
                     color: Theme.text-tertiary;
-                    font-size: Theme.font-small;
-                    vertical-alignment: center;
                 }
 
                 // The paused chip takes the `on-accent` pair: it is the only label in
