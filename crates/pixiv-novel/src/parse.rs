@@ -457,9 +457,10 @@ fn closed(s: &str, open_len: usize, close: &str) -> Option<usize> {
         if tail.starts_with(close) {
             return Some(end + close.len());
         }
-        let Some(ch) = tail.chars().next() else {
-            return None;
-        };
+        // The loop condition makes this a formality, but clippy is right that the
+        // fallible step belongs on the function boundary rather than in a let-else
+        // that can never fire.
+        let ch = tail.chars().next()?;
         if ch == '[' || ch == '\n' {
             return None;
         }

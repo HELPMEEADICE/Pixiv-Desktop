@@ -123,7 +123,19 @@ impl NovelState {
             chapter_ids: Vec::new(),
             chapter_index: 0,
             document: None,
-            reader: reader_view(&prefs, 1, "", "", "", ("", ""), false, false),
+            reader: reader_view(
+                &prefs,
+                1,
+                "",
+                &ReaderDoc {
+                    title: "",
+                    chapter_meta: "",
+                    prev: "",
+                    next: "",
+                },
+                false,
+                false,
+            ),
             prefs,
             ratio: 0.0,
             saved_at: None,
@@ -193,7 +205,7 @@ fn reading_label(seconds: u32) -> String {
     if seconds == 0 {
         return String::new();
     }
-    let minutes = (seconds + 59) / 60;
+    let minutes = seconds.div_ceil(60);
     format!("约 {minutes} 分钟")
 }
 
@@ -407,6 +419,19 @@ fn theme_from(index: i32) -> novel_prefs::ReaderTheme {
     }
 }
 
+/// What is being read, and what its neighbours are called.
+///
+/// Bundled rather than passed as four more arguments: the view builder already
+/// takes the preferences, the state, the message and two flags, and clippy's
+/// too_many_arguments is right that eight is one too many for a function whose
+/// arguments are all "the same document".
+struct ReaderDoc<'a> {
+    title: &'a str,
+    chapter_meta: &'a str,
+    prev: &'a str,
+    next: &'a str,
+}
+
 /// Build the whole reader value from the preferences.
 ///
 /// Every field is derived, none is carried over: a stale field in this struct is a
@@ -415,9 +440,7 @@ fn reader_view(
     prefs: &ReaderPrefs,
     state: i32,
     message: &str,
-    title: &str,
-    chapter_meta: &str,
-    neighbours: (&str, &str),
+    doc: &ReaderDoc<'_>,
     settings_open: bool,
     app_dark: bool,
 ) -> ReaderView {
@@ -425,12 +448,12 @@ fn reader_view(
     ReaderView {
         state,
         message: message.into(),
-        title: title.into(),
-        chapter_meta: chapter_meta.into(),
-        has_prev: !neighbours.0.is_empty(),
-        has_next: !neighbours.1.is_empty(),
-        prev_label: neighbours.0.into(),
-        next_label: neighbours.1.into(),
+        title: doc.title.into(),
+        chapter_meta: doc.chapter_meta.into(),
+        has_prev: !doc.prev.is_empty(),
+        has_next: !doc.next.is_empty(),
+        prev_label: doc.prev.into(),
+        next_label: doc.next.into(),
         settings_open,
         chrome_visible: !prefs.hide_chrome,
         show_progress: prefs.show_progress,
@@ -1174,9 +1197,12 @@ impl App {
             &self.novel.prefs,
             0,
             "",
-            &title,
-            &chapter_meta,
-            (prev.as_str(), next.as_str()),
+            &ReaderDoc {
+                title: &title,
+                chapter_meta: &chapter_meta,
+                prev: &prev,
+                next: &next,
+            },
             settings_open,
             app_dark,
         );
@@ -1345,9 +1371,12 @@ impl App {
             &self.novel.prefs,
             state,
             &message,
-            &title,
-            &chapter_meta,
-            (prev.as_str(), next.as_str()),
+            &ReaderDoc {
+                title: &title,
+                chapter_meta: &chapter_meta,
+                prev: &prev,
+                next: &next,
+            },
             settings_open,
             app_dark,
         );
@@ -1676,7 +1705,19 @@ mod tests {
         // The panel writes ratios; the view publishes them back as ratios. If the
         // two disagreed, a slider would jump when the settings panel was reopened.
         let prefs = ReaderPrefs::default();
-        let view = reader_view(&prefs, 0, "", "", "", ("", ""), false, false);
+        let view = reader_view(
+            &prefs,
+            0,
+            "",
+            &ReaderDoc {
+                title: "",
+                chapter_meta: "",
+                prev: "",
+                next: "",
+            },
+            false,
+            false,
+        );
         assert_eq!(view.weight_index, weight_index(prefs.font_weight));
         assert_eq!(view.theme_index, theme_index(prefs.theme));
         assert_eq!(view.align, align_index(prefs.align));
