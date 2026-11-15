@@ -41,6 +41,12 @@ pub(crate) fn install(app: &Shared) {
                 let page = app.page;
                 let suggesting = app.suggest.visible;
                 let selecting = app.selection.active;
+                // The reader owns Escape while it has something open: the settings
+                // panel, then the hidden toolbar. Only when it has neither does the
+                // key mean "go back", which is why this is asked first.
+                if page == Destination::NovelReader && app.reader_escape() {
+                    return;
+                }
                 if suggesting {
                     app.suggest_close();
                 } else if selecting {
@@ -48,7 +54,9 @@ pub(crate) fn install(app: &Shared) {
                     // everywhere this shell borrows from.
                     drop(app);
                     App::exit_selection(&shared);
-                } else if page == Destination::Detail {
+                } else if page == Destination::Detail || page == Destination::NovelReader
+                    || page == Destination::Novel
+                {
                     drop(app);
                     App::travel(&shared, true);
                 }

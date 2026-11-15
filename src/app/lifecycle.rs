@@ -51,6 +51,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         Some("history") => App::navigate(&app, Destination::History),
         Some("downloads") => App::navigate(&app, Destination::Downloads),
         Some("settings") => App::navigate(&app, Destination::Settings),
+        Some("novels") => App::navigate(&app, Destination::Novels),
         _ => App::navigate(&app, Destination::Home),
     }
     if let Ok(id) = std::env::var("PIXIV_DESKTOP_START_USER") {
@@ -58,6 +59,18 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }
     if let Ok(id) = std::env::var("PIXIV_DESKTOP_START_ILLUST") {
         App::open_detail(&app, &id);
+    }
+    // PIXIV_DESKTOP_START_NOVEL=<id> opens the novel page; adding
+    // PIXIV_DESKTOP_START_READER=1 goes straight into the reader, which is what the
+    // reader capture and the reader gate use.
+    if let Ok(id) = std::env::var("PIXIV_DESKTOP_START_NOVEL") {
+        if std::env::var_os("PIXIV_DESKTOP_START_READER").is_some() {
+            if let Ok(raw) = id.trim().parse::<u64>() {
+                App::open_reader_route(&app, raw);
+            }
+        } else {
+            App::open_novel_from(&app, &id);
+        }
     }
 
     {
@@ -236,6 +249,10 @@ impl App {
             ui.set_grid_action_label("前往设置".into());
         }
 
+        // Read before the literal: the store is moved into the struct below, and the
+        // reader's preferences are one small row that has to be read once anyway.
+        let reader_prefs_json = store.novel_setting("novel.reader.prefs").ok().flatten();
+
         Self {
             ui,
             rt,
@@ -292,6 +309,16 @@ impl App {
             selection: Selection::default(),
             palette: PaletteState::default(),
             playback: PlaybackState::default(),
+            // The reader's preferences are read once, here, and clamped on the way
+            // in: a hand-edited or half-written JSON blob can only produce values
+            // the sliders can express.
+            novel: {
+                let mut state = NovelState::new();
+                if let Some(json) = reader_prefs_json {
+                    state.prefs = pixiv_novel::prefs::ReaderPrefs::from_json(&json);
+                }
+                state
+            },
         }
     }
 }

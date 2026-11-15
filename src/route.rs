@@ -21,6 +21,8 @@ pub enum RouteParam {
     Illust(u64),
     /// A user, for the profile page.
     User(u64),
+    /// A novel, for the novel page and the reader.
+    Novel(u64),
 }
 
 impl RouteParam {
@@ -66,6 +68,20 @@ impl Route {
         Self::new(Destination::UserProfile, RouteParam::user(id))
     }
 
+    /// A novel's landing page.
+    #[must_use]
+    pub const fn novel(id: u64) -> Self {
+        Self::new(Destination::Novel, RouteParam::Novel(id))
+    }
+
+    /// The reader for a novel. A separate destination on purpose: Back from the
+    /// reader must land on the novel, and the reader is not the page the novel
+    /// entry in the rail points at.
+    #[must_use]
+    pub const fn novel_reader(id: u64) -> Self {
+        Self::new(Destination::NovelReader, RouteParam::Novel(id))
+    }
+
     /// The illustration this entry shows, if any.
     #[must_use]
     pub const fn illust_id(self) -> Option<u64> {
@@ -80,6 +96,16 @@ impl Route {
     pub const fn user_id(self) -> Option<u64> {
         match self.param {
             RouteParam::User(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The novel this entry shows, if any. True for both the novel page and the
+    /// reader: they name the same work.
+    #[must_use]
+    pub const fn novel_id(self) -> Option<u64> {
+        match self.param {
+            RouteParam::Novel(id) => Some(id),
             _ => None,
         }
     }

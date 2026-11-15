@@ -26,13 +26,14 @@
 // bindings for what the root file *exports*, and Rust has to reach the `Theme`
 // global (`ui.global::<Theme>()`) to push the persisted theme choice into it.
 import { ScrollView } from "std-widgets.slint";
-import { Theme, Type, ThemeMode } from "theme.slint";
+import { Theme, Type, ThemeMode, Emphasis, TextRole } from "theme.slint";
 import { Tip, TipSide } from "tip.slint";
 export { Theme, Type, ThemeMode } from "theme.slint";
 export { Tip, TipSide } from "tip.slint";
 import {
     IconButton, TextField, NavItem, Divider, HoverTip, IllustItem, IconSlot, TipPlacement,
     Avatar, RecommendTagItem, RecommendUserItem, SuggestionItem, ProfileStatItem,
+    Label, BodyText,
 } from "components.slint";
 import { HomePage } from "pages/home.slint";
 import { GalleryPage } from "pages/gallery.slint";
@@ -40,6 +41,13 @@ import { DetailPage, ViewerPage } from "pages/detail.slint";
 import { DownloadsPage, DownloadRow } from "pages/downloads.slint";
 import { SettingsPage } from "pages/settings.slint";
 import { ProfilePage } from "pages/profile.slint";
+import { NovelsPage } from "pages/novels.slint";
+import { NovelPage } from "pages/novel.slint";
+import { NovelReaderPage } from "pages/novel-reader.slint";
+import { NovelRow, NovelChapter, NovelView, NovelBlock, ReaderView } from "novel-model.slint";
+// Re-exported for the same reason Theme is: slint::include_modules! only emits
+// bindings for what the root file exports, and Rust has to build these values.
+export { NovelRow, NovelChapter, NovelView, NovelBlock, ReaderView } from "novel-model.slint";
 
 /// One row of the command palette (F3). The frozen seam: the label is what the row
 /// says, `detail` is the right-hand explanation, `shortcut` the chord that does the
@@ -91,28 +99,23 @@ component PaletteRowView inherits Rectangle {
             tint: root.active ? Theme.accent-ink : Theme.text-secondary;
         }
 
-        Text {
+        Label {
+            role: TextRole.Small;
             text: root.entry.label;
             color: Theme.text;
-            font-size: Theme.font-small;
-            vertical-alignment: center;
-            overflow: elide;
             horizontal-stretch: 1;
         }
 
-        if root.entry.detail != "" : Text {
+        if root.entry.detail != "" : Label {
+            role: TextRole.Caption;
             text: root.entry.detail;
             color: Theme.text-tertiary;
-            font-size: Theme.font-caption;
-            vertical-alignment: center;
-            overflow: elide;
         }
 
-        if root.entry.shortcut != "" : Text {
+        if root.entry.shortcut != "" : Label {
+            role: TextRole.Caption;
             text: root.entry.shortcut;
             color: Theme.text-tertiary;
-            font-size: Theme.font-caption;
-            vertical-alignment: center;
         }
     }
 
@@ -160,19 +163,16 @@ component SuggestRow inherits Rectangle {
             slot: 14px;
             tint: root.item.local ? Theme.text-tertiary : Theme.text-secondary;
         }
-        Text {
+        Label {
+            role: TextRole.Small;
             text: root.item.label;
             color: Theme.text;
-            font-size: Theme.font-small;
-            vertical-alignment: center;
-            overflow: elide;
             horizontal-stretch: 1;
         }
-        if root.item.count != "" : Text {
+        if root.item.count != "" : Label {
+            role: TextRole.Caption;
             text: root.item.count;
             color: Theme.text-tertiary;
-            font-size: Theme.font-caption;
-            vertical-alignment: center;
         }
     }
 }
@@ -189,6 +189,12 @@ export enum Destination {
     Settings,
     /// The native artist / user page, reached from any author reference.
     UserProfile,
+    /// Novel search and recent reading.
+    Novels,
+    /// One novel: cover, metadata, series and the way into the reader.
+    Novel,
+    /// The reader itself.
+    NovelReader,
 }
 
 export component AppWindow inherits Window {
@@ -512,6 +518,60 @@ export component AppWindow inherits Window {
 
 
 
+    // ---- novels ----
+    // Browse page: search results and recent reading, one row model each.
+    in property <[NovelRow]> novel-rows: [];
+    in property <[NovelRow]> novel-recent: [];
+    in property <int> novels-state: 1;
+    in property <string> novels-message: "";
+    in property <string> novels-title: "小说";
+    in property <string> novels-subtitle: "Pixiv 小说搜索与本机阅读记录";
+    in-out property <string> novel-query: "";
+    callback novel-search(string);
+    callback novel-open(string);
+    callback novel-refresh();
+    callback novel-load-more();
+
+    // Landing page. The tag list and chapter rows are models, not struct fields:
+    // they are lists the page iterates.
+    in property <NovelView> novel-view;
+    in property <[string]> novel-tags: [];
+    in property <[NovelChapter]> novel-chapters: [];
+    callback novel-read();
+    callback novel-open-chapter(string);
+    callback novel-open-tag(string);
+    callback novel-open-author();
+    callback novel-toggle-bookmark();
+    callback novel-retry();
+    callback novel-detail-back();
+    callback novel-external();
+
+    // Reader.
+    in property <ReaderView> reader-view;
+    in property <[NovelBlock]> novel-blocks: [];
+    in property <bool> reader-fullscreen: false;
+    /// Reader key commands, as a kind plus a sequence counter.
+    ///
+    /// A property channel rather than a callback into the page: the shell's key
+    /// handler is declared before the page (Slint resolves ids in source order), so
+    /// it cannot call a function on it. The page watches the counter, which is also
+    /// how Rust drives the same commands.
+    in-out property <int> reader-command: 0;
+    in-out property <int> reader-command-seq: 0;
+    in-out property <length> reader-scroll-y: 0px;
+    out property <float> reader-progress: 0.0;
+    /// 0..1: where the reader must put itself after a reflow. -1 means "no
+    /// pending restore"; the reader writes -1 back once it has applied it.
+    in-out property <float> reader-restore: -1.0;
+    callback reader-scrolled(length, float);
+    callback reader-prefs-edit(int, float, string);
+    callback reader-back();
+    callback reader-chapter(int);
+    callback reader-toggle-settings();
+    callback reader-toggle-chrome();
+    callback reader-open-external();
+    callback reader-retry();
+
     out property <bool> is-gallery-page:
         root.page == Destination.Discovery || root.page == Destination.Ranking
         || root.page == Destination.Search || root.page == Destination.Bookmarks
@@ -546,7 +606,7 @@ export component AppWindow inherits Window {
 
     public function focus-nav-step(index: int) {
         if (index < 0) { nav-settings.take-focus(); }
-        else if (index > 7) { nav-home.take-focus(); }
+        else if (index > 8) { nav-home.take-focus(); }
         else { root.focus-nav-item(index); }
     }
 
@@ -574,9 +634,10 @@ export component AppWindow inherits Window {
         else if (index == 1) { nav-discovery.take-focus(); }
         else if (index == 2) { nav-ranking.take-focus(); }
         else if (index == 3) { nav-search.take-focus(); }
-        else if (index == 4) { nav-bookmarks.take-focus(); }
-        else if (index == 5) { nav-history.take-focus(); }
-        else if (index == 6) { nav-downloads.take-focus(); }
+        else if (index == 4) { nav-novels.take-focus(); }
+        else if (index == 5) { nav-bookmarks.take-focus(); }
+        else if (index == 6) { nav-history.take-focus(); }
+        else if (index == 7) { nav-downloads.take-focus(); }
         else { nav-settings.take-focus(); }
     }
 
@@ -646,6 +707,21 @@ export component AppWindow inherits Window {
                 }
                 return EventResult.accept;
             }
+            // Reader keys. PageUp/PageDown/Home/End and a bare "a" belong to the
+            // reader while it is on screen; they are handled here because this
+            // scope is an ancestor of every page, so it still sees a key the
+            // focused control rejected, and a button that is focused must not make
+            // PageDown do nothing.
+            if (root.page == Destination.NovelReader) {
+                if (e.text == "") { root.reader-command = 1; }
+                else if (e.text == "") { root.reader-command = 2; }
+                else if (e.text == "") { root.reader-command = 3; }
+                else if (e.text == "") { root.reader-command = 4; }
+                else if (e.text == "a") { root.reader-command = 5; }
+                else { return EventResult.reject; }
+                root.reader-command-seq += 1;
+                return EventResult.accept;
+            }
             if (e.modifiers.control && e.text == "1") { root.navigate(Destination.Home); return EventResult.accept; }
             if (e.modifiers.control && e.text == "2") { root.navigate(Destination.Discovery); return EventResult.accept; }
             if (e.modifiers.control && e.text == "3") { root.navigate(Destination.Ranking); return EventResult.accept; }
@@ -688,13 +764,12 @@ export component AppWindow inherits Window {
                             y: (parent.height - self.height) / 2;
                             border-radius: Theme.radius-md;
                             background: Theme.accent-fill;
-                            Text {
+                            Label {
+                                role: TextRole.Title;
+                                emphasis: Emphasis.Bold;
                                 text: "P";
                                 color: Theme.on-accent;
-                                font-size: Theme.font-title;
-                                font-weight: Type.bold;
                                 horizontal-alignment: center;
-                                vertical-alignment: center;
                             }
                         }
                     }
@@ -893,24 +968,36 @@ export component AppWindow inherits Window {
                             clicked => { root.navigate(Destination.Search); }
                             move-focus(d) => { root.move-nav-focus(3, d); }
                         }
+                        // The novel entry sits beside search, not at the bottom of the
+                        // rail: reading a novel is browsing a work, and the page it
+                        // opens is a first-class destination with its own history
+                        // entry, like an artwork.
+                        nav-novels := NavItem {
+                            icon: "novel"; label: "小说"; compact: root.rail-compact;
+                            selected: root.page == Destination.Novels
+                                || root.page == Destination.Novel
+                                || root.page == Destination.NovelReader;
+                            clicked => { root.navigate(Destination.Novels); }
+                            move-focus(d) => { root.move-nav-focus(4, d); }
+                        }
                         nav-bookmarks := NavItem {
                             icon: "star"; label: "收藏"; compact: root.rail-compact;
                             selected: root.page == Destination.Bookmarks;
                             clicked => { root.navigate(Destination.Bookmarks); }
-                            move-focus(d) => { root.move-nav-focus(4, d); }
+                            move-focus(d) => { root.move-nav-focus(5, d); }
                         }
                         nav-history := NavItem {
                             icon: "history"; label: "浏览历史"; compact: root.rail-compact;
                             selected: root.page == Destination.History;
                             clicked => { root.navigate(Destination.History); }
-                            move-focus(d) => { root.move-nav-focus(5, d); }
+                            move-focus(d) => { root.move-nav-focus(6, d); }
                         }
                         nav-downloads := NavItem {
                             icon: "downloads"; label: "下载管理"; compact: root.rail-compact;
                             selected: root.page == Destination.Downloads;
                             badge: root.downloads-active;
                             clicked => { root.navigate(Destination.Downloads); }
-                            move-focus(d) => { root.move-nav-focus(6, d); }
+                            move-focus(d) => { root.move-nav-focus(7, d); }
                         }
 
                         Rectangle { vertical-stretch: 1; }
@@ -920,7 +1007,7 @@ export component AppWindow inherits Window {
                             icon: "settings"; label: "设置"; compact: root.rail-compact;
                             selected: root.page == Destination.Settings;
                             clicked => { root.navigate(Destination.Settings); }
-                            move-focus(d) => { root.move-nav-focus(7, d); }
+                            move-focus(d) => { root.move-nav-focus(8, d); }
                         }
                         // Hidden while the host has auto-compacted the pane: at that
                         // size the toggle cannot change anything, and a control that
@@ -1120,6 +1207,68 @@ export component AppWindow inherits Window {
                         card-focused(id) => { root.card-focused(id); }
                     }
 
+                    NovelsPage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.page == Destination.Novels;
+                        query <=> root.novel-query;
+                        rows: root.novel-rows;
+                        recent: root.novel-recent;
+                        state: root.novels-state;
+                        message: root.novels-message;
+                        title: root.novels-title;
+                        subtitle: root.novels-subtitle;
+                        search(word) => { root.novel-search(word); }
+                        open(id) => { root.novel-open(id); }
+                        refresh => { root.novel-refresh(); }
+                        load-more => { root.novel-load-more(); }
+                    }
+
+                    NovelPage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.page == Destination.Novel;
+                        view: root.novel-view;
+                        tags: root.novel-tags;
+                        chapters: root.novel-chapters;
+                        scrolled(y) => { root.grid-scrolled(y); }
+                        read => { root.novel-read(); }
+                        open-author => { root.novel-open-author(); }
+                        open-tag(t) => { root.novel-open-tag(t); }
+                        open-chapter(id) => { root.novel-open-chapter(id); }
+                        toggle-bookmark => { root.novel-toggle-bookmark(); }
+                        retry => { root.novel-retry(); }
+                        open-external => { root.novel-external(); }
+                    }
+
+                    NovelReaderPage {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: root.page == Destination.NovelReader;
+                        view: root.reader-view;
+                        blocks: root.novel-blocks;
+                        fullscreen: root.reader-fullscreen;
+                        scroll-y <=> root.reader-scroll-y;
+                        restore-ratio <=> root.reader-restore;
+                        command: root.reader-command;
+                        command-seq: root.reader-command-seq;
+                        // The page reports its own progress with every scroll, and
+                        // the shell republishes it: one number, one writer.
+                        scrolled(y, ratio) => {
+                            root.reader-progress = ratio;
+                            root.reader-scrolled(y, ratio);
+                        }
+                        back => { root.reader-back(); }
+                        toggle-settings => { root.reader-toggle-settings(); }
+                        toggle-chrome => { root.reader-toggle-chrome(); }
+                        toggle-fullscreen => { root.toggle-fullscreen(); }
+                        prev-chapter => { root.reader-chapter(-1); }
+                        next-chapter => { root.reader-chapter(1); }
+                        retry => { root.reader-retry(); }
+                        open-external => { root.reader-open-external(); }
+                        edit(op, value, text) => { root.reader-prefs-edit(op, value, text); }
+                    }
+
                     DetailPage {
                         width: parent.width;
                         height: parent.height;
@@ -1292,12 +1441,10 @@ export component AppWindow inherits Window {
                                     : Theme.accent-ink;
                             }
 
-                            Text {
+                            Label {
+                                role: TextRole.Small;
                                 text: root.notice;
                                 color: Theme.text;
-                                font-size: Theme.font-small;
-                                vertical-alignment: center;
-                                overflow: elide;
                                 horizontal-stretch: 1;
                             }
 
@@ -1328,13 +1475,11 @@ export component AppWindow inherits Window {
                     padding-right: Theme.space-3;
                     spacing: Theme.space-2;
 
-                    Text {
+                    Label {
+                        role: TextRole.Caption;
                         text: root.status-text;
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-caption;
-                        vertical-alignment: center;
                         horizontal-stretch: 1;
-                        overflow: elide;
                     }
 
                     Rectangle {
@@ -1350,13 +1495,12 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Text {
+                    Label {
+                        role: TextRole.Caption;
                         text: root.demo-mode ? "演示模式"
                             : (root.authenticated ? "已登录" : "未登录 · 只读");
                         color: root.demo-mode ? Theme.warning
                             : (root.authenticated ? Theme.text-secondary : Theme.text-tertiary);
-                        font-size: Theme.font-caption;
-                        vertical-alignment: center;
                     }
                 }
             }
@@ -1446,14 +1590,12 @@ export component AppWindow inherits Window {
                 padding-bottom: 5px;
                 spacing: 0px;
 
-                if root.suggestions.length == 0 : Text {
+                if root.suggestions.length == 0 : Label {
+                    role: TextRole.Small;
                     height: 40px;
                     text: root.suggest-note;
                     color: Theme.text-tertiary;
-                    font-size: Theme.font-small;
                     horizontal-alignment: center;
-                    vertical-alignment: center;
-                    overflow: elide;
                 }
 
                 // U6: the cursor row scrolls itself into view. The row cannot reach the
@@ -1485,15 +1627,13 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.suggestions.length > 0 && root.suggest-note != "" : Text {
+                if root.suggestions.length > 0 && root.suggest-note != "" : Label {
+                    role: TextRole.Caption;
                     height: 20px;
                     x: Theme.space-3;
                     width: max(0px, parent.width - Theme.space-3 * 2);
                     text: root.suggest-note;
                     color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    vertical-alignment: center;
-                    overflow: elide;
                 }
             }
         }
@@ -1580,14 +1720,12 @@ export component AppWindow inherits Window {
 
             // Rows. A cursor list, not eight Tab stops — the palette is driven from the
             // field above it, exactly as the bookmark flyout is driven from its scope.
-            if root.palette-rows.length == 0 : Text {
+            if root.palette-rows.length == 0 : Label {
+                role: TextRole.Small;
                 height: Theme.palette-row-height;
                 text: "没有匹配的页面、操作或链接";
                 color: Theme.text-tertiary;
-                font-size: Theme.font-small;
                 horizontal-alignment: center;
-                vertical-alignment: center;
-                overflow: elide;
             }
 
             for r[i] in root.palette-rows : PaletteRowView {
@@ -1613,20 +1751,17 @@ export component AppWindow inherits Window {
                     spacing: Theme.space-3;
                     alignment: start;
 
-                    Text {
+                    Label {
+                        role: TextRole.Caption;
                         text: "↑↓ 选择 · Enter 打开 · Esc 关闭";
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-caption;
-                        vertical-alignment: center;
                         horizontal-stretch: 1;
-                        overflow: elide;
                     }
 
-                    if root.palette-rows.length > 0 : Text {
+                    if root.palette-rows.length > 0 : Label {
+                        role: TextRole.Caption;
                         text: root.palette-rows.length + " 条";
                         color: Theme.text-tertiary;
-                        font-size: Theme.font-caption;
-                        vertical-alignment: center;
                     }
                 }
             }

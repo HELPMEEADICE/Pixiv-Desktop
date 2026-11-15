@@ -25,6 +25,7 @@ mod downloads;
 mod feed;
 mod helpers;
 mod lifecycle;
+mod novel;
 mod palette;
 mod profile;
 mod selection;
@@ -32,8 +33,8 @@ mod settings;
 mod ugoira;
 
 pub(crate) use self::{
-    callbacks::install_callbacks, feed::*, helpers::*, lifecycle::*, palette::PaletteState,
-    profile::*, selection::Selection, settings::*, ugoira::PlaybackState,
+    callbacks::install_callbacks, feed::*, helpers::*, lifecycle::*, novel::NovelState,
+    palette::PaletteState, profile::*, selection::Selection, settings::*, ugoira::PlaybackState,
 };
 
 use slint::{
@@ -65,8 +66,9 @@ use crate::images::{COVER_CONCURRENCY, CoverLoader};
 use crate::layout::{self, GridGeometry};
 use crate::route::{History, Route, RouteHistory, RouteParam};
 use crate::{
-    AppWindow, Destination, DownloadRow, IllustItem, ProfileStatItem, RecommendTagItem,
-    RecommendUserItem, SuggestionItem, Theme, ThemeMode, Tip, ViewerPage,
+    AppWindow, Destination, DownloadRow, IllustItem, NovelBlock, NovelChapter, NovelRow, NovelView,
+    ProfileStatItem, ReaderView, RecommendTagItem, RecommendUserItem, SuggestionItem, Theme,
+    ThemeMode, Tip, ViewerPage,
 };
 
 /// Real in-memory cache budget, in MiB. Settings displays this value, so the page
@@ -201,6 +203,10 @@ pub(crate) struct App {
     palette: PaletteState,
     /// Ugoira playback for the detail page (F1, detail track).
     playback: PlaybackState,
+
+    // ---- novels (round ten) ----
+    /// Search, the landing page and the reader, as one state.
+    novel: NovelState,
 }
 
 /// How many routes Back/Forward can hold. Named because the scroll table is sized
@@ -306,6 +312,13 @@ impl App {
         // every arrival rather than only on a fresh navigation.
         ui.set_ranking_filter(ranking_index(self.ranking_kind));
         ui.set_search_word(self.search_word.clone().into());
+        // Leaving the reader must not lose the place: the throttled write only
+        // fires every 2s, so a quick Back would otherwise land before the last
+        // write. Flushing here also covers a chapter change, which navigates.
+        if self.page == Destination::NovelReader && next.page != Destination::NovelReader {
+            self.flush_novel_state();
+            self.novel.reader.settings_open = false;
+        }
         // Round nine (F1, O1): a detail page owns a playback clock and a page
         // model full of decoded bitmaps. Leaving it must give both back now. The
         // tick's own route check stops the clock within one frame, but the
@@ -402,6 +415,7 @@ impl ScrollKey {
             RouteParam::None => (0, 0),
             RouteParam::Illust(id) => (1, id),
             RouteParam::User(id) => (2, id),
+            RouteParam::Novel(id) => (3, id),
         };
         Self {
             page: route.page as u32,
@@ -523,6 +537,37 @@ impl App {
                 } else {
                     App::load_discovery(shared, false);
                 }
+                return;
+            }
+            // The novel surfaces own their own loading, and none of them uses the
+            // shared grid: a novel has no columns, no masonry and no bookmark pill.
+            Destination::Novels => {
+                if reuse_feed && restore_scroll {
+                    let app = shared.borrow();
+                    restore(&app);
+                    app.refresh_chrome();
+                } else {
+                    App::load_novels_page(shared);
+                    shared.borrow().refresh_chrome();
+                }
+                return;
+            }
+            Destination::Novel => {
+                let mut app = shared.borrow_mut();
+                let offset = app.stored_scroll(route);
+                app.page_cursor = 1;
+                app.suggest_close();
+                drop(app);
+                App::load_novel_page(shared);
+                let app = shared.borrow();
+                restore(&app);
+                let _ = offset;
+                app.refresh_chrome();
+                return;
+            }
+            Destination::NovelReader => {
+                App::load_reader_page(shared);
+                shared.borrow().refresh_chrome();
                 return;
             }
             Destination::Ranking

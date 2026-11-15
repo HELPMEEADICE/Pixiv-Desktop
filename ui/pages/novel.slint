@@ -1,0 +1,341 @@
+// Novel landing page: what the novel is, and the way into it.
+//
+// Deliberately a *reading* page and not another gallery: a novel has one cover,
+// a title that can be two lines long, an author, a character count, and a body.
+// The page therefore spends its width on the title block and keeps the cover a
+// fixed 150x210 (a book, next to its metadata), which is the same relationship
+// Pixiv's own novel page uses.
+//
+// Layout rules this page follows, because every page in this app must:
+//   * no literal font size or weight - Label/BodyText pick a role;
+//   * no text in a horizontal row without a stated vertical alignment;
+//   * a cover is a fixed box, so the metadata column can never be pushed around
+//     by an image that has not decoded yet (state 1 keeps the box).
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
+import {
+    PageScroll, AppButton, ButtonKind, IconButton, Label, BodyText, TagChip, Divider,
+    StateView, StateKind, Skeleton, Avatar, SectionHeader, IconSlot, InfoBar, InfoKind,
+} from "../components.slint";
+import { NovelView, NovelChapter } from "../novel-model.slint";
+
+export component NovelPage inherits Rectangle {
+    in-out property <length> scroll-y: 0px;
+    in property <NovelView> view;
+    in property <[string]> tags: [];
+    in property <[NovelChapter]> chapters: [];
+
+    callback scrolled(length);
+    callback read();
+    callback open-author();
+    callback open-tag(string);
+    callback open-chapter(string);
+    callback toggle-bookmark();
+    callback retry();
+    callback open-external();
+
+    background: Theme.canvas;
+
+    if root.view.state == 1 : Rectangle {
+        background: Theme.canvas;
+        VerticalLayout {
+            alignment: center;
+            StateView {
+                kind: StateKind.Loading;
+                title: "正在载入小说…";
+                description: "Pixiv /ajax/novel/{id}";
+            }
+        }
+    }
+
+    if root.view.state == 2 || root.view.state == 3 : PageScroll {
+        scroll-y <=> root.scroll-y;
+        scrolled(y) => { root.scrolled(y); }
+        VerticalLayout {
+            spacing: Theme.space-4;
+            StateView {
+                kind: root.view.state == 2 ? StateKind.Empty : StateKind.Error;
+                glyph: "novel";
+                title: root.view.state == 2 ? "这本小说打不开" : "小说载入失败";
+                description: root.view.message;
+                action-label: root.view.state == 3 ? "重试" : "";
+                retry => { root.retry(); }
+                action => { root.retry(); }
+            }
+        }
+    }
+
+    if root.view.state == 0 : PageScroll {
+        scroll-y <=> root.scroll-y;
+        scrolled(y) => { root.scrolled(y); }
+
+        VerticalLayout {
+            spacing: Theme.space-5;
+
+            // ---------------- title block ----------------
+            Rectangle {
+                height: hero.preferred-height;
+                border-radius: Theme.radius-lg;
+                background: Theme.layer;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                hero := VerticalLayout {
+                    padding-top: Theme.space-4;
+                    padding-bottom: Theme.space-4;
+                    padding-left: Theme.space-4;
+                    padding-right: Theme.space-4;
+                    spacing: Theme.space-4;
+
+                    HorizontalLayout {
+                        spacing: Theme.space-4;
+
+                        // The cover box is fixed whatever the image is doing, so the
+                        // title column never reflows when a decode lands.
+                        Rectangle {
+                            width: 150px;
+                            height: 210px;
+                            border-radius: Theme.radius-md;
+                            background: Theme.layer-alt;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            clip: true;
+
+                            Image {
+                                source: root.view.cover;
+                                image-fit: cover;
+                                width: 100%;
+                                height: 100%;
+                                visible: root.view.cover-state == 0;
+                            }
+                            if root.view.cover-state != 0 : IconSlot {
+                                name: "novel";
+                                slot: 28px;
+                                glyph-size: 28px;
+                                tint: Theme.text-disabled;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: Theme.space-3;
+
+                            BodyText {
+                                role: TextRole.Page;
+                                emphasis: Emphasis.Semibold;
+                                text: root.view.title;
+                                color: Theme.text;
+                                max-lines: 3;
+                                overflow: elide;
+                            }
+
+                            // Author row: avatar, name, handle. One centre line for
+                            // all three, which is what Avatar + Label buy.
+                            Rectangle {
+                                height: 32px;
+                                background: transparent;
+                                width: author-row.preferred-width;
+
+                                author-row := HorizontalLayout {
+                                    spacing: Theme.space-2;
+
+                                    Avatar {
+                                        size: 32px;
+                                        source: root.view.author-avatar;
+                                        state: root.view.author-avatar-state;
+                                        fallback: root.view.author;
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 1px;
+                                        Label {
+                                            role: TextRole.Body;
+                                            emphasis: Emphasis.Medium;
+                                            text: root.view.author;
+                                            color: Theme.text;
+                                        }
+                                        if root.view.account != "" : Label {
+                                            role: TextRole.Caption;
+                                            text: "@" + root.view.account;
+                                            color: Theme.text-tertiary;
+                                        }
+                                    }
+                                }
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.open-author(); }
+                                }
+                            }
+
+                            if root.view.stats != "" : Label {
+                                role: TextRole.Caption;
+                                text: root.view.stats;
+                                color: Theme.text-tertiary;
+                            }
+
+                            // Actions. Primary verb first, as on every other page.
+                            HorizontalLayout {
+                                spacing: Theme.space-2;
+                                height: Theme.control-height;
+
+                                AppButton {
+                                    kind: ButtonKind.Primary;
+                                    icon: "novel";
+                                    label: root.view.read-label;
+                                    clicked => { root.read(); }
+                                }
+                                AppButton {
+                                    kind: ButtonKind.Secondary;
+                                    icon: root.view.bookmarked ? "star" : "star";
+                                    label: root.view.bookmarked ? "已收藏" : "收藏";
+                                    enabled: root.view.busy;
+                                    clicked => { root.toggle-bookmark(); }
+                                }
+                                AppButton {
+                                    kind: ButtonKind.Subtle;
+                                    icon: "open";
+                                    label: "在 pixiv 打开";
+                                    clicked => { root.open-external(); }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.tags.length > 0 : Rectangle {
+                        height: 26px;
+                        clip: true;
+                        background: transparent;
+
+                        ScrollView {
+                            width: 100%;
+                            height: 100%;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                            Flickable {
+                                interactive: true;
+                                content-width: strip.preferred-width;
+                                content-height: 26px;
+                                strip := HorizontalLayout {
+                                    spacing: Theme.space-2;
+                                    for t[i] in root.tags : TagChip {
+                                        label: t;
+                                        index: i;
+                                        clicked => { root.open-tag(t); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.view.caption != "" : BodyText {
+                        role: TextRole.Small;
+                        text: root.view.caption;
+                        color: Theme.text-secondary;
+                        max-lines: 6;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            // ---------------- series ----------------
+            if root.view.series-title != "" : Rectangle {
+                height: series-card.preferred-height;
+                border-radius: Theme.radius-lg;
+                background: Theme.layer;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                series-card := VerticalLayout {
+                    padding-top: Theme.space-3;
+                    padding-bottom: Theme.space-3;
+                    padding-left: Theme.space-4;
+                    padding-right: Theme.space-4;
+                    spacing: Theme.space-2;
+
+                    SectionHeader {
+                        title: root.view.series-title;
+                        subtitle: root.view.series-meta;
+                    }
+                    Divider { }
+
+                    if root.view.chapters-state == 1 : Label {
+                        height: 40px;
+                        role: TextRole.Small;
+                        text: "正在载入章节…";
+                        color: Theme.text-tertiary;
+                    }
+                    if root.view.chapters-state == 3 : InfoBar {
+                        kind: InfoKind.Warning;
+                        title: "章节列表载入失败";
+                        message: root.view.chapters-message;
+                        action-label: "重试";
+                        action => { root.retry(); }
+                    }
+                    if root.view.chapters-state == 0 && root.chapters.length == 0 : Label {
+                        height: 40px;
+                        role: TextRole.Small;
+                        text: "这个系列没有可见章节";
+                        color: Theme.text-tertiary;
+                    }
+
+                    for c[i] in root.chapters : Rectangle {
+                        height: 44px;
+                        border-radius: Theme.radius-sm;
+                        background: c.current ? Theme.accent-subtle
+                            : (row.has-hover ? Theme.layer-alt : transparent);
+
+                        HorizontalLayout {
+                            padding-left: Theme.space-2;
+                            padding-right: Theme.space-2;
+                            spacing: Theme.space-3;
+
+                            // The order is a fixed 28px column so every chapter
+                            // title starts on one vertical rule.
+                            Label {
+                                role: TextRole.Caption;
+                                text: c.order;
+                                color: c.current ? Theme.accent-ink : Theme.text-tertiary;
+                                width: 28px;
+                                horizontal-alignment: right;
+                            }
+                            Label {
+                                role: TextRole.Body;
+                                text: c.title;
+                                color: c.current ? Theme.accent-ink : Theme.text;
+                                horizontal-stretch: 1;
+                            }
+                            if c.meta != "" : Label {
+                                role: TextRole.Caption;
+                                text: c.meta;
+                                color: Theme.text-tertiary;
+                            }
+                            if c.current : IconSlot {
+                                name: "check";
+                                slot: Theme.icon-size;
+                                tint: Theme.accent-ink;
+                            }
+                        }
+
+                        row := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.open-chapter(c.id); }
+                        }
+                    }
+                }
+            }
+
+            // Footer: the one place the page says where the data came from.
+            Label {
+                height: 28px;
+                role: TextRole.Caption;
+                text: root.view.posted == "" ? "" : "发布于 " + root.view.posted + " · 数据来自 Pixiv 小说 API";
+                color: Theme.text-tertiary;
+                horizontal-alignment: center;
+            }
+        }
+    }
+}

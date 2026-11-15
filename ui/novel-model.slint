@@ -1,0 +1,124 @@
+// Shared value types for the novel surfaces.
+//
+// These live in their own file because both the shell (main.slint) and the three
+// novel pages need the same names, and a page must not import the shell. One
+// definition means the reader cannot be handed a stale shape: Rust publishes a
+// ReaderView, the page reads the same fields the shell just wrote.
+
+/// One novel row: search result, series chapter, or a recent read.
+export struct NovelRow {
+    id: string,
+    title: string,
+    author: string,
+    /// "4,025 字 · 约 7 分钟 · 2026-11-15" - formatted once by Rust.
+    meta: string,
+    cover: image,
+    /// 0 decoded, 1 loading, 2 absent.
+    cover-state: int,
+    /// Series title when the row belongs to one; "" otherwise.
+    series: string,
+}
+
+/// One chapter of a series.
+export struct NovelChapter {
+    id: string,
+    title: string,
+    order: int,
+    /// Characters in this chapter, already formatted ("4,025 字").
+    meta: string,
+    /// The chapter the stored progress points at.
+    current: bool,
+}
+
+/// Everything the novel landing page draws except its lists.
+export struct NovelView {
+    /// 0 content, 1 loading, 2 not-found, 3 error.
+    state: int,
+    message: string,
+    title: string,
+    author: string,
+    author-id: string,
+    account: string,
+    author-avatar: image,
+    /// 0 decoded, 1 loading, 2 absent.
+    author-avatar-state: int,
+    cover: image,
+    /// 0 decoded, 1 loading, 2 absent.
+    cover-state: int,
+    caption: string,
+    posted: string,
+    /// "4,025 字 · 约 7 分钟 · 4 浏览" - produced by Rust so the numbers are
+    /// formatted once and cannot disagree with the fields they came from.
+    stats: string,
+    /// "开始阅读 · 42%" or "继续阅读 · 42%".
+    read-label: string,
+    bookmarked: bool,
+    busy: bool,
+    series-title: string,
+    series-meta: string,
+    chapters-state: int,
+    chapters-message: string,
+}
+
+/// One rendered block of a novel body.
+///
+/// kind: 0 paragraph, 1 heading, 2 separator, 3 page break, 4 image, 5 work link,
+/// 6 external link.
+export struct NovelBlock {
+    kind: int,
+    /// The text to draw. Ruby is already flattened by Rust according to the
+    /// reading preference, so the same block model serves both modes.
+    text: string,
+    /// Link caption / image alt text.
+    label: string,
+    image: image,
+    /// Image state: 0 decoded, 1 loading, 2 failed.
+    state: int,
+    /// Image id, work id or href, depending on kind.
+    id: string,
+}
+
+/// Everything the reader draws. The typography fields are here on purpose: the
+/// settings panel edits them through one callback, Rust clamps and persists them,
+/// and this value is the only way they reach the page.
+export struct ReaderView {
+    state: int,
+    message: string,
+    title: string,
+    chapter-meta: string,
+    has-prev: bool,
+    has-next: bool,
+    prev-label: string,
+    next-label: string,
+    settings-open: bool,
+    chrome-visible: bool,
+    show-progress: bool,
+    paged: bool,
+    /// Ruby readings are drawn inline when true, dropped when false.
+    ruby: bool,
+    font-family: string,
+    font-size: length,
+    font-weight: int,
+    italic: bool,
+    line-height: float,
+    letter-spacing: length,
+    paragraph-gap: length,
+    margin-x: length,
+    measure: length,
+    align: int,
+    rule: int,
+    ink: color,
+    paper: color,
+    /// Slider positions, 0..1, so the panel never has to invert a clamp.
+    font-size-ratio: float,
+    line-height-ratio: float,
+    letter-spacing-ratio: float,
+    paragraph-gap-ratio: float,
+    indent-ratio: float,
+    margin-ratio: float,
+    measure-ratio: float,
+    weight-index: int,
+    theme-index: int,
+    custom-background: string,
+    custom-ink: string,
+}

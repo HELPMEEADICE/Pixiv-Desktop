@@ -5,6 +5,7 @@ use super::*;
 mod detail;
 mod downloads;
 mod feed;
+mod novel;
 mod profile;
 mod search;
 mod settings;
@@ -17,6 +18,7 @@ pub(crate) fn install_callbacks(app: &Shared) {
     detail::install(app);
     profile::install(app);
     feed::install(app);
+    novel::install(app);
     settings::install(app);
     downloads::install(app);
 }

@@ -1,0 +1,289 @@
+// Novel search and recent reading.
+//
+// The page exists because a novel is not an illustration: it has no pages, no
+// aspect ratio and no bookmark-pill overlay, and the artwork grid would have to
+// special-case all three. A list of rows is the honest shape for search results
+// (title, author, length) and it is also what "recent reading" is.
+//
+// It reuses the shell's search box for the *artwork* search, so this page has its
+// own field: two searches that share one input is how a query ends up being sent
+// to the wrong endpoint.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
+import {
+    PageScroll, AppButton, ButtonKind, IconSlot, Label, BodyText, TextField, Divider,
+    StateView, StateKind, SectionHeader, IconPresenter, Skeleton,
+} from "../components.slint";
+import { NovelRow } from "../novel-model.slint";
+
+/// One result row: a 48x64 cover, the title, the author and one metadata line.
+///
+/// The cover is a fixed box for the same reason the card cover is: a decode that
+/// lands late must not move the text beside it. The row is 72px tall, so a
+/// two-line title still leaves 4px of air.
+component NovelRowView inherits Rectangle {
+    in property <NovelRow> entry;
+    callback open(string);
+
+    height: 72px;
+    border-radius: Theme.radius-md;
+    background: ta.has-hover ? Theme.layer-alt : transparent;
+
+    HorizontalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+
+        Rectangle {
+            width: 48px;
+            height: 64px;
+            border-radius: Theme.radius-sm;
+            background: Theme.layer-alt;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            Image {
+                source: root.entry.cover;
+                image-fit: cover;
+                width: 100%;
+                height: 100%;
+                visible: root.entry.cover-state == 0;
+            }
+            if root.entry.cover-state != 0 : IconSlot {
+                name: "novel";
+                slot: Theme.icon-size;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                tint: Theme.text-disabled;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Label {
+                role: TextRole.Body;
+                emphasis: Emphasis.Medium;
+                text: root.entry.title;
+                color: Theme.text;
+            }
+            HorizontalLayout {
+                height: 18px;
+                spacing: Theme.space-2;
+                Label {
+                    role: TextRole.Caption;
+                    text: root.entry.author;
+                    color: Theme.text-secondary;
+                }
+                if root.entry.series != "" : Label {
+                    role: TextRole.Caption;
+                    text: "· " + root.entry.series;
+                    color: Theme.text-tertiary;
+                }
+            }
+            Label {
+                role: TextRole.Caption;
+                text: root.entry.meta;
+                color: Theme.text-tertiary;
+            }
+        }
+
+        Label {
+            role: TextRole.Caption;
+            text: "#" + root.entry.id;
+            color: Theme.text-tertiary;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open(root.entry.id); }
+    }
+}
+
+export component NovelsPage inherits Rectangle {
+    in-out property <string> query: "";
+    in property <[NovelRow]> rows: [];
+    in property <[NovelRow]> recent: [];
+    /// 0 content, 1 loading, 2 empty, 3 error.
+    in property <int> state: 0;
+    in property <string> message: "";
+    in property <string> title: "小说";
+    in property <string> subtitle: "Pixiv 小说搜索与本机阅读记录";
+    callback search(string);
+    callback open(string);
+    callback refresh();
+    callback load-more();
+
+    background: Theme.canvas;
+
+    PageScroll {
+        padding-y: Theme.space-4;
+        VerticalLayout {
+            spacing: Theme.space-4;
+
+            // ---- header ----
+            HorizontalLayout {
+                height: 40px;
+                spacing: Theme.space-3;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 0px;
+                    horizontal-stretch: 1;
+                    Label {
+                        role: TextRole.Page;
+                        emphasis: Emphasis.Semibold;
+                        text: root.title;
+                        color: Theme.text;
+                    }
+                    Label {
+                        role: TextRole.Small;
+                        text: root.subtitle;
+                        color: Theme.text-tertiary;
+                    }
+                }
+
+                AppButton {
+                    kind: ButtonKind.Subtle;
+                    icon: "refresh";
+                    label: "刷新";
+                    row-height: 40px;
+                    clicked => { root.refresh(); }
+                }
+            }
+
+            // ---- search ----
+            HorizontalLayout {
+                height: Theme.control-height-lg;
+                spacing: Theme.space-2;
+
+                TextField {
+                    height: Theme.control-height-lg;
+                    leading-icon: "search";
+                    placeholder: "搜索 Pixiv 小说：标题、标签或作者…";
+                    text <=> root.query;
+                    accepted(t) => { root.search(t); }
+                    horizontal-stretch: 1;
+                }
+                AppButton {
+                    kind: ButtonKind.Primary;
+                    icon: "search";
+                    label: "搜索";
+                    visual-height: Theme.control-height-lg;
+                    clicked => { root.search(root.query); }
+                }
+            }
+
+            if root.state == 1 : Rectangle {
+                height: 120px;
+                background: transparent;
+                StateView {
+                    kind: StateKind.Loading;
+                    title: "正在搜索小说…";
+                    description: "/ajax/search/novels/" + root.query;
+                }
+            }
+            if root.state == 2 : Rectangle {
+                height: 140px;
+                background: transparent;
+                StateView {
+                    kind: StateKind.Empty;
+                    glyph: "novel";
+                    title: root.query == "" ? "还没有搜索过小说" : "没有找到小说";
+                    description: root.message;
+                }
+            }
+            if root.state == 3 : Rectangle {
+                height: 140px;
+                background: transparent;
+                StateView {
+                    kind: StateKind.Error;
+                    title: "小说搜索失败";
+                    description: root.message;
+                    action-label: "重试";
+                    retry => { root.search(root.query); }
+                    action => { root.search(root.query); }
+                }
+            }
+
+            // ---- recent reading ----
+            if root.recent.length > 0 : Rectangle {
+                height: recent-card.preferred-height;
+                border-radius: Theme.radius-lg;
+                background: Theme.layer;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                recent-card := VerticalLayout {
+                    padding-top: Theme.space-2;
+                    padding-bottom: Theme.space-2;
+                    padding-left: Theme.space-3;
+                    padding-right: Theme.space-3;
+                    spacing: Theme.space-1;
+
+                    SectionHeader {
+                        title: "最近阅读";
+                        subtitle: "本机记录，按最近打开的先后排序";
+                    }
+                    for r[i] in root.recent : NovelRowView {
+                        entry: r;
+                        open(id) => { root.open(id); }
+                    }
+                }
+            }
+
+            // ---- results ----
+            if root.rows.length > 0 : Rectangle {
+                height: results-card.preferred-height;
+                border-radius: Theme.radius-lg;
+                background: Theme.layer;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                results-card := VerticalLayout {
+                    padding-top: Theme.space-2;
+                    padding-bottom: Theme.space-2;
+                    padding-left: Theme.space-3;
+                    padding-right: Theme.space-3;
+                    spacing: 0px;
+
+                    HorizontalLayout {
+                        height: 32px;
+                        spacing: Theme.space-2;
+                        Label {
+                            role: TextRole.Small;
+                            emphasis: Emphasis.Semibold;
+                            text: root.query == "" ? "全部结果" : "搜索结果";
+                            color: Theme.text;
+                            horizontal-stretch: 1;
+                        }
+                        Label {
+                            role: TextRole.Caption;
+                            text: root.rows.length + " 项";
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                    Divider { }
+                    for r[i] in root.rows : NovelRowView {
+                        entry: r;
+                        open(id) => { root.open(id); }
+                    }
+
+                    HorizontalLayout {
+                        height: Theme.control-height;
+                        alignment: center;
+                        if root.rows.length >= 20 : AppButton {
+                            kind: ButtonKind.Subtle;
+                            label: "加载更多";
+                            clicked => { root.load-more(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

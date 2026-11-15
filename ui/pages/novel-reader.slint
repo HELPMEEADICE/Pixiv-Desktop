@@ -1,0 +1,968 @@
+// The novel reader.
+//
+// Two things this page has to get right, and both are the reason it is its own
+// file rather than a mode of the detail page:
+//
+//  1. The text is the page. Everything else (toolbar, progress pill, settings
+//     panel) is chrome that can be hidden, and the text column is measured in a
+//     420-1400px measure centred in the window, not in window width.
+//  2. Every typographic setting is a property on this component, and the live
+//     body draws from those same properties. There is no second copy of the
+//     layout for the settings preview: the preview is a real sample set in the
+//     real type.
+//
+// What Slint actually offers, measured rather than assumed:
+//  * Text has font-size, font-weight, font-italic, letter-spacing and
+//    line-height-factor (a multiple of the font's natural line height). There is
+//    no justify, no first-line indent and no hyphenation.
+//  * A wrapped paragraph is therefore left/centre/right aligned; the first-line
+//    indent is applied by Rust as ideographic spaces when it builds the block
+//    text, because the alternative (a spacer element) cannot wrap.
+//  * Paging is per viewport: the paged mode advances by one viewport minus an
+//    overlap line, which is what PageUp/PageDown do in every reader and is honest
+//    about the fact that Slint cannot reflow a column into pages.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
+import {
+    Label, BodyText, AppButton, ButtonKind, IconButton, IconSlot, Divider, SegmentedControl,
+    TextField, ToggleSwitch, StateView, StateKind,
+} from "../components.slint";
+import { ReaderView, NovelBlock } from "../novel-model.slint";
+
+/// A labelled slider row: name and current value on one baseline, track below.
+///
+/// This is the alignment case the typography layer exists for: the name is a 12px
+/// caption on the left and the value is an 11px caption on the right, and they
+/// must share one centre line. Both are Label, so both are centred by the
+/// component rather than by 2px of guesswork here.
+component PrefSlider inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    in-out property <float> ratio: 0.0;
+    in property <float> step: 0.05;
+    callback changed(float);
+
+    accessible-role: AccessibleRole.slider;
+    accessible-label: root.label;
+    accessible-value: root.value;
+
+    height: 44px;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        HorizontalLayout {
+            height: 22px;
+            spacing: Theme.space-2;
+            Label {
+                role: TextRole.Small;
+                text: root.label;
+                color: Theme.text-secondary;
+                horizontal-stretch: 1;
+            }
+            Label {
+                role: TextRole.Caption;
+                text: root.value;
+                color: Theme.text-tertiary;
+            }
+        }
+
+        Rectangle {
+            height: 20px;
+            background: transparent;
+
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                height: 3px;
+                width: 100%;
+                border-radius: Theme.radius-pill;
+                background: Theme.border;
+            }
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                height: 3px;
+                width: max(0px, root.ratio * (track.width - 14px) + 7px);
+                border-radius: Theme.radius-pill;
+                background: Theme.accent-fill;
+            }
+            handle := Rectangle {
+                width: 14px;
+                height: 14px;
+                y: (parent.height - self.height) / 2;
+                x: max(0px, min(parent.width - self.width, root.ratio * (track.width - self.width)));
+                border-radius: Theme.radius-pill;
+                background: Theme.layer;
+                border-width: 2px;
+                border-color: Theme.accent-fill;
+            }
+
+            key_focus := FocusScope {
+                key-pressed(e) => {
+                    if (e.text == "\u{F702}") {
+                        root.ratio = Math.max(0.0, root.ratio - root.step);
+                        root.changed(root.ratio);
+                        return EventResult.accept;
+                    }
+                    if (e.text == "\u{F703}") {
+                        root.ratio = Math.min(1.0, root.ratio + root.step);
+                        root.changed(root.ratio);
+                        return EventResult.accept;
+                    }
+                    EventResult.reject
+                }
+            }
+
+            Rectangle {
+                border-radius: Theme.radius-sm;
+                border-width: 2px;
+                border-color: Theme.focus-ring;
+                background: transparent;
+                opacity: key_focus.has-focus ? 1.0 : 0.0;
+                animate opacity { duration: Theme.motion-fast; easing: ease-out; }
+            }
+
+            track := TouchArea {
+                mouse-cursor: pointer;
+                moved => {
+                    root.ratio = Math.max(0.0, Math.min(1.0,
+                        (self.mouse-x - 7px) / max(1px, track.width - 14px)));
+                    root.changed(root.ratio);
+                }
+                clicked => {
+                    root.ratio = Math.max(0.0, Math.min(1.0,
+                        (self.mouse-x - 7px) / max(1px, track.width - 14px)));
+                    root.changed(root.ratio);
+                }
+            }
+        }
+    }
+}
+
+/// The Aa panel.
+///
+/// It edits the reader's own properties and calls its edit callback; it never
+/// keeps a copy. That is what makes the live text behind it the preview.
+component ReaderSettings inherits Rectangle {
+    in property <int> theme-mode: 0;
+    in property <string> custom-background: "";
+    in property <string> custom-ink: "";
+    in property <string> font-family: "";
+    in property <float> font-size: 0.28;
+    in property <float> line-height: 0.33;
+    in property <float> letter-spacing: 0.0;
+    in property <float> paragraph-gap: 0.3;
+    in property <float> indent: 0.0;
+    in property <float> margin-x: 0.19;
+    in property <float> measure: 0.3;
+    in property <int> weight-index: 1;
+    in property <bool> italic: false;
+    in property <int> align: 0;
+    in property <int> rule: 0;
+    in property <bool> ruby-inline: true;
+    in property <bool> paged: false;
+    in property <bool> show-progress: true;
+    in property <bool> hide-chrome: false;
+
+    /// Opcode + value + text. Opcodes are documented in the page's README comment:
+    /// 0 theme, 1 custom background, 2 custom ink, 3 font family, 4 font size,
+    /// 5 line height, 6 letter spacing, 7 paragraph gap, 8 indent, 9 margin,
+    /// 10 measure, 11 weight, 12 italic, 13 align, 14 rule, 15 ruby, 16 paged,
+    /// 17 progress, 18 hide chrome, 19 reset.
+    callback edit(int, float, string);
+
+    background: Theme.flyout;
+
+    settings-scroll := ScrollView {
+        width: 100%;
+        height: 100%;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+        VerticalLayout {
+            // The viewport width, not the content width: a body sized from its own
+            // content closes the loop Slint reports as a binding loop.
+            width: max(0px, settings-scroll.visible-width - Theme.space-4 * 2);
+            x: Theme.space-4;
+            padding-bottom: Theme.space-6;
+            spacing: Theme.space-3;
+
+            Rectangle { height: Theme.space-3; background: transparent; }
+
+            Label {
+                role: TextRole.Title;
+                emphasis: Emphasis.Semibold;
+                text: "阅读设置";
+                color: Theme.text;
+            }
+
+            // ---- preview: the real type, at the real size ----
+            Rectangle {
+                height: preview.preferred-height;
+                border-radius: Theme.radius-md;
+                background: Theme.layer-alt;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                preview := VerticalLayout {
+                    padding: 6px;
+                    spacing: 0px;
+                    BodyText {
+                        role: TextRole.Small;
+                        text: "预览：文字按当前设置排布。";
+                        color: Theme.text-secondary;
+                        horizontal-alignment: root.align == 0 ? left
+                            : (root.align == 1 ? center : right);
+                    }
+                }
+            }
+
+            // ---- theme ----
+            Label { role: TextRole.Caption; text: "阅读主题"; color: Theme.text-tertiary; }
+            SegmentedControl {
+                items: ["跟随系统", "浅色", "深色", "护眼"];
+                current: root.theme-mode;
+                label: "阅读主题";
+                selected(i) => { root.edit(0, i, ""); }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                height: Theme.control-height;
+                TextField {
+                    placeholder: "背景色 f7f3e9";
+                    text: root.custom-background;
+                    horizontal-stretch: 1;
+                    accepted(t) => { root.edit(1, 0, t); }
+                }
+                TextField {
+                    placeholder: "文字色 2b2b2b";
+                    text: root.custom-ink;
+                    horizontal-stretch: 1;
+                    accepted(t) => { root.edit(2, 0, t); }
+                }
+            }
+
+            // ---- font ----
+            Label { role: TextRole.Caption; text: "字体"; color: Theme.text-tertiary; }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                height: Theme.control-height;
+                TextField {
+                    placeholder: "字体名（留空跟随应用）";
+                    text: root.font-family;
+                    horizontal-stretch: 1;
+                    accepted(t) => { root.edit(3, 0, t); }
+                }
+                AppButton {
+                    kind: ButtonKind.Subtle;
+                    label: "默认";
+                    clicked => { root.edit(3, 0, ""); }
+                }
+            }
+
+            PrefSlider {
+                label: "字号";
+                value: Math.round(14 + root.font-size * 18) + " px";
+                ratio: root.font-size;
+                step: 0.0333;
+                changed(r) => { root.edit(4, r, ""); }
+            }
+            PrefSlider {
+                label: "行距";
+                value: (Math.round((1.2 + root.line-height * 1.8) * 100) / 100) + "x";
+                ratio: root.line-height;
+                step: 0.05;
+                changed(r) => { root.edit(5, r, ""); }
+            }
+            PrefSlider {
+                label: "字距";
+                value: (Math.round(root.letter-spacing * 40) / 10) + " px";
+                ratio: root.letter-spacing;
+                step: 0.05;
+                changed(r) => { root.edit(6, r, ""); }
+            }
+            PrefSlider {
+                label: "段距";
+                value: Math.round(root.paragraph-gap * 40) + " px";
+                ratio: root.paragraph-gap;
+                step: 0.05;
+                changed(r) => { root.edit(7, r, ""); }
+            }
+            PrefSlider {
+                label: "首行缩进";
+                value: (Math.round(root.indent * 3 * 10) / 10) + " 字";
+                ratio: root.indent;
+                step: 0.1;
+                changed(r) => { root.edit(8, r, ""); }
+            }
+            PrefSlider {
+                label: "左右页边距";
+                value: Math.round(12 + root.margin-x * 188) + " px";
+                ratio: root.margin-x;
+                step: 0.05;
+                changed(r) => { root.edit(9, r, ""); }
+            }
+            PrefSlider {
+                label: "正文最大宽度";
+                value: Math.round(420 + root.measure * 980) + " px";
+                ratio: root.measure;
+                step: 0.05;
+                changed(r) => { root.edit(10, r, ""); }
+            }
+
+            HorizontalLayout {
+                height: Theme.control-height;
+                spacing: Theme.space-2;
+                Label { role: TextRole.Small; text: "字重"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                SegmentedControl {
+                    items: ["细", "常规", "加粗"];
+                    current: root.weight-index;
+                    label: "字重";
+                    width: 148px;
+                    selected(i) => { root.edit(11, i, ""); }
+                }
+            }
+            HorizontalLayout {
+                height: Theme.control-height;
+                spacing: Theme.space-2;
+                Label { role: TextRole.Small; text: "斜体"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                ToggleSwitch {
+                    checked: root.italic;
+                    label: "斜体";
+                    toggled(v) => { root.edit(12, v ? 1 : 0, ""); }
+                }
+            }
+
+            // ---- layout ----
+            Label { role: TextRole.Caption; text: "对齐与分段"; color: Theme.text-tertiary; }
+            SegmentedControl {
+                items: ["左对齐", "居中", "右对齐"];
+                current: root.align;
+                label: "文字对齐";
+                selected(i) => { root.edit(13, i, ""); }
+            }
+            SegmentedControl {
+                items: ["段距", "分隔线", "无"];
+                current: root.rule;
+                label: "段落分隔";
+                selected(i) => { root.edit(14, i, ""); }
+            }
+
+            // ---- reading ----
+            Label { role: TextRole.Caption; text: "阅读方式"; color: Theme.text-tertiary; }
+            HorizontalLayout {
+                height: Theme.control-height;
+                spacing: Theme.space-2;
+                Label { role: TextRole.Small; text: "注音（ruby）"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                ToggleSwitch {
+                    checked: root.ruby-inline;
+                    label: "显示注音";
+                    toggled(v) => { root.edit(15, v ? 1 : 0, ""); }
+                }
+            }
+            HorizontalLayout {
+                height: Theme.control-height;
+                spacing: Theme.space-2;
+                Label { role: TextRole.Small; text: "分页（整屏翻页）"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                ToggleSwitch {
+                    checked: root.paged;
+                    label: "分页";
+                    toggled(v) => { root.edit(16, v ? 1 : 0, ""); }
+                }
+            }
+            HorizontalLayout {
+                height: Theme.control-height;
+                spacing: Theme.space-2;
+                Label { role: TextRole.Small; text: "显示进度"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                ToggleSwitch {
+                    checked: root.show-progress;
+                    label: "显示进度";
+                    toggled(v) => { root.edit(17, v ? 1 : 0, ""); }
+                }
+            }
+            HorizontalLayout {
+                height: Theme.control-height;
+                spacing: Theme.space-2;
+                Label { role: TextRole.Small; text: "沉浸模式"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                ToggleSwitch {
+                    checked: root.hide-chrome;
+                    label: "隐藏工具栏";
+                    toggled(v) => { root.edit(18, v ? 1 : 0, ""); }
+                }
+            }
+
+            Divider { }
+
+            HorizontalLayout {
+                height: Theme.control-height;
+                spacing: Theme.space-2;
+                AppButton {
+                    kind: ButtonKind.Secondary;
+                    icon: "refresh";
+                    label: "恢复默认";
+                    clicked => { root.edit(19, 0, ""); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+    }
+}
+
+/// One block. This is the whole reading surface, so it is the only place that maps
+/// the block kinds to type.
+component NovelBlockView inherits Rectangle {
+    in property <NovelBlock> block;
+    in property <color> ink: Theme.text;
+    in property <string> font-family: "";
+    in property <length> font-size: 19px;
+    in property <int> font-weight: 400;
+    in property <bool> italic: false;
+    in property <float> line-height: 1.8;
+    in property <length> letter-spacing: 0px;
+    in property <int> align: 0;
+    in property <int> rule: 0;
+    in property <length> paragraph-gap: 12px;
+    callback open-work(string);
+
+    height: block-body.preferred-height;
+    background: transparent;
+
+    block-body := VerticalLayout {
+        spacing: 0px;
+
+        // 0 paragraph
+        if root.block.kind == 0 : BodyText {
+            text: root.block.text;
+            color: root.ink;
+            font-family: root.font-family;
+            font-size: root.font-size;
+            font-weight: root.font-weight;
+            font-italic: root.italic;
+            line-height-factor: root.line-height;
+            letter-spacing: root.letter-spacing;
+            horizontal-alignment: root.align == 0 ? left : (root.align == 1 ? center : right);
+            wrap: word-wrap;
+        }
+
+        // 1 heading: a layout, because padding only exists on layout elements
+        if root.block.kind == 1 : VerticalLayout {
+            padding-top: Theme.space-5;
+            padding-bottom: Theme.space-2;
+
+            heading := BodyText {
+                text: root.block.text;
+                color: root.ink;
+                font-family: root.font-family;
+                font-size: root.font-size * 1.25;
+                font-weight: 600;
+                line-height-factor: root.line-height;
+                letter-spacing: root.letter-spacing;
+                horizontal-alignment: root.align == 0 ? left : (root.align == 1 ? center : right);
+                wrap: word-wrap;
+            }
+        }
+
+        // 2 separator
+        if root.block.kind == 2 : Rectangle {
+            height: 28px;
+            background: transparent;
+            HorizontalLayout {
+                alignment: center;
+                Label {
+                    role: TextRole.Caption;
+                    text: "· · ·";
+                    color: root.ink;
+                }
+            }
+        }
+
+        // 3 page break
+        if root.block.kind == 3 : Rectangle {
+            height: 34px;
+            background: transparent;
+            HorizontalLayout {
+                alignment: center;
+                Label {
+                    role: TextRole.Caption;
+                    text: "— 分页 —";
+                    color: root.ink;
+                }
+            }
+        }
+
+        // 4 image
+        if root.block.kind == 4 : Rectangle {
+            height: image-box.preferred-height;
+            background: transparent;
+
+            image-box := VerticalLayout {
+                spacing: Theme.space-1;
+                Rectangle {
+                    // Aspect comes from the decoded bitmap, so the box is the right
+                    // shape before the pixels arrive (state 1 keeps the fallback
+                    // height). A zero-width source would divide by zero, hence max().
+                    height: root.block.image.width > 0
+                        ? self.width * root.block.image.height / root.block.image.width
+                        : 220px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.layer-alt;
+                    clip: true;
+
+                    Image {
+                        source: root.block.image;
+                        image-fit: contain;
+                        width: 100%;
+                        height: 100%;
+                        visible: root.block.state == 0;
+                    }
+                    if root.block.state != 0 : HorizontalLayout {
+                        alignment: center;
+                        Label {
+                            role: TextRole.Caption;
+                            text: root.block.state == 1 ? "图片载入中…" : "图片不可用 · " + root.block.id;
+                            color: Theme.text-tertiary;
+                        }
+                    }
+                }
+                if root.block.label != "" : Label {
+                    role: TextRole.Caption;
+                    text: root.block.label;
+                    color: Theme.text-tertiary;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // 5 work link / 6 external link
+        if root.block.kind == 5 || root.block.kind == 6 : Rectangle {
+            height: Theme.control-height;
+            border-radius: Theme.radius-sm;
+            background: link-row.has-hover ? Theme.layer-alt : transparent;
+
+            HorizontalLayout {
+                padding-left: Theme.space-2;
+                padding-right: Theme.space-2;
+                spacing: Theme.space-2;
+                IconSlot {
+                    name: root.block.kind == 5 ? "grid" : "open";
+                    slot: Theme.icon-size;
+                    tint: Theme.accent-ink;
+                }
+                Label {
+                    role: TextRole.Small;
+                    text: root.block.text;
+                    color: Theme.accent-ink;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            link-row := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.open-work(root.block.id); }
+            }
+        }
+    }
+}
+
+/// The scrolling body: a measured text column, centred, with the block list in it.
+///
+/// Separate from the reader so the reader owns the toolbar and the panel while this
+/// owns exactly one thing: where the text goes. Its progress is derived from the
+/// scroll view's own numbers, so the percentage can never disagree with the pixels
+/// on screen.
+component ReaderBody inherits Rectangle {
+    in-out property <length> scroll-y: 0px;
+    in property <color> ink: Theme.text;
+    in property <color> paper: Theme.canvas;
+    in property <int> state: 1;
+    in property <string> message: "";
+    in property <[NovelBlock]> blocks: [];
+    in property <string> font-family: "";
+    in property <length> font-size: 19px;
+    in property <int> font-weight: 400;
+    in property <bool> italic: false;
+    in property <float> line-height: 1.8;
+    in property <length> letter-spacing: 0px;
+    in property <length> paragraph-gap: 12px;
+    in property <int> align: 0;
+    in property <int> rule: 0;
+    in property <length> margin-x: 48px;
+    in property <length> measure: 720px;
+    out property <float> progress: Math.max(0.0, Math.min(1.0,
+        (0px - root.scroll-y) / max(1px, root.body-height - root.viewport-height)));
+    // The laid-out height of the scrolling column. Not sv.content-height: that is
+    // an *input* to the flickable and reads 0 until something sets it, which made
+    // the restore timer never fire and the progress read 0% above a body that was
+    // visibly two thousand pixels tall.
+    out property <length> body-height: column.height;
+    out property <length> viewport-height: sv.visible-height;
+    callback scrolled(length);
+    callback retry();
+    callback open-work(string);
+
+    background: root.paper;
+
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        visible: root.state == 1;
+        background: root.paper;
+        StateView {
+            kind: StateKind.Loading;
+            title: "正在载入正文…";
+            description: "Pixiv /ajax/novel/{id} 的 content 字段";
+        }
+    }
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        visible: root.state == 3;
+        background: root.paper;
+        StateView {
+            kind: StateKind.Error;
+            title: "正文载入失败";
+            description: root.message;
+            action-label: "重试";
+            retry => { root.retry(); }
+            action => { root.retry(); }
+        }
+    }
+
+    // The scroll view is declared unconditionally, and only its visibility follows
+    // the state: a conditional element cannot be the subject of an outer binding,
+    // and both the body height and the viewport height have to be readable from
+    // this component's own properties (the page's paging maths needs them).
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        background: root.paper;
+        visible: root.state == 0;
+
+        sv := ScrollView {
+            width: root.width;
+            height: root.height;
+            content-y <=> root.scroll-y;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+            scrolled => { root.scrolled(root.scroll-y); }
+
+            // The measure is a fixed column centred in the viewport, so widening the
+            // window widens the margins, not the line length. Below the measure the
+            // column simply fills what is left.
+            column := HorizontalLayout {
+                width: max(0px, sv.visible-width - Theme.scrollbar-gutter);
+                padding-top: Theme.space-8;
+                padding-bottom: Theme.space-8;
+
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+
+                content := VerticalLayout {
+                    width: Math.min(root.measure, max(0px, sv.visible-width - root.margin-x * 2 - Theme.scrollbar-gutter));
+                    padding-left: root.margin-x;
+                    padding-right: root.margin-x;
+                    spacing: root.rule == 0 ? root.paragraph-gap : 0px;
+
+                    for b[i] in root.blocks : NovelBlockView {
+                        block: b;
+                        ink: root.ink;
+                        font-family: root.font-family;
+                        font-size: root.font-size;
+                        font-weight: root.font-weight;
+                        italic: root.italic;
+                        line-height: root.line-height;
+                        letter-spacing: root.letter-spacing;
+                        align: root.align;
+                        rule: root.rule;
+                        paragraph-gap: root.paragraph-gap;
+                        open-work(id) => { root.open-work(id); }
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+            }
+        }
+    }
+}
+
+export component NovelReaderPage inherits Rectangle {
+    // ---- document + typography, in one value ----
+    in property <ReaderView> view;
+    in property <[NovelBlock]> blocks: [];
+    /// The window is in its own fullscreen state; the toolbar's button reflects it.
+    in property <bool> fullscreen: false;
+    /// Key commands from the shell: 1 page down, 2 page up, 3 top, 4 end,
+    /// 5 settings. Watched through a sequence counter because a repeated command
+    /// (PageDown five times) has to be five distinct events.
+    in property <int> command: 0;
+    in property <int> command-seq: 0;
+
+    changed command-seq => {
+        if (root.command == 1) { root.step-page(1); }
+        else if (root.command == 2) { root.step-page(-1); }
+        else if (root.command == 3) { root.jump(0); }
+        else if (root.command == 4) { root.jump(1); }
+        else if (root.command == 5) { root.toggle-settings(); }
+    }
+
+    // ---- reading position ----
+    in-out property <length> scroll-y: 0px;
+    /// Set by Rust to a 0..1 fraction to restore; the page applies it once the
+    /// body has a height and writes -1 back. A property rather than a function
+    /// call because a restore that arrives before the first layout pass must still
+    /// land, and a timer is the only thing that can wait for layout.
+    in-out property <float> restore-ratio: -1.0;
+    /// The body's own progress, live: one number from one place.
+    out property <float> progress: reader-body.progress;
+    callback scrolled(length, float);
+
+    // Any change of position reports itself, including a programmatic one (the
+    // restore, PageUp/PageDown, Home/End). Without this the shell's progress readout
+    // only moved when the user scrolled with the wheel.
+    changed progress => { root.scrolled(root.scroll-y, root.progress); }
+
+    // ---- chrome ----
+    callback back();
+    callback toggle-settings();
+    callback toggle-chrome();
+    callback toggle-fullscreen();
+    callback prev-chapter();
+    callback next-chapter();
+    callback retry();
+    callback open-external();
+
+    /// Any edit in the settings panel, opcode + value + text (see ReaderSettings).
+    callback edit(int, float, string);
+
+    background: root.view.paper;
+
+    // Restore: one timer that waits for a laid-out body. It stops itself the
+    // moment the ratio is applied, so an idle reader schedules nothing.
+    // Restore: converge instead of guessing once.
+    //
+    // The first tick may land before the column has finished growing, and a
+    // ScrollView clamps the offset it is handed to its own content extent. Writing
+    // the target and reading the value back tells us whether the assignment stuck;
+    // the timer stops when it did, and gives up after two seconds rather than
+    // fighting a layout that will never agree.
+    property <int> restore-ticks: 0;
+    changed restore-ratio => { root.restore-ticks = 0; }
+    Timer {
+        interval: 16ms;
+        running: root.restore-ratio >= 0.0 && reader-body.body-height > 0px;
+        triggered => {
+            let range = Math.max(1px, reader-body.body-height - reader-body.viewport-height);
+            root.scroll-y = 0px - range * root.restore-ratio;
+            root.restore-ticks += 1;
+            // Converge on the *ratio*, not on the offset: the column keeps growing
+            // for a few frames after the first tick, and an offset that sticks while
+            // the content is still short lands at the wrong fraction (measured: 18%
+            // after asking for 55%).
+            if (Math.abs(reader-body.progress - root.restore-ratio) < 0.005 || root.restore-ticks > 180) {
+                root.restore-ratio = -1.0;
+            }
+        }
+    }
+
+    // ---- toolbar ----
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: Theme.reader-bar-height;
+        visible: root.view.state == 0 && root.view.chrome-visible;
+        background: Theme.chrome;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        HorizontalLayout {
+            padding-left: Theme.space-2;
+            padding-right: Theme.space-2;
+            spacing: Theme.space-2;
+
+            IconButton {
+                icon: "back";
+                tip: "返回小说详情";
+                row-height: Theme.reader-bar-height;
+                clicked => { root.back(); }
+            }
+            IconButton {
+                icon: "chevron-left";
+                tip: "上一章";
+                enabled: root.view.has-prev;
+                row-height: Theme.reader-bar-height;
+                clicked => { root.prev-chapter(); }
+            }
+            IconButton {
+                icon: "chevron-right";
+                tip: "下一章";
+                enabled: root.view.has-next;
+                row-height: Theme.reader-bar-height;
+                clicked => { root.next-chapter(); }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 0px;
+                horizontal-stretch: 1;
+                Label {
+                    role: TextRole.Small;
+                    emphasis: Emphasis.Medium;
+                    text: root.view.title;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                }
+                Label {
+                    role: TextRole.Caption;
+                    text: root.view.chapter-meta;
+                    color: Theme.text-tertiary;
+                    horizontal-alignment: center;
+                }
+            }
+
+            if root.view.show-progress : Label {
+                role: TextRole.Caption;
+                text: Math.round(root.progress * 100) + "%";
+                color: Theme.text-secondary;
+            }
+            AppButton {
+                kind: ButtonKind.Subtle;
+                label: "Aa";
+                compact: true;
+                row-height: Theme.reader-bar-height;
+                clicked => { root.toggle-settings(); }
+            }
+            IconButton {
+                icon: "fullscreen";
+                tip: "沉浸模式 (F11)";
+                active: root.fullscreen;
+                row-height: Theme.reader-bar-height;
+                clicked => { root.toggle-fullscreen(); }
+            }
+        }
+    }
+
+    // ---- body ----
+    reader-body := ReaderBody {
+        x: 0px;
+        width: root.width;
+        y: root.view.chrome-visible && root.view.state == 0 ? Theme.reader-bar-height : 0px;
+        height: root.height - (root.view.chrome-visible && root.view.state == 0 ? Theme.reader-bar-height : 0px);
+        scroll-y <=> root.scroll-y;
+        ink: root.view.ink;
+        paper: root.view.paper;
+        state: root.view.state;
+        message: root.view.message;
+        blocks: root.blocks;
+        font-family: root.view.font-family;
+        font-size: root.view.font-size;
+        font-weight: root.view.font-weight;
+        italic: root.view.italic;
+        line-height: root.view.line-height;
+        letter-spacing: root.view.letter-spacing;
+        paragraph-gap: root.view.paragraph-gap;
+        align: root.view.align;
+        rule: root.view.rule;
+        margin-x: root.view.margin-x;
+        measure: root.view.measure;
+        scrolled(y) => {
+            root.progress = reader-body.progress;
+            root.scrolled(y, reader-body.progress);
+        }
+        retry => { root.retry(); }
+        open-work(id) => { root.open-external(); }
+    }
+
+    /// Step one viewport, in the reader's own paged semantics.
+    ///
+    /// Public so the window's key handler can drive it: PageUp/PageDown and Home/
+    /// End belong to the reader, and this is the only thing that knows where the
+    /// scroll view's limits are.
+    public function step-page(direction: int) {
+        let overlap = root.view.paged ? 0px : 56px;
+        let step = max(40px, reader-body.viewport-height - overlap);
+        let range = max(0px, reader-body.body-height - reader-body.viewport-height);
+        root.scroll-y = Math.max(0px - range, Math.min(0px, root.scroll-y - step * direction));
+    }
+
+    public function jump(where: int) {
+        let range = max(0px, reader-body.body-height - reader-body.viewport-height);
+        root.scroll-y = where <= 0 ? 0px : 0px - range;
+    }
+
+    // ---- settings panel ----
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        visible: root.view.settings-open;
+        background: transparent;
+
+        scrim := TouchArea {
+            clicked => { root.toggle-settings(); }
+        }
+    }
+
+    Rectangle {
+        x: root.width - min(Theme.reader-panel-width, root.width - Theme.space-8);
+        y: 0px;
+        visible: root.view.settings-open;
+        width: min(Theme.reader-panel-width, root.width - Theme.space-8);
+        height: root.height;
+        background: Theme.flyout;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: Theme.shadow-2;
+        drop-shadow-offset-x: -6px;
+
+        ReaderSettings {
+            width: 100%;
+            height: 100%;
+            theme-mode: root.view.theme-index;
+            custom-background: root.view.custom-background;
+            custom-ink: root.view.custom-ink;
+            font-family: root.view.font-family;
+            font-size: root.view.font-size-ratio;
+            line-height: root.view.line-height-ratio;
+            letter-spacing: root.view.letter-spacing-ratio;
+            paragraph-gap: root.view.paragraph-gap-ratio;
+            indent: root.view.indent-ratio;
+            margin-x: root.view.margin-ratio;
+            measure: root.view.measure-ratio;
+            weight-index: root.view.weight-index;
+            italic: root.view.italic;
+            align: root.view.align;
+            rule: root.view.rule;
+            ruby-inline: root.view.ruby;
+            paged: root.view.paged;
+            show-progress: root.view.show-progress;
+            hide-chrome: !root.view.chrome-visible;
+            edit(op, value, text) => { root.edit(op, value, text); }
+        }
+    }
+
+    // ---- progress pill (reading with the toolbar hidden) ----
+    Rectangle {
+        visible: root.view.state == 0 && root.view.show-progress && !root.view.chrome-visible;
+        x: root.width - self.width - Theme.space-4;
+        y: root.height - self.height - Theme.space-4;
+        width: max(48px, pill.preferred-width);
+        height: 26px;
+        border-radius: Theme.radius-pill;
+        background: Theme.viewer-chrome;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        pill := HorizontalLayout {
+            padding-left: Theme.space-3;
+            padding-right: Theme.space-3;
+            alignment: center;
+            Label {
+                role: TextRole.Caption;
+                text: Math.round(root.progress * 100) + "%";
+                color: Theme.text-secondary;
+            }
+        }
+    }
+}
