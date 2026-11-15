@@ -73,7 +73,8 @@ not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
 | Download queue: pause / resume per row or all, throughput and a per-row ETA | **Implemented** — a resumed row restarts its body (see limits) |
 | Session login via system browser + `PHPSESSID` | **Implemented** |
 | Bookmark / follow mutations | **Implemented** and verified against a live account — see [`docs/NETWORK-TEST-REPORT.md`](docs/NETWORK-TEST-REPORT.md) row 8 |
-| Novel reader | **Placeholder** (structured page, opens the official page) |
+| Novel reader | **Implemented** — native page, Pixiv body markup parsed into rows (ruby, embedded images, page breaks, chapter headings), 19 typography settings persisted to SQLite, reading position and history, series chapters, immersive mode. See `docs/NOVEL-READER.md` |
+| Novel search, novel page, recent reading | **Implemented** — `/ajax/search/novels/`, `/ajax/novel/{id}`, `/ajax/novel/series_content/{id}`; the rail has a 小说 entry with its own search box, results list and recent-read list |
 | Comments, "related works" | **Not available** — no usable endpoint shape found |
 | `/ajax/discovery/artworks` (the For-you and recommended-artist bands) | **Implemented** — verified 200 for every mode (see [`docs/API-NOTES.md`](docs/API-NOTES.md)) |
 

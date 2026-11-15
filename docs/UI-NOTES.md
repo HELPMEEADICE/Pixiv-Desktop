@@ -1299,3 +1299,70 @@ exercised on a real display.
 
 **Bookmark / follow against a live session** - unchanged from round one: no
 credential was available.
+
+---
+
+## 14. Round ten — typography as a system, and four Slint geometry traps
+
+### 14.1 The typography layer
+
+Every text step now has a name: `TextRole` (Caption 11 · Small 12 · Body 14 · Subhead 14 ·
+Title 16 · Page 20 · Display 24) and `Emphasis` (Regular/Medium/Semibold/Bold).
+`components.slint` exposes exactly two text elements:
+
+* `Label` — one line, elided, natural line height, `vertical-alignment: center`.
+  It is the only supported way to put text in a row, because a `Text` handed a height
+  puts its first line at the *top* of that box; that is the "label sits 3-6 px above the
+  number beside it" class of defect, and it cannot be fixed by adding an offset.
+* `BodyText` — wrapped, `vertical-alignment: top`, and the only place a
+  `line-height-factor` is applied (`Theme.line-body` = 1.5, `line-small` = 1.35).
+
+73 call sites were converted mechanically from `Text { font-size: Theme.font-…; }` to the
+two primitives. A single-line label keeps the natural line height on purpose: a
+non-default `line-height-factor` moves a `Text` onto Slint's complex-text path, and the
+feed draws ~200 single-line labels for every paragraph it draws.
+
+Two gates hold the layer:
+
+* `text_in_a_horizontal_row_states_its_cross_axis_alignment` — a `Text` that is a direct
+  child of a `HorizontalLayout` must say where its line goes (`vertical-alignment` or
+  `y`). Text in a `VerticalLayout` is exempt: there the vertical axis is the layout's
+  main axis.
+* `reader_bounds_match_the_preference_model` — the reader's slider bounds on the Slint
+  side and the `MIN_/MAX_` constants that actually clamp the stored value are compared
+  across the two languages, because the compiler cannot see both.
+
+Writing that second gate found a bug in itself worth recording: reading "the first
+number on the declaration line" of `pub const MIN_FONT_SIZE: f32 = 14.0;` returns 32,
+from the `f32`. It reads the last number now.
+
+### 14.2 Four Slint geometry traps this round paid for
+
+All four were found by measuring, and all four look correct in review:
+
+1. **A conditional element at the top level of a non-layout component collapses.**
+   `if cond : Rectangle { width: 100%; height: 44px; … }` as a direct child of the page
+   root paints nothing at all — not even its children — because the conditional wrapper
+   is sized from its single child and the child's `100%` closes the loop at zero. Inside a
+   layout the same construct is fine, which is why every page's `if PageScroll` works and
+   the reader's toolbar did not. Fixed with a plain element and `visible: cond`, which is
+   what `main.slint` does for pages.
+2. **A child of a plain `Rectangle` is not stretched.** `width: 100%` is only meaningful
+   against a parent whose own size is known; the reader's scroll wrapper and its
+   `ScrollView` both said 100% and both came out ~378 px tall inside a 764 px page.
+   Explicit `width: root.width; height: root.height` is the idiom that works.
+3. `ScrollView.content-height` is an *input* to the flickable and reads 0 until something
+   sets it. The reader's scroll range is `column.height - sv.visible-height`, and its
+   progress is a binding on that, not a value written from the `scrolled` handler — which
+   is why the readout stayed at 0% after a restore until the user scrolled.
+4. A restore must converge on the *ratio*, not on the offset: the column keeps growing
+   for a few frames, so an offset that "sticks" on the first tick lands at the wrong
+   fraction (measured: 18% after asking for 55%).
+
+### 14.3 What the reader shares with the rest of the app
+
+Same `Theme` colours, same `Label`/`BodyText` primitives, same `PageScroll` idiom for the
+novels list, same `StateView` for loading/error, same `InfoBar` for a failed chapter list,
+same segmented control and toggle switches in the settings panel. The reading surface
+is the one place with its own palette (`ReaderTheme`), because a sepia page is not "the
+app in light mode".
