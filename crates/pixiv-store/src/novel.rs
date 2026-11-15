@@ -309,7 +309,8 @@ mod tests {
         assert!(s.series_progress("555").unwrap().is_empty());
         assert_eq!(s.novel_stats().unwrap(), (0, 0));
         assert_eq!(s.novel_setting("reader").unwrap(), None);
-        s.clear_novel_history().expect("clearing an empty table is a no-op");
+        s.clear_novel_history()
+            .expect("clearing an empty table is a no-op");
     }
 
     #[test]
@@ -365,14 +366,19 @@ mod tests {
         assert_eq!(second.percent, 0.9);
         assert!(second.finished);
         assert!(second.updated_at >= first.updated_at);
-        assert_eq!(s.novel_stats().unwrap().0, 1, "an upsert must not duplicate");
+        assert_eq!(
+            s.novel_stats().unwrap().0,
+            1,
+            "an upsert must not duplicate"
+        );
     }
 
     #[test]
     fn series_progress_returns_only_that_series() {
         let s = store();
         for (novel, series) in [("1", "555"), ("2", "555"), ("3", "777"), ("4", "")] {
-            s.save_novel_progress(&progress(novel, series, 0.5)).unwrap();
+            s.save_novel_progress(&progress(novel, series, 0.5))
+                .unwrap();
         }
 
         let mut series: Vec<String> = s
@@ -402,7 +408,10 @@ mod tests {
         row.series_id = String::new();
         s.save_novel_progress(&row).unwrap();
         assert_eq!(
-            s.novel_progress("standalone").unwrap().expect("row").series_id,
+            s.novel_progress("standalone")
+                .unwrap()
+                .expect("row")
+                .series_id,
             ""
         );
 
@@ -463,7 +472,8 @@ mod tests {
         let s = store();
         assert_eq!(s.novel_setting("reader").unwrap(), None);
 
-        s.set_novel_setting("reader", r#"{"font_size":19.0}"#).unwrap();
+        s.set_novel_setting("reader", r#"{"font_size":19.0}"#)
+            .unwrap();
         assert_eq!(
             s.novel_setting("reader").unwrap().as_deref(),
             Some(r#"{"font_size":19.0}"#)
@@ -492,7 +502,10 @@ mod tests {
         row.novel_id = nasty.to_string();
         row.series_id = nasty.to_string();
         s.save_novel_progress(&row).unwrap();
-        assert_eq!(s.novel_progress(nasty).unwrap().expect("row").series_id, nasty);
+        assert_eq!(
+            s.novel_progress(nasty).unwrap().expect("row").series_id,
+            nasty
+        );
 
         let mut entry = history("1", 0);
         entry.title = nasty.to_string();
@@ -513,7 +526,10 @@ mod tests {
         for id in ["a", "b", "c", "d", "e"] {
             s.record_novel_read(&history(id, 1)).unwrap();
         }
-        let plan = plan_of(&s, "SELECT novel_id FROM novel_history ORDER BY seq DESC LIMIT 5");
+        let plan = plan_of(
+            &s,
+            "SELECT novel_id FROM novel_history ORDER BY seq DESC LIMIT 5",
+        );
         assert!(plan.contains("idx_novel_history_seq"), "{plan}");
         assert!(!plan.contains("USE TEMP B-TREE FOR ORDER BY"), "{plan}");
 
@@ -527,9 +543,13 @@ mod tests {
         let s = store();
         for index in 0..200 {
             let novel = format!("{index}");
-            s.save_novel_progress(&progress(&novel, "555", 0.5)).unwrap();
+            s.save_novel_progress(&progress(&novel, "555", 0.5))
+                .unwrap();
         }
-        let plan = plan_of(&s, "SELECT novel_id FROM novel_progress WHERE series_id = '555'");
+        let plan = plan_of(
+            &s,
+            "SELECT novel_id FROM novel_progress WHERE series_id = '555'",
+        );
         assert!(plan.contains("idx_novel_progress_series"), "{plan}");
     }
 }

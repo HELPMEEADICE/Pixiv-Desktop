@@ -431,11 +431,7 @@ fn marker(rest: &str) -> Option<(Marker, usize)> {
 }
 
 /// A `[[name:...]]` marker.
-fn nested(
-    rest: &str,
-    open: &str,
-    build: fn(&str) -> Option<Marker>,
-) -> Option<(Marker, usize)> {
+fn nested(rest: &str, open: &str, build: fn(&str) -> Option<Marker>) -> Option<(Marker, usize)> {
     let end = closed(rest, open.len(), CLOSE_NESTED)?;
     let inner = &rest[open.len()..end - CLOSE_NESTED.len()];
     build(inner).map(|marker| (marker, end))
@@ -899,7 +895,10 @@ mod tests {
                 "body: {body}"
             );
         }
-        assert_eq!(doc("[[jumpuri:作者ページ > https://x.example/]]").plain, "作者ページ");
+        assert_eq!(
+            doc("[[jumpuri:作者ページ > https://x.example/]]").plain,
+            "作者ページ"
+        );
     }
 
     #[test]
@@ -958,11 +957,7 @@ mod tests {
         let d = doc("前の段落\n[uploadedimage:1]\n後の段落");
         assert_eq!(
             kinds(&d),
-            vec![
-                BlockKind::Paragraph,
-                BlockKind::Image,
-                BlockKind::Paragraph
-            ]
+            vec![BlockKind::Paragraph, BlockKind::Image, BlockKind::Paragraph]
         );
         assert_eq!(render(&d.blocks[0], RubyMode::Inline), "前の段落");
         assert_eq!(render(&d.blocks[2], RubyMode::Inline), "後の段落");
@@ -971,7 +966,10 @@ mod tests {
     #[test]
     fn images_are_listed_once_even_when_repeated() {
         let map = image_map(&[("1", "s1", "l1"), ("2", "s2", "l2")]);
-        let d = parse("[uploadedimage:1]\n[uploadedimage:2]\n[uploadedimage:1]", &map);
+        let d = parse(
+            "[uploadedimage:1]\n[uploadedimage:2]\n[uploadedimage:1]",
+            &map,
+        );
         assert_eq!(d.blocks.len(), 3);
         assert_eq!(d.images.len(), 2, "a repeated id is fetched once");
         assert_eq!(d.images[0].large, "l1");
@@ -1010,14 +1008,20 @@ mod tests {
 
         // A line of spaces is blank too.
         let spaced = doc("一\n   \n二");
-        assert_eq!(kinds(&spaced), vec![BlockKind::Paragraph, BlockKind::Paragraph]);
+        assert_eq!(
+            kinds(&spaced),
+            vec![BlockKind::Paragraph, BlockKind::Paragraph]
+        );
     }
 
     #[test]
     fn an_unknown_marker_stays_literal() {
         let d = doc("[kana:よみがな]は残る");
         assert_eq!(kinds(&d), vec![BlockKind::Paragraph]);
-        assert_eq!(d.blocks[0].spans, vec![Span::Text("[kana:よみがな]は残る".to_string())]);
+        assert_eq!(
+            d.blocks[0].spans,
+            vec![Span::Text("[kana:よみがな]は残る".to_string())]
+        );
         assert_eq!(d.plain, "[kana:よみがな]は残る");
         // No control character ever leaves the parser.
         assert!(!d.plain.chars().any(|ch| ch.is_control()));
@@ -1138,8 +1142,14 @@ mod tests {
     #[test]
     fn ruby_mode_serialises_lowercase_and_defaults_to_inline() {
         assert_eq!(RubyMode::default(), RubyMode::Inline);
-        assert_eq!(serde_json::to_string(&RubyMode::Inline).unwrap(), "\"inline\"");
-        assert_eq!(serde_json::to_string(&RubyMode::Hidden).unwrap(), "\"hidden\"");
+        assert_eq!(
+            serde_json::to_string(&RubyMode::Inline).unwrap(),
+            "\"inline\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RubyMode::Hidden).unwrap(),
+            "\"hidden\""
+        );
         assert_eq!(
             serde_json::from_str::<RubyMode>("\"hidden\"").unwrap(),
             RubyMode::Hidden

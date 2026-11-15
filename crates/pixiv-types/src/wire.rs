@@ -913,7 +913,6 @@ pub struct FollowerListWire {
     pub total: String,
 }
 
-
 // ===========================================================================
 // Novels (/ajax/novel/*, /ajax/search/novels/*, /ajax/user/{id}/novels)
 // ===========================================================================

@@ -186,7 +186,12 @@ impl ReaderPrefs {
     pub fn clamped(&self) -> Self {
         Self {
             font_family: self.font_family.trim().to_string(),
-            font_size: bound(self.font_size, MIN_FONT_SIZE, MAX_FONT_SIZE, DEFAULT_FONT_SIZE),
+            font_size: bound(
+                self.font_size,
+                MIN_FONT_SIZE,
+                MAX_FONT_SIZE,
+                DEFAULT_FONT_SIZE,
+            ),
             font_weight: snap_weight(self.font_weight),
             italic: self.italic,
             line_height: bound(
@@ -214,7 +219,12 @@ impl ReaderPrefs {
                 DEFAULT_FIRST_LINE_INDENT,
             ),
             margin_x: bound(self.margin_x, MIN_MARGIN_X, MAX_MARGIN_X, DEFAULT_MARGIN_X),
-            max_width: bound(self.max_width, MIN_MAX_WIDTH, MAX_MAX_WIDTH, DEFAULT_MAX_WIDTH),
+            max_width: bound(
+                self.max_width,
+                MIN_MAX_WIDTH,
+                MAX_MAX_WIDTH,
+                DEFAULT_MAX_WIDTH,
+            ),
             align: self.align,
             paragraph_rule: self.paragraph_rule,
             theme: self.theme,
@@ -452,7 +462,15 @@ mod tests {
     #[test]
     fn an_invalid_colour_falls_back_to_the_built_in_one() {
         for bad in [
-            "", " ", "red", "#fff", "#f7f3e", "#f7f3e99", "f7f3e9", "#GGGGGG", "rgb(1,2,3)",
+            "",
+            " ",
+            "red",
+            "#fff",
+            "#f7f3e",
+            "#f7f3e99",
+            "f7f3e9",
+            "#GGGGGG",
+            "rgb(1,2,3)",
         ] {
             let prefs = ReaderPrefs {
                 custom_background: bad.to_string(),
@@ -460,7 +478,10 @@ mod tests {
                 ..ReaderPrefs::default()
             }
             .clamped();
-            assert_eq!(prefs.custom_background, DEFAULT_BACKGROUND, "colour {bad:?}");
+            assert_eq!(
+                prefs.custom_background, DEFAULT_BACKGROUND,
+                "colour {bad:?}"
+            );
             assert_eq!(prefs.custom_ink, DEFAULT_INK, "colour {bad:?}");
         }
 
@@ -588,7 +609,10 @@ mod tests {
             serde_json::to_string(&ReaderTheme::Sepia).unwrap(),
             r#""sepia""#
         );
-        assert_eq!(serde_json::to_string(&RubyMode::Inline).unwrap(), r#""inline""#);
+        assert_eq!(
+            serde_json::to_string(&RubyMode::Inline).unwrap(),
+            r#""inline""#
+        );
 
         assert_eq!(Align::default(), Align::Start);
         assert_eq!(ParagraphRule::default(), ParagraphRule::Space);

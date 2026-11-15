@@ -54,7 +54,8 @@ pub(crate) fn install(app: &Shared) {
                     // everywhere this shell borrows from.
                     drop(app);
                     App::exit_selection(&shared);
-                } else if page == Destination::Detail || page == Destination::NovelReader
+                } else if page == Destination::Detail
+                    || page == Destination::NovelReader
                     || page == Destination::Novel
                 {
                     drop(app);

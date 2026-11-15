@@ -197,7 +197,6 @@ fn reading_label(seconds: u32) -> String {
     format!("约 {minutes} 分钟")
 }
 
-
 /// Offline novel fixture, for captures and for the reader gate.
 ///
 /// PIXIV_DESKTOP_NOVEL_FIXTURE=<path> makes the novel surfaces read one captured
@@ -291,7 +290,9 @@ fn paper_ink(prefs: &ReaderPrefs, app_dark: bool) -> (slint::Color, slint::Color
         }
         novel_prefs::ReaderTheme::Light => ("#fbfbfb", "#1a1a1a"),
         novel_prefs::ReaderTheme::Dark => ("#1b1b1b", "#e8e8e8"),
-        novel_prefs::ReaderTheme::Sepia => (novel_prefs::DEFAULT_BACKGROUND, novel_prefs::DEFAULT_INK),
+        novel_prefs::ReaderTheme::Sepia => {
+            (novel_prefs::DEFAULT_BACKGROUND, novel_prefs::DEFAULT_INK)
+        }
         novel_prefs::ReaderTheme::Custom => {
             let bg = prefs.custom_background.trim();
             let fg = prefs.custom_ink.trim();
@@ -309,15 +310,9 @@ fn paper_ink(prefs: &ReaderPrefs, app_dark: bool) -> (slint::Color, slint::Color
 fn colour(hex: &str, fallback: &str) -> slint::Color {
     let parse = |text: &str| u8::from_str_radix(text, 16).ok();
     let hex = hex.trim().trim_start_matches('#');
-    let bytes = |text: &str| {
-        match (
-            parse(&text[0..2]),
-            parse(&text[2..4]),
-            parse(&text[4..6]),
-        ) {
-            (Some(r), Some(g), Some(b)) => Some((r, g, b)),
-            _ => None,
-        }
+    let bytes = |text: &str| match (parse(&text[0..2]), parse(&text[2..4]), parse(&text[4..6])) {
+        (Some(r), Some(g), Some(b)) => Some((r, g, b)),
+        _ => None,
     };
     match hex.len() {
         6 => match bytes(hex) {
@@ -610,7 +605,11 @@ fn text_row(kind: i32, text: String, prefs: &ReaderPrefs) -> NovelBlock {
 }
 
 fn link_row(label: String, href: String) -> NovelBlock {
-    let kind = if href.starts_with("jump:") { K_WORK } else { K_LINK };
+    let kind = if href.starts_with("jump:") {
+        K_WORK
+    } else {
+        K_LINK
+    };
     NovelBlock {
         kind,
         text: label.into(),
@@ -884,7 +883,11 @@ impl App {
                 format!(
                     "第 {} 章 · {}",
                     nav.order,
-                    if nav.concluded { "已完结" } else { "连载中" }
+                    if nav.concluded {
+                        "已完结"
+                    } else {
+                        "连载中"
+                    }
                 )
             })
             .unwrap_or_default();
@@ -967,10 +970,7 @@ impl App {
                             list.iter().map(|chapter| chapter.id.get()).collect();
                         app.novel.chapter_index = current
                             .and_then(|id| {
-                                app.novel
-                                    .chapter_ids
-                                    .iter()
-                                    .position(|known| *known == id)
+                                app.novel.chapter_ids.iter().position(|known| *known == id)
                             })
                             .unwrap_or(0);
                         let rows: Vec<NovelChapter> = list
@@ -1005,7 +1005,12 @@ impl App {
     /// Push the landing-page value to Slint.
     fn publish_novel_view(&mut self) {
         let mut view = self.novel.view.clone();
-        if let Some(url) = self.novel.novel.as_ref().and_then(|novel| novel.cover.clone()) {
+        if let Some(url) = self
+            .novel
+            .novel
+            .as_ref()
+            .and_then(|novel| novel.cover.clone())
+        {
             match self.novel.images.get(&url) {
                 Some(image) => {
                     view.cover = image.clone();
@@ -1248,12 +1253,18 @@ impl App {
             2 => prefs.custom_ink = text.trim().to_string(),
             3 => prefs.font_family = text.trim().to_string(),
             4 => {
-                prefs.font_size =
-                    value_of(value, novel_prefs::MIN_FONT_SIZE, novel_prefs::MAX_FONT_SIZE)
+                prefs.font_size = value_of(
+                    value,
+                    novel_prefs::MIN_FONT_SIZE,
+                    novel_prefs::MAX_FONT_SIZE,
+                )
             }
             5 => {
-                prefs.line_height =
-                    value_of(value, novel_prefs::MIN_LINE_HEIGHT, novel_prefs::MAX_LINE_HEIGHT)
+                prefs.line_height = value_of(
+                    value,
+                    novel_prefs::MIN_LINE_HEIGHT,
+                    novel_prefs::MAX_LINE_HEIGHT,
+                )
             }
             6 => {
                 prefs.letter_spacing = value_of(
@@ -1281,8 +1292,11 @@ impl App {
                     value_of(value, novel_prefs::MIN_MARGIN_X, novel_prefs::MAX_MARGIN_X)
             }
             10 => {
-                prefs.max_width =
-                    value_of(value, novel_prefs::MIN_MAX_WIDTH, novel_prefs::MAX_MAX_WIDTH)
+                prefs.max_width = value_of(
+                    value,
+                    novel_prefs::MIN_MAX_WIDTH,
+                    novel_prefs::MAX_MAX_WIDTH,
+                )
             }
             11 => {
                 let index = value.round() as i32;
@@ -1667,9 +1681,33 @@ mod tests {
         assert_eq!(view.theme_index, theme_index(prefs.theme));
         assert_eq!(view.align, align_index(prefs.align));
         assert_eq!(view.rule, rule_index(prefs.paragraph_rule));
-        assert!((value_of(view.font_size_ratio, novel_prefs::MIN_FONT_SIZE, novel_prefs::MAX_FONT_SIZE) - prefs.font_size).abs() < 0.01);
-        assert!((value_of(view.line_height_ratio, novel_prefs::MIN_LINE_HEIGHT, novel_prefs::MAX_LINE_HEIGHT) - prefs.line_height).abs() < 0.01);
-        assert!((value_of(view.measure_ratio, novel_prefs::MIN_MAX_WIDTH, novel_prefs::MAX_MAX_WIDTH) - prefs.max_width).abs() < 0.5);
+        assert!(
+            (value_of(
+                view.font_size_ratio,
+                novel_prefs::MIN_FONT_SIZE,
+                novel_prefs::MAX_FONT_SIZE
+            ) - prefs.font_size)
+                .abs()
+                < 0.01
+        );
+        assert!(
+            (value_of(
+                view.line_height_ratio,
+                novel_prefs::MIN_LINE_HEIGHT,
+                novel_prefs::MAX_LINE_HEIGHT
+            ) - prefs.line_height)
+                .abs()
+                < 0.01
+        );
+        assert!(
+            (value_of(
+                view.measure_ratio,
+                novel_prefs::MIN_MAX_WIDTH,
+                novel_prefs::MAX_MAX_WIDTH
+            ) - prefs.max_width)
+                .abs()
+                < 0.5
+        );
     }
 
     #[test]
@@ -1728,7 +1766,11 @@ mod tests {
         assert!(!rows.is_empty(), "a captured body must produce rows");
         assert!(document.characters > 100, "the body has text");
         for row in &rows {
-            assert!(!row.text.contains("[[rb:"), "ruby markup leaked: {}", row.text);
+            assert!(
+                !row.text.contains("[[rb:"),
+                "ruby markup leaked: {}",
+                row.text
+            );
             assert!(!row.text.contains("[uploadedimage:"), "image markup leaked");
             assert!(!row.text.contains("[newpage]"), "page-break markup leaked");
         }

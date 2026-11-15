@@ -1842,7 +1842,10 @@ fn entity_at(tail: &str) -> Option<(usize, String)> {
         return None;
     }
     let digits = &body[..semi];
-    let code = match digits.strip_prefix('x').or_else(|| digits.strip_prefix('X')) {
+    let code = match digits
+        .strip_prefix('x')
+        .or_else(|| digits.strip_prefix('X'))
+    {
         Some(hex) => u32::from_str_radix(hex, 16).ok()?,
         None => digits.parse::<u32>().ok()?,
     };

@@ -613,4 +613,3 @@ async fn live_novel_detail_carries_the_whole_body() {
     assert_eq!(chapters[0].order, 1, "chapters are ordered for reading");
     assert!(chapters.iter().all(|chapter| !chapter.id.is_zero()));
 }
-

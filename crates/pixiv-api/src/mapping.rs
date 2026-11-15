@@ -16,14 +16,15 @@ use serde_json::Value;
 use pixiv_types::domain::{
     Account, BookmarkRestrict, BookmarkState, DiscoveryBatch, Illust, LatestFeed, Novel,
     NovelSearch, NovelSeries, NovelSummary, PageMeta, RankingRow, RecommendTag, RecommendUser,
-    SearchResult, SeriesChapter, StreetFeed, Suggestion, UgoiraMeta, UserProfile, merge_suggestions,
+    SearchResult, SeriesChapter, StreetFeed, Suggestion, UgoiraMeta, UserProfile,
+    merge_suggestions,
 };
 use pixiv_types::wire::{
     BookmarkStateWire, CpsCandidateWire, CpsWire, DiscoveryArtworksWire, DiscoveryUserWire,
     DiscoveryUsersWire, FollowerListWire, IllustDetailWire, IllustDiscoveryWire, IllustPageWire,
+    NovelDetailWire, NovelRowsWire, NovelSearchBodyWire, NovelSeriesContentWire, NovelSeriesWire,
     ProfileIllustsWire, RankingResponseWire, SearchBodyWire, SearchItemWire, SearchTagsWire,
     StreetForYouWire, StreetLatestWire, StreetRecommendTagsWire, StreetSubWire, StreetTagWire,
-    NovelDetailWire, NovelRowsWire, NovelSearchBodyWire, NovelSeriesContentWire, NovelSeriesWire,
     SuggestByWordWire, SuggestCandidateWire, UgoiraMetaWire, UserBookmarksWire, UserDetailWire,
     UserProfileAllWire, UserSelfWire,
 };
@@ -1628,7 +1629,10 @@ mod tests {
         let names: Vec<&str> = novel.tags.iter().map(|tag| tag.name.as_str()).collect();
         assert_eq!(names, vec!["創作", "恋愛", "歴史創作", "春秋戦国"]);
         assert_eq!(novel.tags[0].translated.as_deref(), Some("原创"));
-        assert!(novel.tags[3].translated.is_none(), "the last tag is untranslated");
+        assert!(
+            novel.tags[3].translated.is_none(),
+            "the last tag is untranslated"
+        );
 
         // characterCount, and there is no textLength anywhere in this document.
         assert_eq!(novel.character_count, 4025);
@@ -1667,7 +1671,11 @@ mod tests {
         assert_eq!(novel.images[0].id, "26247841");
         assert_eq!(novel.images[1].id, "26247899");
         for image in &novel.images {
-            assert!(image.small.contains("/480x960/"), "small tier: {}", image.small);
+            assert!(
+                image.small.contains("/480x960/"),
+                "small tier: {}",
+                image.small
+            );
             assert!(
                 image.large.contains("/1200x1200/"),
                 "large tier: {}",
@@ -1690,7 +1698,11 @@ mod tests {
         assert_eq!(first.character_count, 4025);
         // ...and the cover is "url", not "coverUrl".
         assert!(
-            first.cover.as_deref().unwrap_or_default().contains("/600x600/"),
+            first
+                .cover
+                .as_deref()
+                .unwrap_or_default()
+                .contains("/600x600/"),
             "cover: {:?}",
             first.cover
         );
@@ -1740,7 +1752,10 @@ mod tests {
              "readingTime":2}]}}}"#;
         let chapters = parse_novel_series_content(raw).expect("chapters parse");
         assert_eq!(
-            chapters.iter().map(|chapter| chapter.id).collect::<Vec<_>>(),
+            chapters
+                .iter()
+                .map(|chapter| chapter.id)
+                .collect::<Vec<_>>(),
             vec![Id(10), Id(20), Id(30)]
         );
         assert_eq!(chapters[0].order, 1);
@@ -1776,14 +1791,8 @@ mod tests {
             other => panic!("expected the API message, got {other:?}"),
         }
         // Every novel parser goes through the same envelope check.
-        assert!(matches!(
-            parse_novel_search(raw),
-            Err(PixivError::Api(_))
-        ));
-        assert!(matches!(
-            parse_novel_series(raw),
-            Err(PixivError::Api(_))
-        ));
+        assert!(matches!(parse_novel_search(raw), Err(PixivError::Api(_))));
+        assert!(matches!(parse_novel_series(raw), Err(PixivError::Api(_))));
         assert!(matches!(
             parse_user_novel_rows(raw),
             Err(PixivError::Api(_))
@@ -1795,7 +1804,10 @@ mod tests {
         let raw = r#"{"error":false,"message":"","body":{"title":"x","content":"y"}}"#;
         assert!(matches!(parse_novel(raw), Err(PixivError::Decode(_))));
         let raw = r#"{"error":false,"message":"","body":{}}"#;
-        assert!(matches!(parse_novel_series(raw), Err(PixivError::Decode(_))));
+        assert!(matches!(
+            parse_novel_series(raw),
+            Err(PixivError::Decode(_))
+        ));
         // A missing body member is a decode error, never a panic.
         let raw = r#"{"error":false,"message":""}"#;
         assert!(matches!(parse_novel(raw), Err(PixivError::Decode(_))));
@@ -1806,19 +1818,29 @@ mod tests {
         // The live quirk: [] where the other two maps carry {}.
         let none = r#"{"error":false,"message":"","body":{"illusts":{},"manga":{},"novels":[],"pickup":[]}}"#;
         assert!(
-            parse_user_novel_ids(none).expect("an array is not an error").is_empty()
+            parse_user_novel_ids(none)
+                .expect("an array is not an error")
+                .is_empty()
         );
         let null = r#"{"error":false,"message":"","body":{"illusts":{},"manga":{},"novels":null}}"#;
-        assert!(parse_user_novel_ids(null).expect("null is not an error").is_empty());
+        assert!(
+            parse_user_novel_ids(null)
+                .expect("null is not an error")
+                .is_empty()
+        );
         // ...and a populated map lists newest first, skipping keys that are not ids.
         let some = r#"{"error":false,"message":"","body":{"illusts":{},"manga":{},
             "novels":{"10":null,"9":null,"nope":null}}}"#;
-        assert_eq!(parse_user_novel_ids(some).expect("parses"), vec![Id(10), Id(9)]);
+        assert_eq!(
+            parse_user_novel_ids(some).expect("parses"),
+            vec![Id(10), Id(9)]
+        );
     }
 
     #[test]
     fn a_novel_search_with_no_rows_or_no_counters_is_still_an_answer() {
-        let raw = r#"{"error":false,"message":"","body":{"novel":{"data":[],"total":0,"lastPage":0}}}"#;
+        let raw =
+            r#"{"error":false,"message":"","body":{"novel":{"data":[],"total":0,"lastPage":0}}}"#;
         let search = parse_novel_search(raw).expect("parses");
         assert!(search.is_empty());
         assert_eq!(search.total, 0);
@@ -1877,10 +1899,16 @@ mod tests {
     fn a_restricted_row_passes_x_restrict_through() {
         let raw = r#"{"error":false,"message":"","body":{"novel":{"data":[
             {"id":"4","xRestrict":1,"url":"c.jpg"}],"total":1,"lastPage":1}}}"#;
-        assert_eq!(parse_novel_search(raw).expect("parses").novels[0].x_restrict, 1);
+        assert_eq!(
+            parse_novel_search(raw).expect("parses").novels[0].x_restrict,
+            1
+        );
         // An out-of-range value clamps instead of wrapping to 255.
         let raw = r#"{"error":false,"message":"","body":{"novel":{"data":[
             {"id":"4","xRestrict":9,"url":"c.jpg"}],"total":1,"lastPage":1}}}"#;
-        assert_eq!(parse_novel_search(raw).expect("parses").novels[0].x_restrict, 2);
+        assert_eq!(
+            parse_novel_search(raw).expect("parses").novels[0].x_restrict,
+            2
+        );
     }
 }

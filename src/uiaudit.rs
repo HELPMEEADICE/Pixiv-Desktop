@@ -1457,7 +1457,10 @@ mod tests {
     }
 
     /// The innermost block that encloses the given one.
-    fn enclosing_block<'a>(blocks: &'a [ElementBlock], block: &ElementBlock) -> Option<&'a ElementBlock> {
+    fn enclosing_block<'a>(
+        blocks: &'a [ElementBlock],
+        block: &ElementBlock,
+    ) -> Option<&'a ElementBlock> {
         blocks
             .iter()
             .filter(|candidate| candidate.start < block.start && candidate.end > block.end)
@@ -1513,7 +1516,6 @@ mod tests {
             "these Text nodes sit directly in a HorizontalLayout without stating where their line goes (add vertical-alignment: center for one line, top for a paragraph, or use Label): {offenders:?}"
         );
     }
-
 
     /// Rule: the reader bounds are one pair of numbers in both languages.
     ///
