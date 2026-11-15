@@ -334,6 +334,60 @@ pub(crate) fn user_followers(user: Id, offset: u32, limit: u32, public: bool) ->
     )
 }
 
+// ---------------------------------------------------------------------------
+// Novels
+// ---------------------------------------------------------------------------
+
+/// GET /ajax/novel/{id} -- the whole novel, body included.
+///
+/// The body used to be a second document at "/ajax/novel/{id}/text". That route
+/// answers 404 now, and the detail response carries the body as "content", so one
+/// novel is one request and there is no second URL to build.
+pub(crate) fn novel_detail(id: Id) -> String {
+    format!("{WEB_HOST}/ajax/novel/{}?lang={LANG}", id.get())
+}
+
+/// GET /ajax/novel/series/{id} -- the series card, its totals and its tags.
+pub(crate) fn novel_series(id: Id) -> String {
+    format!("{WEB_HOST}/ajax/novel/series/{}?lang={LANG}", id.get())
+}
+
+/// GET /ajax/novel/series_content/{id} -- the chapter list.
+///
+/// A sibling route under "novel/", not "/ajax/novel/series/{id}/content": that
+/// spelling answers 404.
+pub(crate) fn novel_series_content(id: Id) -> String {
+    format!(
+        "{WEB_HOST}/ajax/novel/series_content/{}?lang={LANG}",
+        id.get()
+    )
+}
+
+/// GET /ajax/search/novels/{word}.
+///
+/// Shaped like the artwork search: the word appears twice (path segment and
+/// "word" parameter), each percent-encoded once, and "mode" and "s_mode" are sent
+/// even at their defaults because Pixiv requires them.
+pub(crate) fn novel_search(word: &str, page: u32) -> String {
+    let word = urlencoding::encode(word);
+    format!(
+        "{WEB_HOST}/ajax/search/novels/{word}?word={word}&order=date_d&mode=all&p={}&s_mode=s_tag_full&lang={LANG}",
+        page.max(1)
+    )
+}
+
+/// GET /ajax/user/{id}/novels?ids[]=... -- batch rows for one artist.
+///
+/// Takes the ids from the novels map of "/ajax/user/{id}/profile/all" and answers
+/// a map keyed by id, so the caller keeps its own ordering.
+pub(crate) fn user_novels(user: Id, ids: &[Id]) -> String {
+    format!(
+        "{WEB_HOST}/ajax/user/{}/novels?{}&lang={LANG}",
+        user.get(),
+        ids_query(ids)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,5 +583,48 @@ mod tests {
         let fields = vec![("a", "1 2".to_string()), ("b", "x&y".to_string())];
         assert_eq!(form_body(&fields), "a=1%202&b=x%26y");
         assert_eq!(form_body(&[]), "");
+    }
+    #[test]
+    fn novel_urls_target_the_routes_that_answer() {
+        assert_eq!(
+            novel_detail(Id(29_647_105)),
+            "https://www.pixiv.net/ajax/novel/29647105?lang=zh"
+        );
+        assert_eq!(
+            novel_series(Id(15_745_812)),
+            "https://www.pixiv.net/ajax/novel/series/15745812?lang=zh"
+        );
+        assert_eq!(
+            novel_series_content(Id(15_745_812)),
+            "https://www.pixiv.net/ajax/novel/series_content/15745812?lang=zh"
+        );
+        // The dead second document must never come back.
+        assert!(!novel_detail(Id(1)).contains("/text"));
+    }
+
+    #[test]
+    fn novel_search_encodes_the_word_and_carries_the_filters() {
+        let url = novel_search("初音 ミク", 2);
+        assert!(!url.contains('初'), "word was not encoded: {url}");
+        assert!(
+            url.contains("novels/%E5%88%9D%E9%9F%B3%20%E3%83%9F%E3%82%AF?"),
+            "path segment missing encoded word: {url}"
+        );
+        assert!(url.contains("word=%E5%88%9D%E9%9F%B3%20%E3%83%9F%E3%82%AF"));
+        assert!(url.contains("order=date_d"));
+        assert!(url.contains("mode=all"));
+        assert!(url.contains("p=2"));
+        assert!(url.contains("s_mode=s_tag_full"));
+        assert!(url.contains("lang=zh"));
+        // Page zero is normalised to the first page.
+        assert!(novel_search("x", 0).contains("p=1"));
+    }
+
+    #[test]
+    fn user_novels_batches_ids_the_way_the_illust_batch_does() {
+        assert_eq!(
+            user_novels(Id(516_186), &[Id(29_647_105), Id(29_425_155)]),
+            "https://www.pixiv.net/ajax/user/516186/novels?ids%5B%5D=29647105&ids%5B%5D=29425155&lang=zh"
+        );
     }
 }

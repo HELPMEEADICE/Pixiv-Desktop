@@ -1,0 +1,324 @@
+{
+  "_comment": "Trimmed live capture of GET https://www.pixiv.net/ajax/novel/29647105?lang=zh, taken 2026-11-16. Every metadata field is verbatim; `content` is the first ~600 characters of the real body (it still contains the [[rb:...]] markup, an [uploadedimage:...] reference and several paragraphs) and textEmbeddedImages keeps only the two images the real body references. Saved via .local-secrets/probe/novel-detail.json.",
+  "error": false,
+  "message": "",
+  "body": {
+    "bookmarkCount": 0,
+    "commentCount": 0,
+    "markerCount": 0,
+    "createDate": "2026-11-15T15:52:25+00:00",
+    "uploadDate": "2026-11-15T15:52:25+00:00",
+    "description": "長くなったので後半を第4話にした為に、恋愛ものの筈なのに政治パートのみになってしまいました。<br />平原君の相邦時期は不明なので第一回目の就任時にしております。<br />少し不穏な第３話となりました。<br /><br />史記『廉頗藺相如列伝』を下敷きとしたオリジナル歴史物語です。フィクション度は『キングダム』くらい…と思っていただければ。<br />※ヒロインの椿は『楼椿』が正式名ですがそのまま『つばき』とお読みください。<br />※挿絵のみAIを利用しております",
+    "id": "29647105",
+    "title": "三・趙、未だ先王の功と罪の在ること",
+    "likeCount": 0,
+    "pageCount": 1,
+    "userId": "516186",
+    "userName": "琴雪",
+    "viewCount": 4,
+    "isOriginal": true,
+    "isBungei": false,
+    "xRestrict": 0,
+    "restrict": 0,
+    "content": "[uploadedimage:26247899]\n\n三・趙、未だ先王の功と罪の在ること\n\n\n――時は春の盛りの頃に遡る。\n\n趙国の首都・邯鄲は二つの”城”で構成されている。\n一つは藺や椿たちも住む市井を大きく城壁で囲んだ大北城。\nもう一つはその南西、『品』の形に似た堅牢な城壁で囲まれた趙王城である。\n\n趙王城は大北城の西側と面し後宮がある北城、強大な騎馬隊を擁する軍部が置かれた東城、そして政の中枢が置かれた西城という三つの区画があり、西城には龍台と呼ばれる約[[rb:七丈 > 16m]]もの高さの土台の上に朝議などが行われる壮麗な宮殿が築かれ、趙王城の象徴として威容を誇っていた。\n\nその龍台の北にやや小規模の二つの土台が縦に並び、[[rb:相邦 > しょうこく]]府、王の執政を行う場としての宮がそれぞれに建てられていた。\n\nそして、その王の執政用の宮の最奥。\n華やかではないが質の良い設えの揃った房の、周囲の床より一段が高くなっている王の座。\n艶やかな深い黒の文机の上、一つの竹簡が広げられていた。\n\n「代より、かなりの規模の騎馬勢力の越境の兆候が見られるとの報告だ。長城付近につけていた斥候が確認したらしい」\n\n端正、という言葉がよく似合う。\nさらと揺れる前髪は細く癖のない美しい黒髪、目の前の竹簡へ向ける目は涼やかな切れ長で、伏せた長い睫毛が僅かにその青を思わせる黒瞳に影を落としていた。",
+    "coverUrl": "https://i.pximg.net/c/600x600/novel-cover-master/img/2026/11/16/00/52/25/ci29647105_2b558d676d02077faf5634ad2af08d16_master1200.jpg",
+    "suggestedSettings": {
+      "viewMode": 2,
+      "themeBackground": 0,
+      "themeSize": null,
+      "themeSpacing": null
+    },
+    "isBookmarkable": true,
+    "bookmarkData": null,
+    "likeData": false,
+    "pollData": null,
+    "marker": null,
+    "tags": {
+      "authorId": "516186",
+      "isLocked": false,
+      "tags": [
+        {
+          "tag": "創作",
+          "locked": true,
+          "deletable": false,
+          "userId": "516186",
+          "userName": "琴雪",
+          "translation": {
+            "en": "原创"
+          }
+        },
+        {
+          "tag": "恋愛",
+          "locked": true,
+          "deletable": false,
+          "userId": "516186",
+          "userName": "琴雪",
+          "translation": {
+            "en": "恋爱"
+          }
+        },
+        {
+          "tag": "歴史創作",
+          "locked": true,
+          "deletable": false,
+          "userId": "516186",
+          "userName": "琴雪",
+          "translation": {
+            "en": "historical fiction"
+          }
+        },
+        {
+          "tag": "春秋戦国",
+          "locked": true,
+          "deletable": false,
+          "userId": "516186",
+          "userName": "琴雪"
+        }
+      ],
+      "writable": false
+    },
+    "seriesNavData": {
+      "seriesType": "novel",
+      "seriesId": 15745812,
+      "title": "華国異伝",
+      "isConcluded": false,
+      "isReplaceable": false,
+      "isWatched": false,
+      "isNotifying": false,
+      "order": 8,
+      "prev": {
+        "title": "二・藺相如、晋陽より来し趙人の肝を寒からしむ",
+        "order": 7,
+        "id": "29425155",
+        "available": true
+      },
+      "next": null
+    },
+    "descriptionBoothId": null,
+    "descriptionYoutubeId": null,
+    "comicPromotion": null,
+    "fanboxPromotion": null,
+    "contestBanners": [],
+    "contestData": null,
+    "request": null,
+    "imageResponseOutData": [],
+    "imageResponseData": [],
+    "imageResponseCount": 0,
+    "userNovels": {
+      "5004391": null,
+      "5028122": null,
+      "5046887": null,
+      "5068256": null,
+      "5081940": null,
+      "5102168": null,
+      "21983587": null,
+      "22875648": null,
+      "27362741": null,
+      "27558136": null,
+      "27815393": null,
+      "27980066": null,
+      "28411106": null,
+      "28867342": null,
+      "29245970": null,
+      "29425155": {
+        "id": "29425155",
+        "title": "二・藺相如、晋陽より来し趙人の肝を寒からしむ",
+        "genre": "1",
+        "xRestrict": 0,
+        "restrict": 0,
+        "url": "https://i.pximg.net/c/600x600/novel-cover-master/img/2026/11/16/00/45/27/ci29425155_d27b79c05481ee268e12c764b95bc1fb_master1200.jpg",
+        "tags": [
+          "創作",
+          "恋愛",
+          "歴史創作"
+        ],
+        "userId": "516186",
+        "userName": "琴雪",
+        "pixivId": "celestialrain",
+        "profileImageUrl": "https://i.pximg.net/user-profile/img/2010/09/21/01/33/58/2219287_a4562002d401015f985492a22dffebe9_50.jpg",
+        "textCount": 6625,
+        "wordCount": 3751,
+        "readingTime": 795,
+        "useWordCount": false,
+        "description": "冒頭、上大夫時代の藺相如の役職とした『丞(副官・補佐官)』は、1981年に吉林省長白朝鮮族自治県から出土した戦国期の「藺相如」銘青銅戈の銘文　<a href=\"/jump.php?https%3A%2F%2Fculture.cnjiwang.com%2Fgxt%2F202603%2F4026918.html%3Futm_source%3Dchatgpt.com\" target=\"_blank\">https://culture.cnjiwang.com/gxt/202603/4026918.html?utm_source=chatgpt.com</a>　に(趙王)廿年丞藺相如～とあったことから採用しています。(そしてここに『相邦』と追記されている事から、藺は相邦になったとしています)<br />また『華国異伝』での趙国の統治機構については『周礼』を参考にしておりますが、史料で不明な点が多いため独自設定となります。<br /><br />史記『廉頗藺相如列伝』を下敷きとしたオリジナル歴史物語です。フィクション度は『キングダム』くらい…と思っていただければ。<br />※ヒロインの椿は『楼椿』が正式名ですがそのまま『つばき』とお読みください。<br />※挿絵のみAIを利用しております",
+        "isBookmarkable": true,
+        "bookmarkData": null,
+        "bookmarkCount": null,
+        "isOriginal": true,
+        "marker": null,
+        "titleCaptionTranslation": {
+          "workTitle": null,
+          "workCaption": null
+        },
+        "createDate": "2026-10-20T00:43:16+09:00",
+        "updateDate": "2026-11-16T00:45:27+09:00",
+        "isMasked": false,
+        "aiType": 1,
+        "seriesId": "15745812",
+        "seriesTitle": "華国異伝",
+        "seriesContentOrder": 7,
+        "isUnlisted": false,
+        "visibilityScope": 0,
+        "language": "ja"
+      },
+      "29647105": {
+        "id": "29647105",
+        "title": "三・趙、未だ先王の功と罪の在ること",
+        "genre": "1",
+        "xRestrict": 0,
+        "restrict": 0,
+        "url": "https://i.pximg.net/c/600x600/novel-cover-master/img/2026/11/16/00/52/25/ci29647105_2b558d676d02077faf5634ad2af08d16_master1200.jpg",
+        "tags": [
+          "創作",
+          "恋愛",
+          "歴史創作",
+          "春秋戦国"
+        ],
+        "userId": "516186",
+        "userName": "琴雪",
+        "pixivId": "celestialrain",
+        "profileImageUrl": "https://i.pximg.net/user-profile/img/2010/09/21/01/33/58/2219287_a4562002d401015f985492a22dffebe9_50.jpg",
+        "textCount": 4025,
+        "wordCount": 2326,
+        "readingTime": 483,
+        "useWordCount": false,
+        "description": "長くなったので後半を第4話にした為に、恋愛ものの筈なのに政治パートのみになってしまいました。<br />平原君の相邦時期は不明なので第一回目の就任時にしております。<br />少し不穏な第３話となりました。<br /><br />史記『廉頗藺相如列伝』を下敷きとしたオリジナル歴史物語です。フィクション度は『キングダム』くらい…と思っていただければ。<br />※ヒロインの椿は『楼椿』が正式名ですがそのまま『つばき』とお読みください。<br />※挿絵のみAIを利用しております",
+        "isBookmarkable": true,
+        "bookmarkData": null,
+        "bookmarkCount": 0,
+        "isOriginal": true,
+        "marker": null,
+        "titleCaptionTranslation": {
+          "workTitle": null,
+          "workCaption": null
+        },
+        "createDate": "2026-11-16T00:52:25+09:00",
+        "updateDate": "2026-11-16T00:52:25+09:00",
+        "isMasked": false,
+        "aiType": 1,
+        "seriesId": "15745812",
+        "seriesTitle": "華国異伝",
+        "seriesContentOrder": 8,
+        "isUnlisted": false,
+        "visibilityScope": 0,
+        "language": "ja",
+        "text": "\n\n三・趙、未だ先王の功と罪の在ること\n\n\n――時は春の盛りの頃に遡る。\n\n趙国の首都・邯鄲は二つの”城”で構成されている。\n一つは藺や椿たちも住む市井を大きく城壁で囲んだ大北城。\nもう一つはその南西、『品』の形に似た堅牢な城壁で囲まれた趙王城である。\n\n趙王城は大北城の西側と面し後宮がある北城、強大な騎馬隊を擁する軍部が置かれた東城、そして政の中枢が置かれた西城という三つの区画があり、西城には龍台と呼ばれる約七丈もの高さの土台の上に朝議などが行われる壮麗な宮殿が築かれ、趙王城の象徴として威容を誇っていた。\n\nその龍台の北にやや小規模の二つの土台が縦に並び、相邦府、王の執政を行う場としての宮がそれぞれに建てられていた。\n\nそして、その王の執政用の宮の最奥。\n華やかではないが質の良い設えの揃った房の、周囲の床より一段が高くなっている王の座。\n艶やかな深い黒の文机の上、一つの竹簡が広げられていた。\n\n「代より、かなりの規模の騎馬勢力の越境の兆候が見られるとの報告だ。長城付近につけていた斥候が確認したらしい」\n\n端正、という言葉がよく似合う。\nさらと揺れる前髪は細く癖のない美しい黒髪、目の前の竹簡へ向ける目は涼やかな切れ長で、伏せた長い睫毛が僅かにその青を思わせる黒瞳に影を落としていた。\n脇息に片肘をつき、その手に顎を乗せて顔を傾げた姿も冷たい印象はあるが、優美で整っている。\n\n趙国の若き王、趙何。\n後の、諡号・恵文王である。\n\n「この報告が届いている頃には、戦端が開かれるまで半月程だろう、とも」\n形の良い眉を不機嫌そうに顰め、トンと一つ文机を指で打つ。\n「……意見を聞こう」\n\n王の傍らに立っていた脇侍が恭しく竹簡を回収し、王の御前に並ぶ二人のうち若い方に差し出した。\n軽く受け取った男は朱赤の衣の襟元が緩くはだけ、高い位置で簡単にまとめられた少し癖のある赤みがかった黒髪が首元に落ちている。\n顔には不揃いな髭が残り、緻密な刺繍の施された深い青の衣を一部の乱れなく纏った王の前に並ぶには少しばかり、くだけすぎていた。\n\n「……規模は一万程と思われる、か。中央から援軍を出すほどではないんじゃないか？代手前の邑の幾つかから置いている兵を向かわせれば、事足りるように思えるが」\n渡された竹簡をざっと眺めた若い男は、そのまま竹簡を隣に立つ白髪の目立つ男に手渡した。経験が皺となり顔に刻まれたような老官吏は、静かに竹簡を見つめて思案する様子を見せる。\n「何かあるのか、奉陽君」\n「ええ、少し。試して…いや、確認したき事があるのです」\n「ほう？」\n\n王に奉陽君と呼ばれた老官吏は、促すような王の反応に一礼して壁に下げられた地図に歩み寄る。\n「先の王が削った北方の異民族達からの侵攻は、ここ数年は小競り合い程度のものでしたが此度は一万程度との事。おそらく、先の王が削った奴らも年月が過ぎてある程"
+      }
+    },
+    "hasGlossary": false,
+    "zoneConfig": {
+      "responsive": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=illust_responsive_side&format=js&s=0&up=0&ng=g&l=zh&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f140"
+      },
+      "rectangle": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=illust_rectangle&format=js&s=0&up=0&ng=g&l=zh&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f544"
+      },
+      "500x500": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=bigbanner&format=js&s=0&up=0&ng=g&l=zh&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f859"
+      },
+      "header": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=header&format=js&s=0&up=0&ng=g&l=zh&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f805"
+      },
+      "footer": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=footer&format=js&s=0&up=0&ng=g&l=zh&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f585"
+      },
+      "expandedFooter": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=multiple_illust_viewer&format=js&s=0&up=0&ng=g&l=zh&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f107"
+      },
+      "logo": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=logo_side&format=js&s=0&up=0&ng=g&l=zh&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f923"
+      },
+      "ad_logo": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=t_logo_side&format=js&s=0&up=0&ng=g&l=zh&os=and&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f936"
+      },
+      "relatedworks": {
+        "url": "https://pixon.ads-pixiv.net/show?zone_id=relatedworks&format=js&s=0&up=0&ng=g&l=zh&uri=%2Fajax%2Fnovel%2F_PARAM_&ref=www.pixiv.net%2F&D=92de76c404153f8&ab_test_digits_first=34&yuid=QJIVE3Y&num=6af9d94f285"
+      }
+    },
+    "extraData": {
+      "meta": {
+        "title": "#8 三・趙、未だ先王の功と罪の在ること | 華国異伝 - 琴雪系列小说 - pixiv",
+        "description": "本作「三・趙、未だ先王の功と罪の在ること」为系列小说「華国異伝」的第8话。附有标签「創作」、「歴史創作」。\n三・趙、未だ先王の功と罪の在ること ――時は春の盛りの頃に遡る。 趙国の首都・邯鄲は二つの”城”で構成されている。 一つは藺や椿たちも住む市井を大きく城壁で囲んだ大北城。 もう一つはその南西、『品』の形に似た堅牢な城壁で囲まれた趙王城である。 趙王城は大北城の西側と面し後宮がある...",
+        "canonical": "https://www.pixiv.net/novel/show.php?id=29647105",
+        "descriptionHeader": "本作「三・趙、未だ先王の功と罪の在ること」为附有「創作」「恋愛」等标签的作品。",
+        "ogp": {
+          "description": "三・趙、未だ先王の功と罪の在ること ――時は春の盛りの頃に遡る。 趙国の首都・邯鄲は二つの”城”で構成されている。 一つは藺や椿たちも住む市井を大きく城壁で囲んだ大北城。 もう一つはその南西、『品』の形に似た堅牢な城壁で囲まれた趙王城である。 趙王城は大北城の西側と面し後宮がある...",
+          "image": "https://embed.pixiv.net/novel.php?id=29647105&mdate=20261116005225",
+          "title": "#8 三・趙、未だ先王の功と罪の在ること | 華国異伝 - 琴雪系列小说 - pixiv",
+          "type": "article"
+        },
+        "twitter": {
+          "description": "三・趙、未だ先王の功と罪の在ること ――時は春の盛りの頃に遡る。 趙国の首都・邯鄲は二つの”城”で構成されている。 一つは藺や椿たちも住む市井を大きく城壁で囲んだ大北城。 もう一つはその南西、『品』の形に似た堅牢な城壁で囲まれた趙王城である。 趙王城は大北城の西側と面し後宮がある...",
+          "image": "https://embed.pixiv.net/novel.php?id=29647105&mdate=20261116005225",
+          "title": "三・趙、未だ先王の功と罪の在ること",
+          "card": "summary_large_image"
+        }
+      }
+    },
+    "titleCaptionTranslation": {
+      "workTitle": null,
+      "workCaption": null
+    },
+    "translation": null,
+    "isUnlisted": false,
+    "language": "ja",
+    "textEmbeddedImages": {
+      "26247841": {
+        "novelImageId": "26247841",
+        "sl": "2",
+        "urls": {
+          "240mw": "https://i.pximg.net/c/240x480_80/novel-cover-master/img/2026/11/16/00/26/31/tei60313622287_506f5332a1a5c7e8d54d575083ff68d3_master1200.jpg",
+          "480mw": "https://i.pximg.net/c/480x960/novel-cover-master/img/2026/11/16/00/26/31/tei60313622287_506f5332a1a5c7e8d54d575083ff68d3_master1200.jpg",
+          "1200x1200": "https://i.pximg.net/c/1200x1200/novel-cover-master/img/2026/11/16/00/26/31/tei60313622287_506f5332a1a5c7e8d54d575083ff68d3_master1200.jpg",
+          "128x128": "https://i.pximg.net/c/128x128/novel-cover-master/img/2026/11/16/00/26/31/tei60313622287_506f5332a1a5c7e8d54d575083ff68d3_square1200.jpg",
+          "original": "https://i.pximg.net/novel-cover-original/img/2026/11/16/00/26/31/tei60313622287_506f5332a1a5c7e8d54d575083ff68d3.png"
+        }
+      },
+      "26247899": {
+        "novelImageId": "26247899",
+        "sl": "2",
+        "urls": {
+          "240mw": "https://i.pximg.net/c/240x480_80/novel-cover-master/img/2026/11/16/00/32/48/tei801841747077_158c2e2a3fcc1440ac8bdf2a0de3310b_master1200.jpg",
+          "480mw": "https://i.pximg.net/c/480x960/novel-cover-master/img/2026/11/16/00/32/48/tei801841747077_158c2e2a3fcc1440ac8bdf2a0de3310b_master1200.jpg",
+          "1200x1200": "https://i.pximg.net/c/1200x1200/novel-cover-master/img/2026/11/16/00/32/48/tei801841747077_158c2e2a3fcc1440ac8bdf2a0de3310b_master1200.jpg",
+          "128x128": "https://i.pximg.net/c/128x128/novel-cover-master/img/2026/11/16/00/32/48/tei801841747077_158c2e2a3fcc1440ac8bdf2a0de3310b_square1200.jpg",
+          "original": "https://i.pximg.net/novel-cover-original/img/2026/11/16/00/32/48/tei801841747077_158c2e2a3fcc1440ac8bdf2a0de3310b.png"
+        }
+      }
+    },
+    "commentOff": 0,
+    "characterCount": 4025,
+    "wordCount": 2326,
+    "useWordCount": false,
+    "readingTime": 483,
+    "genre": "1",
+    "aiType": 1,
+    "isLoginOnly": false,
+    "isCitableInCollection": false,
+    "noLoginData": {
+      "breadcrumbs": {
+        "successor": [
+          {
+            "tag": "創作",
+            "translation": {
+              "zh": "原创"
+            }
+          }
+        ],
+        "current": {
+          "zh": "三・趙、未だ先王の功と罪の在ること"
+        }
+      },
+      "zengoWorkData": {
+        "nextWork": {
+          "id": "29647106",
+          "title": "弟チンポで発情しまくってる一希♀お姉ちゃん【れじかず♀】"
+        },
+        "prevWork": {
+          "id": "29647104",
+          "title": "古本を好きになるには"
+        }
+      }
+    }
+  }
+}

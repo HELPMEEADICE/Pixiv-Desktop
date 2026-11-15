@@ -33,9 +33,10 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 
 use pixiv_types::{
-    Account, BookmarkRestrict, BookmarkState, DiscoveryBatch, Id, Illust, LatestFeed,
-    PIXIV_REFERER, PageMeta, PixivError, RankingKind, RankingRow, RecommendTag, RecommendUser,
-    SearchQuery, SearchResult, StreetFeed, Suggestion, UgoiraMeta, UserProfile,
+    Account, BookmarkRestrict, BookmarkState, DiscoveryBatch, Id, Illust, LatestFeed, Novel,
+    NovelSearch, NovelSeries, NovelSummary, PIXIV_REFERER, PageMeta, PixivError, RankingKind,
+    RankingRow, RecommendTag, RecommendUser, SearchQuery, SearchResult, SeriesChapter, StreetFeed,
+    Suggestion, UgoiraMeta, UserProfile,
 };
 
 mod endpoint;
@@ -712,6 +713,64 @@ impl Client {
             ))
             .await?;
         mapping::parse_profile_illusts(&raw)
+    }
+
+    // -- novels ------------------------------------------------------------
+
+    /// GET /ajax/novel/{id} -- the whole novel, body included.
+    ///
+    /// One request, not two: the body is the detail document's own content field,
+    /// and the old second document (/ajax/novel/{id}/text) answers 404.
+    pub async fn novel(&self, id: Id) -> Result<Novel, PixivError> {
+        let raw = self.get_text(&endpoint::novel_detail(id)).await?;
+        mapping::parse_novel(&raw)
+    }
+
+    /// GET /ajax/search/novels/{word} -- one page of novel search.
+    pub async fn novel_search(&self, word: &str, page: u32) -> Result<NovelSearch, PixivError> {
+        let raw = self.get_text(&endpoint::novel_search(word, page)).await?;
+        mapping::parse_novel_search(&raw)
+    }
+
+    /// GET /ajax/novel/series/{id} -- the series card.
+    pub async fn novel_series(&self, id: Id) -> Result<NovelSeries, PixivError> {
+        let raw = self.get_text(&endpoint::novel_series(id)).await?;
+        mapping::parse_novel_series(&raw)
+    }
+
+    /// GET /ajax/novel/series_content/{id} -- the chapter list.
+    ///
+    /// The chapters come back in reading order, ordered by their own chapter
+    /// number rather than by the order the rows arrived in.
+    pub async fn novel_series_chapters(&self, id: Id) -> Result<Vec<SeriesChapter>, PixivError> {
+        let raw = self.get_text(&endpoint::novel_series_content(id)).await?;
+        mapping::parse_novel_series_content(&raw)
+    }
+
+    /// GET /ajax/user/{id}/profile/all -- the novels map's ids.
+    ///
+    /// The same document user_illust_ids reads: profile/all carries illusts, manga
+    /// and novels in one answer, so a novels listing costs no more than the
+    /// illustrations do.
+    pub async fn user_novel_ids(&self, user: Id) -> Result<Vec<Id>, PixivError> {
+        let raw = self.get_text(&endpoint::user_profile_all(user)).await?;
+        mapping::parse_user_novel_ids(&raw)
+    }
+
+    /// GET /ajax/user/{id}/novels?ids[]=... -- hydrate the ids from
+    /// user_novel_ids.
+    pub async fn user_novel_rows(
+        &self,
+        user: Id,
+        ids: &[Id],
+    ) -> Result<Vec<NovelSummary>, PixivError> {
+        if ids.is_empty() {
+            // Nothing to hydrate: asking for an empty ids list would spend a
+            // request to be told nothing.
+            return Ok(Vec::new());
+        }
+        let raw = self.get_text(&endpoint::user_novels(user, ids)).await?;
+        mapping::parse_user_novel_rows(&raw)
     }
 
     /// Follower count of the signed-in account, which is the only one readable.
@@ -1607,6 +1666,41 @@ mod tests {
         let ids = client.user_illust_ids(user).await.expect("ids parse");
         assert_eq!(asked(&client).len(), 1);
         assert_eq!(ids, vec![Id(906), Id(905), Id(904)]);
+    }
+
+    /// /ajax/novel/{id}, trimmed to the fields the reader needs. The body is the
+    /// point: it is the reason one novel used to cost two requests.
+    const NOVEL_DETAIL: &str = r#"{"error":false,"message":"","body":{
+        "id":"29647105","title":"三","userId":"516186","userName":"琴雪",
+        "coverUrl":"https://i.pximg.net/cover.jpg","characterCount":4025,
+        "content":"[uploadedimage:26247899]\n\n[[rb:七丈 > 16m]]",
+        "createDate":"2026-11-15T15:52:25+00:00",
+        "tags":{"authorId":"516186","tags":[{"tag":"創作"}]},
+        "seriesNavData":null,"textEmbeddedImages":[]}}"#;
+
+    #[tokio::test]
+    async fn one_novel_is_one_request_and_it_carries_the_body() {
+        let id = Id(29_647_105);
+        let url = endpoint::novel_detail(id);
+        let client = scripted_client(&[(url.as_str(), 200, NOVEL_DETAIL)]);
+
+        let novel = client.novel(id).await.expect("the novel parses");
+
+        // One document, one request. A second fetch of /text would be a
+        // regression: that route answers 404.
+        let urls = asked(&client);
+        assert_eq!(urls.len(), 1, "one request per novel, got {urls:?}");
+        assert_eq!(urls[0], "https://www.pixiv.net/ajax/novel/29647105?lang=zh");
+
+        assert_eq!(novel.id, id);
+        assert_eq!(novel.title, "三");
+        assert_eq!(novel.character_count, 4025);
+        assert!(novel.body.contains("[[rb:"), "body: {}", novel.body);
+        assert_eq!(novel.upload_date, "2026-11-15");
+        // textEmbeddedImages arrives as [] for a novel with no illustrations.
+        assert!(novel.images.is_empty());
+        // seriesNavData is null for a standalone novel.
+        assert!(novel.series.is_none());
     }
 
     // -- the response ceiling ----------------------------------------------

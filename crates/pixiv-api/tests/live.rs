@@ -558,3 +558,59 @@ async fn the_signed_in_account_can_read_its_own_follower_count() {
         "another account's follower count must not be reported"
     );
 }
+/// A novel is one document now, and it has to carry the body.
+///
+/// The old shape fetched the detail and then "/ajax/novel/{id}/text"; that route
+/// answers 404, so a regression here shows up as an empty body rather than as an
+/// error. The id is a known public work (a chapter of a public series), so the
+/// assertion can name the exact title.
+#[tokio::test]
+async fn live_novel_detail_carries_the_whole_body() {
+    let client = client_or_skip!();
+    let id = pixiv_types::Id(29_647_105);
+    let novel = client
+        .novel(id)
+        .await
+        .unwrap_or_else(|error| panic!("novel detail failed: {}", describe(&error)));
+
+    eprintln!(
+        "novel: id={} title={:?} chars={} images={} series={:?}",
+        novel.id.get(),
+        novel.title,
+        novel.character_count,
+        novel.images.len(),
+        novel.series.as_ref().map(|series| series.id.get())
+    );
+
+    assert_eq!(novel.id, id);
+    assert_eq!(novel.title, "三・趙、未だ先王の功と罪の在ること");
+    assert!(
+        !novel.body.is_empty(),
+        "the body must come from the detail document; /text answers 404"
+    );
+    assert!(
+        novel.body.contains("[[rb:"),
+        "the body must stay raw markup, not rendered text"
+    );
+    assert!(!novel.author.name.trim().is_empty());
+    assert!(novel.character_count > 0);
+    assert_eq!(novel.upload_date.len(), 10, "date: {:?}", novel.upload_date);
+
+    // The chapter list of the series the novel belongs to is a second document
+    // and must list every published chapter, chapter 1 first.
+    let series = novel.series.expect("this work is part of a series");
+    let chapters = client
+        .novel_series_chapters(series.id)
+        .await
+        .unwrap_or_else(|error| panic!("series chapters failed: {}", describe(&error)));
+    eprintln!(
+        "series {} has {} chapters, first order {}",
+        series.id.get(),
+        chapters.len(),
+        chapters.first().map(|chapter| chapter.order).unwrap_or(0)
+    );
+    assert!(!chapters.is_empty());
+    assert_eq!(chapters[0].order, 1, "chapters are ordered for reading");
+    assert!(chapters.iter().all(|chapter| !chapter.id.is_zero()));
+}
+

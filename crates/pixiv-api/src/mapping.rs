@@ -14,15 +14,16 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use pixiv_types::domain::{
-    Account, BookmarkRestrict, BookmarkState, DiscoveryBatch, Illust, LatestFeed, PageMeta,
-    RankingRow, RecommendTag, RecommendUser, SearchResult, StreetFeed, Suggestion, UgoiraMeta,
-    UserProfile, merge_suggestions,
+    Account, BookmarkRestrict, BookmarkState, DiscoveryBatch, Illust, LatestFeed, Novel,
+    NovelSearch, NovelSeries, NovelSummary, PageMeta, RankingRow, RecommendTag, RecommendUser,
+    SearchResult, SeriesChapter, StreetFeed, Suggestion, UgoiraMeta, UserProfile, merge_suggestions,
 };
 use pixiv_types::wire::{
     BookmarkStateWire, CpsCandidateWire, CpsWire, DiscoveryArtworksWire, DiscoveryUserWire,
     DiscoveryUsersWire, FollowerListWire, IllustDetailWire, IllustDiscoveryWire, IllustPageWire,
     ProfileIllustsWire, RankingResponseWire, SearchBodyWire, SearchItemWire, SearchTagsWire,
     StreetForYouWire, StreetLatestWire, StreetRecommendTagsWire, StreetSubWire, StreetTagWire,
+    NovelDetailWire, NovelRowsWire, NovelSearchBodyWire, NovelSeriesContentWire, NovelSeriesWire,
     SuggestByWordWire, SuggestCandidateWire, UgoiraMetaWire, UserBookmarksWire, UserDetailWire,
     UserProfileAllWire, UserSelfWire,
 };
@@ -746,6 +747,121 @@ pub(crate) fn suggestions(
         tags.unwrap_or_default(),
         limit,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Novels
+// ---------------------------------------------------------------------------
+
+/// Narrow a wire counter to the u32 the domain types use, saturating.
+fn counter(value: i64) -> u32 {
+    u32::try_from(value.max(0)).unwrap_or(u32::MAX)
+}
+
+/// "/ajax/novel/{id}" -- the whole novel, body included.
+///
+/// A body without an id is refused rather than returned as novel 0: the id is the
+/// only handle the caller has on the result, and an id-0 novel is
+/// indistinguishable from "nothing loaded".
+pub(crate) fn parse_novel(raw: &str) -> Result<Novel, PixivError> {
+    let wire = decode_body::<NovelDetailWire>(raw)?;
+    if wire.id.is_zero() {
+        return Err(PixivError::Decode("小说响应缺少 id".to_string()));
+    }
+    Ok(Novel::from_detail(wire))
+}
+
+/// "/ajax/search/novels/{word}".
+pub(crate) fn parse_novel_search(raw: &str) -> Result<NovelSearch, PixivError> {
+    let body = decode_body::<NovelSearchBodyWire>(raw)?;
+    let novels: Vec<NovelSummary> = body
+        .novel
+        .data
+        .0
+        .into_iter()
+        .map(NovelSummary::from_row)
+        .filter(|novel| !novel.id.is_zero())
+        .collect();
+    let total = counter(body.novel.total);
+    let last_page = counter(body.novel.last_page);
+    Ok(NovelSearch {
+        novels,
+        total,
+        // A page count of zero with results in hand would stop the pager on page
+        // one; one page is the smallest answer that can hold a result.
+        last_page: if last_page == 0 && total > 0 {
+            1
+        } else {
+            last_page
+        },
+    })
+}
+
+/// "/ajax/novel/series/{id}" -- the series card.
+pub(crate) fn parse_novel_series(raw: &str) -> Result<NovelSeries, PixivError> {
+    let wire = decode_body::<NovelSeriesWire>(raw)?;
+    if wire.id.is_zero() {
+        return Err(PixivError::Decode("小说系列响应缺少 id".to_string()));
+    }
+    Ok(NovelSeries::from_wire(wire))
+}
+
+/// "/ajax/novel/series_content/{id}" -- the chapter list.
+///
+/// The rows arrive in the order Pixiv wants them shown, but each carries its own
+/// "seriesContentOrder"; sorting by it keeps chapter 1 first even when the list
+/// comes back reordered or partly cached.
+pub(crate) fn parse_novel_series_content(raw: &str) -> Result<Vec<SeriesChapter>, PixivError> {
+    let body = decode_body::<NovelSeriesContentWire>(raw)?;
+    let mut chapters: Vec<SeriesChapter> = body
+        .thumbnails
+        .novel
+        .0
+        .into_iter()
+        .map(SeriesChapter::from_row)
+        .filter(|chapter| !chapter.id.is_zero())
+        .collect();
+    chapters.sort_by_key(|chapter| (chapter.order, chapter.id));
+    Ok(chapters)
+}
+
+/// "/ajax/user/{id}/profile/all" -- only the novels map.
+///
+/// The same document as parse_profile_all, and the same quirk: the map is an
+/// object for a user who has novels and an empty *array* for one who has none.
+pub(crate) fn parse_user_novel_ids(raw: &str) -> Result<Vec<Id>, PixivError> {
+    decode_body::<UserProfileAllWire>(raw).map(|wire| novel_ids(&wire))
+}
+
+/// The novels map's keys, newest (largest id) first.
+///
+/// Keys that do not parse as an id are skipped instead of failing the response.
+fn novel_ids(wire: &UserProfileAllWire) -> Vec<Id> {
+    let mut ids = BTreeSet::new();
+    for key in wire.novels.keys() {
+        if let Ok(value) = key.trim().parse::<u64>() {
+            ids.insert(value);
+        }
+    }
+    // BTreeSet is ascending; the UI wants newest first.
+    ids.into_iter().rev().map(Id).collect()
+}
+
+/// "/ajax/user/{id}/novels?ids[]=..." -- the hydrated rows.
+///
+/// The body is a map keyed by id, so its key order is not the requested order;
+/// sorting by id descending reproduces Pixiv's own newest-first ordering, exactly
+/// as the illustration batch route is handled.
+pub(crate) fn parse_user_novel_rows(raw: &str) -> Result<Vec<NovelSummary>, PixivError> {
+    let body = decode_body::<NovelRowsWire>(raw)?;
+    let mut rows: Vec<NovelSummary> = body
+        .0
+        .into_iter()
+        .map(NovelSummary::from_row)
+        .filter(|novel| !novel.id.is_zero())
+        .collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.id));
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -1479,5 +1595,292 @@ mod tests {
         assert!(should_retry(0, 2, &PixivError::http(503, "down")));
         assert!(should_retry(0, 2, &PixivError::http(429, "slow")));
         assert!(!should_retry(0, 2, &PixivError::http(400, "bad")));
+    }
+    // -- novels -------------------------------------------------------------
+
+    /// A novel capture lives beside this crate's integration tests rather than in
+    /// the repository-root fixtures directory: it was trimmed for this domain and
+    /// travels with it.
+    fn novel_fixture(name: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    }
+
+    #[test]
+    fn a_novel_detail_carries_the_body_tags_and_series_navigation() {
+        let novel = parse_novel(&novel_fixture("novel_detail.json")).expect("detail parses");
+
+        assert_eq!(novel.id, Id(29_647_105));
+        assert_eq!(novel.title, "三・趙、未だ先王の功と罪の在ること");
+        assert_eq!(novel.author.id, Id(516_186));
+        assert_eq!(novel.author.name, "琴雪");
+
+        // The body comes from the detail document itself. /ajax/novel/{id}/text
+        // is gone, so an empty body would leave the reader with nothing.
+        assert!(!novel.body.is_empty(), "the body must survive the mapping");
+        assert!(novel.body.contains("[[rb:"), "ruby markup was rewritten");
+        assert!(novel.body.contains("[uploadedimage:26247899]"));
+
+        // Tags come from the nested tags.tags groups, not from a flat list.
+        let names: Vec<&str> = novel.tags.iter().map(|tag| tag.name.as_str()).collect();
+        assert_eq!(names, vec!["創作", "恋愛", "歴史創作", "春秋戦国"]);
+        assert_eq!(novel.tags[0].translated.as_deref(), Some("原创"));
+        assert!(novel.tags[3].translated.is_none(), "the last tag is untranslated");
+
+        // characterCount, and there is no textLength anywhere in this document.
+        assert_eq!(novel.character_count, 4025);
+        assert_eq!(novel.word_count, 2326);
+        assert_eq!(novel.reading_time, 483);
+        assert_eq!(novel.page_count, 1);
+        assert_eq!(novel.views, 4);
+        assert_eq!(novel.likes, 0);
+        assert_eq!(novel.upload_date, "2026-11-15");
+        assert!(novel.is_original);
+        assert_eq!(novel.x_restrict, 0);
+        assert_eq!(novel.language, "ja");
+        // bookmarkData is null on this capture.
+        assert!(!novel.bookmarked);
+        assert!(novel.cover.is_some());
+
+        // The caption is plain text: no tags left, line breaks kept.
+        assert!(!novel.caption.contains("<br"), "{}", novel.caption);
+        assert!(novel.caption.contains('\n'));
+
+        let series = novel.series.expect("this chapter belongs to a series");
+        assert_eq!(series.id, Id(15_745_812));
+        assert_eq!(series.title, "華国異伝");
+        assert_eq!(series.order, 8);
+        assert_eq!(series.prev, Some(Id(29_425_155)));
+        assert_eq!(series.next, None, "chapter 8 is the latest published one");
+        assert!(!series.prev_title.is_empty());
+        assert!(!series.concluded);
+    }
+
+    #[test]
+    fn embedded_novel_images_use_the_reading_and_master_tiers() {
+        let novel = parse_novel(&novel_fixture("novel_detail.json")).expect("detail parses");
+        assert_eq!(novel.images.len(), 2);
+        // Sorted by id, because the wire map carries no order of its own.
+        assert_eq!(novel.images[0].id, "26247841");
+        assert_eq!(novel.images[1].id, "26247899");
+        for image in &novel.images {
+            assert!(image.small.contains("/480x960/"), "small tier: {}", image.small);
+            assert!(
+                image.large.contains("/1200x1200/"),
+                "large tier: {}",
+                image.large
+            );
+        }
+    }
+
+    #[test]
+    fn a_novel_search_page_uses_text_count_and_url() {
+        let search =
+            parse_novel_search(&novel_fixture("novel_search.json")).expect("search parses");
+        assert_eq!(search.novels.len(), 3);
+        assert_eq!(search.total, 285_651);
+        assert_eq!(search.last_page, 10);
+
+        let first = &search.novels[0];
+        assert_eq!(first.id, Id(29_647_105));
+        // The row field is textCount, not characterCount...
+        assert_eq!(first.character_count, 4025);
+        // ...and the cover is "url", not "coverUrl".
+        assert!(
+            first.cover.as_deref().unwrap_or_default().contains("/600x600/"),
+            "cover: {:?}",
+            first.cover
+        );
+        assert_eq!(first.series_id, Some(Id(15_745_812)));
+        assert_eq!(first.series_title, "華国異伝");
+        assert_eq!(first.series_order, 8);
+        assert_eq!(first.author.account, "celestialrain");
+        assert_eq!(first.upload_date, "2026-11-16");
+        assert_eq!(first.x_restrict, 0);
+    }
+
+    #[test]
+    fn a_series_card_reads_its_totals_and_its_endpoints() {
+        let raw = r#"{"error":false,"message":"","body":{"id":"15745812","title":"華国異伝",
+            "caption":"古代中国は戦国の七雄。<br />趙の国。","userId":"516186","userName":"琴雪",
+            "pixivId":"celestialrain","profileImageUrl":"https://i.pximg.net/u.jpg",
+            "tags":["創作","恋愛"],"publishedContentCount":8,
+            "publishedTotalCharacterCount":82847,"publishedReadingTime":9941,
+            "firstNovelId":"27362741","latestNovelId":"29647105","isConcluded":false,
+            "cover":{"urls":{"480mw":"s.jpg","1200x1200":"m.jpg","original":"o.png"}}}}"#;
+        let series = parse_novel_series(raw).expect("series parses");
+        assert_eq!(series.id, Id(15_745_812));
+        assert_eq!(series.title, "華国異伝");
+        assert_eq!(series.author.account, "celestialrain");
+        assert_eq!(series.total, 8);
+        assert_eq!(series.total_characters, 82_847);
+        assert_eq!(series.total_reading_time, 9_941);
+        assert_eq!(series.first_novel, Some(Id(27_362_741)));
+        assert_eq!(series.latest_novel, Some(Id(29_647_105)));
+        assert!(!series.concluded);
+        // The master tier wins for a cover.
+        assert_eq!(series.cover.as_deref(), Some("m.jpg"));
+        assert_eq!(series.tags.len(), 2);
+        // The caption is HTML-ish, like a novel description.
+        assert!(series.caption.contains('\n'), "{}", series.caption);
+        assert!(!series.caption.contains("<br"));
+    }
+
+    #[test]
+    fn series_chapters_are_ordered_by_their_own_chapter_number() {
+        let raw = r#"{"error":false,"message":"","body":{"thumbnails":{"novel":[
+            {"id":"30","title":"c3","seriesContentOrder":3,"url":"u3","textCount":300,
+             "readingTime":3},
+            {"id":"10","title":"c1","seriesContentOrder":1,"url":"u1","textCount":100,
+             "readingTime":1},
+            {"id":"20","title":"c2","seriesContentOrder":2,"url":"u2","textCount":200,
+             "readingTime":2}]}}}"#;
+        let chapters = parse_novel_series_content(raw).expect("chapters parse");
+        assert_eq!(
+            chapters.iter().map(|chapter| chapter.id).collect::<Vec<_>>(),
+            vec![Id(10), Id(20), Id(30)]
+        );
+        assert_eq!(chapters[0].order, 1);
+        assert_eq!(chapters[0].character_count, 100);
+        assert_eq!(chapters[0].cover.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn user_novel_rows_come_back_newest_first_from_the_id_map() {
+        let raw = r#"{"error":false,"message":"","body":{
+            "12":{"id":"12","title":"b","url":"b.jpg","textCount":20},
+            "13":{"id":"13","title":"c","url":"c.jpg","textCount":30},
+            "11":{"id":"11","title":"a","url":"a.jpg","textCount":10}}}"#;
+        let rows = parse_user_novel_rows(raw).expect("rows parse");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![Id(13), Id(12), Id(11)]
+        );
+        assert_eq!(rows[0].character_count, 30);
+        // An empty map is an empty list, not an error.
+        let empty = r#"{"error":false,"message":"","body":{}}"#;
+        assert!(parse_user_novel_rows(empty).expect("parses").is_empty());
+    }
+    // -- novels, negative paths --------------------------------------------
+
+    #[test]
+    fn a_flagged_novel_payload_surfaces_pixivs_own_message() {
+        // error:true is a logical failure, not a shape mismatch: it must reach the
+        // caller as the server's message rather than as a decode error.
+        let raw = r#"{"error":true,"message":"該当作品は見つかりません","body":null}"#;
+        match parse_novel(raw) {
+            Err(PixivError::Api(message)) => assert_eq!(message, "該当作品は見つかりません"),
+            other => panic!("expected the API message, got {other:?}"),
+        }
+        // Every novel parser goes through the same envelope check.
+        assert!(matches!(
+            parse_novel_search(raw),
+            Err(PixivError::Api(_))
+        ));
+        assert!(matches!(
+            parse_novel_series(raw),
+            Err(PixivError::Api(_))
+        ));
+        assert!(matches!(
+            parse_user_novel_rows(raw),
+            Err(PixivError::Api(_))
+        ));
+    }
+
+    #[test]
+    fn a_novel_without_an_id_is_a_decode_error_not_novel_zero() {
+        let raw = r#"{"error":false,"message":"","body":{"title":"x","content":"y"}}"#;
+        assert!(matches!(parse_novel(raw), Err(PixivError::Decode(_))));
+        let raw = r#"{"error":false,"message":"","body":{}}"#;
+        assert!(matches!(parse_novel_series(raw), Err(PixivError::Decode(_))));
+        // A missing body member is a decode error, never a panic.
+        let raw = r#"{"error":false,"message":""}"#;
+        assert!(matches!(parse_novel(raw), Err(PixivError::Decode(_))));
+    }
+
+    #[test]
+    fn an_empty_novels_map_is_an_empty_vec_not_an_error() {
+        // The live quirk: [] where the other two maps carry {}.
+        let none = r#"{"error":false,"message":"","body":{"illusts":{},"manga":{},"novels":[],"pickup":[]}}"#;
+        assert!(
+            parse_user_novel_ids(none).expect("an array is not an error").is_empty()
+        );
+        let null = r#"{"error":false,"message":"","body":{"illusts":{},"manga":{},"novels":null}}"#;
+        assert!(parse_user_novel_ids(null).expect("null is not an error").is_empty());
+        // ...and a populated map lists newest first, skipping keys that are not ids.
+        let some = r#"{"error":false,"message":"","body":{"illusts":{},"manga":{},
+            "novels":{"10":null,"9":null,"nope":null}}}"#;
+        assert_eq!(parse_user_novel_ids(some).expect("parses"), vec![Id(10), Id(9)]);
+    }
+
+    #[test]
+    fn a_novel_search_with_no_rows_or_no_counters_is_still_an_answer() {
+        let raw = r#"{"error":false,"message":"","body":{"novel":{"data":[],"total":0,"lastPage":0}}}"#;
+        let search = parse_novel_search(raw).expect("parses");
+        assert!(search.is_empty());
+        assert_eq!(search.total, 0);
+        assert_eq!(search.last_page, 0);
+
+        // A total with no page count still has to page: one page is the floor.
+        let raw = r#"{"error":false,"message":"","body":{"novel":{"total":7}}}"#;
+        let search = parse_novel_search(raw).expect("parses");
+        assert_eq!(search.total, 7);
+        assert_eq!(search.last_page, 1);
+
+        // An envelope with no "novel" member at all is an empty page, not a panic.
+        let raw = r#"{"error":false,"message":"","body":{}}"#;
+        assert!(parse_novel_search(raw).expect("parses").is_empty());
+    }
+
+    #[test]
+    fn malformed_novel_rows_are_dropped_instead_of_failing_the_page() {
+        // A row whose id is not a number, a row that is not an object, and one good
+        // row: the page survives with the good one.
+        let raw = r#"{"error":false,"message":"","body":{"novel":{"data":[
+            {"id":"nope"},{"id":"3","title":"ok"},7],"total":1,"lastPage":1}}}"#;
+        let search = parse_novel_search(raw).expect("parses");
+        assert_eq!(search.novels.len(), 1);
+        assert_eq!(search.novels[0].id, Id(3));
+    }
+
+    #[test]
+    fn a_null_series_nav_data_is_not_a_series() {
+        let raw = r#"{"error":false,"message":"","body":{"id":"5","title":"t",
+            "seriesNavData":null}}"#;
+        assert!(parse_novel(raw).expect("parses").series.is_none());
+
+        // An object with no series id means the same thing.
+        let raw = r#"{"error":false,"message":"","body":{"id":"5","title":"t",
+            "seriesNavData":{}}}"#;
+        assert!(parse_novel(raw).expect("parses").series.is_none());
+    }
+
+    #[test]
+    fn an_empty_series_content_document_is_an_empty_chapter_list() {
+        for raw in [
+            r#"{"error":false,"message":"","body":{}}"#,
+            r#"{"error":false,"message":"","body":{"thumbnails":{"novel":[]}}}"#,
+        ] {
+            assert!(
+                parse_novel_series_content(raw)
+                    .expect("an empty list is not an error")
+                    .is_empty(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restricted_row_passes_x_restrict_through() {
+        let raw = r#"{"error":false,"message":"","body":{"novel":{"data":[
+            {"id":"4","xRestrict":1,"url":"c.jpg"}],"total":1,"lastPage":1}}}"#;
+        assert_eq!(parse_novel_search(raw).expect("parses").novels[0].x_restrict, 1);
+        // An out-of-range value clamps instead of wrapping to 255.
+        let raw = r#"{"error":false,"message":"","body":{"novel":{"data":[
+            {"id":"4","xRestrict":9,"url":"c.jpg"}],"total":1,"lastPage":1}}}"#;
+        assert_eq!(parse_novel_search(raw).expect("parses").novels[0].x_restrict, 2);
     }
 }

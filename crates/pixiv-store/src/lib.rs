@@ -22,6 +22,10 @@ use parking_lot::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
+mod novel;
+
+pub use novel::{NovelHistoryEntry, NovelProgress};
+
 /// Persistence failures.
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -134,8 +138,41 @@ CREATE INDEX IF NOT EXISTS idx_search_history_seq ON search_history (seq DESC);
 CREATE INDEX IF NOT EXISTS idx_view_history_seq ON view_history (seq DESC);
 "#;
 
+/// Migration step 3: novel reading progress and the recently-read list.
+///
+/// Forward-only like every other step: the two tables are new, nothing existing
+/// is touched, so a build that predates them keeps opening the same file.
+///
+/// `series_id` defaults to the empty string rather than NULL: a novel outside a
+/// series has no id, and one representation for "no series" keeps the index on
+/// the column usable and the comparisons simple.
+const MIGRATION_STEP_3: &str = r#"
+CREATE TABLE IF NOT EXISTS novel_progress (
+    novel_id    TEXT    NOT NULL PRIMARY KEY,
+    series_id   TEXT    NOT NULL DEFAULT '',
+    block_index INTEGER NOT NULL,
+    char_offset INTEGER NOT NULL,
+    percent     REAL    NOT NULL,
+    finished    INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS novel_history (
+    novel_id  TEXT    NOT NULL PRIMARY KEY,
+    title     TEXT    NOT NULL,
+    author    TEXT    NOT NULL,
+    cover     TEXT    NOT NULL,
+    series_id TEXT    NOT NULL DEFAULT '',
+    seq       INTEGER NOT NULL,
+    read_at   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_novel_history_seq ON novel_history (seq DESC);
+CREATE INDEX IF NOT EXISTS idx_novel_progress_series ON novel_progress (series_id);
+"#;
+
 /// Ordered migration steps; entry `i` upgrades the schema to version `i + 1`.
-const MIGRATIONS: &[&str] = &[MIGRATION_STEP_1, MIGRATION_STEP_2];
+const MIGRATIONS: &[&str] = &[MIGRATION_STEP_1, MIGRATION_STEP_2, MIGRATION_STEP_3];
 
 /// Version the current build produces.
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -568,8 +605,9 @@ mod tests {
 
     #[test]
     fn schema_version_tracks_the_migration_list() {
-        // Two steps today: the tables, then the sequence indexes.
-        assert_eq!(SCHEMA_VERSION, 2);
+        // Three steps today: the tables, the sequence indexes, then the novel
+        // reading tables.
+        assert_eq!(SCHEMA_VERSION, 3);
         let s = store();
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
 
@@ -771,6 +809,101 @@ mod tests {
         let stats = s.stats().unwrap();
         assert_eq!(stats.history_entries, 2);
         assert_eq!(stats.download_entries, 2);
+    }
+
+    /// A database exactly as the previous build left it: the schema at version 2,
+    /// with real rows in it.
+    fn database_at_version_two(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_version (
+                singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+                version   INTEGER NOT NULL
+            );
+            INSERT INTO schema_version (singleton, version) VALUES (1, 2);
+            "#,
+        )
+        .unwrap();
+        conn.execute_batch(MIGRATION_STEP_1).unwrap();
+        conn.execute_batch(MIGRATION_STEP_2).unwrap();
+        conn.execute(
+            "INSERT INTO view_history (illust_id, title, author, thumb_url, viewed_at, seq)
+             VALUES ('42', 'old title', 'artist', 'thumb.jpg', 1000, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO settings ("key", "value") VALUES ('theme', 'sepia')"#,
+            [],
+        )
+        .unwrap();
+    }
+
+    /// Step 3 is additive, so a file written by the previous build upgrades in
+    /// place: the rows are still there and the new tables appear alongside them.
+    #[test]
+    fn upgrading_from_version_two_keeps_the_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.db");
+        database_at_version_two(&path);
+
+        // The fixture really is a version-2 file with no novel tables.
+        {
+            let conn = Connection::open(&path).unwrap();
+            let version: i64 = conn
+                .query_row(
+                    "SELECT version FROM schema_version WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version, 2);
+            let novel_tables: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name LIKE 'novel_%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(novel_tables, 0, "step 3 must be what creates them");
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.view_history(10).unwrap().len(), 1);
+        assert_eq!(store.view_history(10).unwrap()[0].title, "old title");
+        assert_eq!(
+            store.get_setting("theme").unwrap().as_deref(),
+            Some("sepia")
+        );
+
+        // The new tables are usable straight away.
+        store
+            .save_novel_progress(&NovelProgress {
+                novel_id: "1".to_string(),
+                percent: 0.5,
+                ..NovelProgress::default()
+            })
+            .unwrap();
+        assert!(store.novel_progress("1").unwrap().is_some());
+        store
+            .record_novel_read(&NovelHistoryEntry {
+                novel_id: "1".to_string(),
+                title: "novel".to_string(),
+                ..NovelHistoryEntry::default()
+            })
+            .unwrap();
+        assert_eq!(store.novel_history(10).unwrap().len(), 1);
+        assert_eq!(store.novel_stats().unwrap(), (1, 1));
+
+        // Opening it again must not re-run the step or disturb anything.
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), 3);
+        assert_eq!(reopened.view_history(10).unwrap().len(), 1);
+        assert_eq!(reopened.novel_stats().unwrap(), (1, 1));
     }
 
     #[test]

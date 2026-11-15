@@ -471,9 +471,10 @@ pub struct UserProfileAllWire {
     pub illusts: HashMap<String, Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "flex::map")]
     pub manga: HashMap<String, Option<serde_json::Value>>,
-    /// An *array* on the live endpoint (usually empty), unlike illusts/manga.
-    #[serde(default)]
-    pub novels: serde_json::Value,
+    /// Novel ids, with the same quirk the other two maps have: an object for a
+    /// user who has novels and an empty *array* for one who has none.
+    #[serde(default, deserialize_with = "flex::map")]
+    pub novels: HashMap<String, Option<serde_json::Value>>,
     #[serde(default)]
     pub pickup: Vec<serde_json::Value>,
 }
@@ -910,4 +911,412 @@ pub struct FollowerListWire {
     /// Sent as a string by the live endpoint.
     #[serde(default, deserialize_with = "flex::string")]
     pub total: String,
+}
+
+
+// ===========================================================================
+// Novels (/ajax/novel/*, /ajax/search/novels/*, /ajax/user/{id}/novels)
+// ===========================================================================
+//
+// A novel is a second content type and almost none of its vocabulary matches the
+// illustration payloads above:
+//
+// * the *body* of a novel travels inside the detail document as raw markup
+//   ("content"). "/ajax/novel/{id}/text" is gone -- it answers 404 -- so there is
+//   nothing left to fetch separately, and one document stays one request.
+// * the character count is "characterCount" on the detail but "textCount" on
+//   every row, and the detail document has no "textLength" field at all.
+// * the cover is "coverUrl" on the detail and "url" on a row.
+// * embedded images are a map keyed by image id under "textEmbeddedImages", with
+//   pixel-dimension keys instead of the named mini/thumb/small tiers.
+// * the chapter list is "/ajax/novel/series_content/{id}";
+//   "/ajax/novel/series/{id}/content" answers 404.
+
+/// URL tiers of a novel image or of a series cover.
+///
+/// The keys are pixel dimensions, and the set is wider than the illustration
+/// tiers: "240mw" / "480mw" are the reading-width crops, "1200x1200" is the
+/// master cover, "128x128" is the square crop, and "original" is whatever the
+/// author uploaded.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NovelImageUrlsWire {
+    #[serde(default, rename = "240mw")]
+    pub mw240: String,
+    #[serde(default, rename = "480mw")]
+    pub mw480: String,
+    #[serde(default, rename = "1200x1200")]
+    pub master1200: String,
+    #[serde(default, rename = "128x128")]
+    pub square: String,
+    #[serde(default)]
+    pub original: String,
+}
+
+impl NovelImageUrlsWire {
+    /// Reading-width tier for an illustration inside the body.
+    ///
+    /// "480mw" is what the web reader draws at. The fallbacks walk inward first
+    /// ("240mw", then the square crop) and outward second ("1200x1200", then the
+    /// original): a slightly smaller crop of the right picture is a better card
+    /// than a multi-megabyte original of it.
+    #[must_use]
+    pub fn small(&self) -> &str {
+        Self::first(&[
+            self.mw480.as_str(),
+            self.mw240.as_str(),
+            self.square.as_str(),
+            self.master1200.as_str(),
+            self.original.as_str(),
+        ])
+    }
+
+    /// Full-width tier for the reader and its lightbox.
+    ///
+    /// "1200x1200" is the master the site itself renders; "original" is the
+    /// largest but is often an unoptimised PNG, so it is the second choice.
+    #[must_use]
+    pub fn large(&self) -> &str {
+        Self::first(&[
+            self.master1200.as_str(),
+            self.original.as_str(),
+            self.mw480.as_str(),
+            self.mw240.as_str(),
+            self.square.as_str(),
+        ])
+    }
+
+    /// Tier for a series or novel cover on a card: the master, then the original.
+    #[must_use]
+    pub fn cover(&self) -> &str {
+        Self::first(&[
+            self.master1200.as_str(),
+            self.original.as_str(),
+            self.mw480.as_str(),
+            self.mw240.as_str(),
+            self.square.as_str(),
+        ])
+    }
+
+    fn first<'a>(candidates: &[&'a str]) -> &'a str {
+        candidates
+            .iter()
+            .copied()
+            .find(|url| !url.trim().is_empty())
+            .unwrap_or_default()
+    }
+}
+
+/// One entry of "textEmbeddedImages".
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelImageWire {
+    #[serde(default)]
+    pub novel_image_id: String,
+    /// Sensitivity level. Sent as a *string* here ("2"), unlike the numeric "sl"
+    /// on illustration payloads.
+    #[serde(default, deserialize_with = "flex::string")]
+    pub sl: String,
+    #[serde(default)]
+    pub urls: NovelImageUrlsWire,
+}
+
+/// Decode "textEmbeddedImages": a map keyed by image id, "[]" when empty.
+///
+/// The same quirk the profile id maps have: a novel without illustrations is
+/// answered with an empty *array* where an object belongs, and a plain
+/// HashMap would reject the whole document over it.
+fn novel_image_map<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<HashMap<String, NovelImageWire>, D::Error> {
+    let value = serde_json::Value::deserialize(d).map_err(de::Error::custom)?;
+    Ok(match value {
+        serde_json::Value::Object(map) => map
+            .into_iter()
+            // One malformed image must not blank the body around it.
+            .filter_map(|(key, image)| {
+                serde_json::from_value::<NovelImageWire>(image)
+                    .ok()
+                    .map(|image| (key, image))
+            })
+            .collect(),
+        _ => HashMap::new(),
+    })
+}
+
+/// One neighbour of a series chapter.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelSeriesLinkWire {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub order: i64,
+    #[serde(default)]
+    pub title: String,
+    /// False when the chapter is private or deleted. Kept as an Option so a
+    /// payload that omits the key still counts as available: only an explicit
+    /// false is a refusal.
+    #[serde(default)]
+    pub available: Option<bool>,
+}
+
+/// "seriesNavData": which series this chapter belongs to, plus its neighbours.
+///
+/// null for a standalone novel, which is why the detail struct keeps it as an
+/// Option and the domain type keeps an Option in turn.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelSeriesNavWire {
+    #[serde(default)]
+    pub series_type: String,
+    #[serde(default)]
+    pub series_id: Id,
+    #[serde(default)]
+    pub title: String,
+    /// 1-based position of this chapter inside the series.
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub order: i64,
+    #[serde(default)]
+    pub prev: Option<NovelSeriesLinkWire>,
+    #[serde(default)]
+    pub next: Option<NovelSeriesLinkWire>,
+    #[serde(default)]
+    pub is_concluded: bool,
+}
+
+/// "/ajax/novel/{id}" body -- the whole novel, body included.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelDetailWire {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub user_id: Id,
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default)]
+    pub cover_url: String,
+    /// The HTML-ish blurb: "<br />" line breaks and "<a href>" links.
+    #[serde(default)]
+    pub description: String,
+    /// The novel itself, as Pixiv's own markup ("[[rb:.. > ..]]",
+    /// "[uploadedimage:..]", "[[jumpuri:..]]"). Never rewritten in this layer.
+    #[serde(default)]
+    pub content: String,
+    /// Nested exactly like illustration tags: one group per author.
+    #[serde(default, deserialize_with = "tag_groups")]
+    pub tags: Vec<TagGroupWire>,
+    /// The viewer's own bookmark row; null when not bookmarked.
+    #[serde(default)]
+    pub bookmark_data: Option<BookmarkDataWire>,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub view_count: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub bookmark_count: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub like_count: i64,
+    /// The character count. There is no "textLength" in this document.
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub character_count: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub word_count: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub reading_time: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub page_count: i64,
+    #[serde(default)]
+    pub create_date: String,
+    #[serde(default)]
+    pub upload_date: String,
+    #[serde(default)]
+    pub is_original: bool,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub x_restrict: i64,
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub series_nav_data: Option<NovelSeriesNavWire>,
+    #[serde(default, deserialize_with = "novel_image_map")]
+    pub text_embedded_images: HashMap<String, NovelImageWire>,
+}
+
+/// A novel row: the shape shared by search results, series chapters and
+/// "/ajax/user/{id}/novels".
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelItemWire {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default)]
+    pub title: String,
+    /// Genre code, sent as a string ("1"). Kept as text rather than decoded to a
+    /// number that a future code would silently break.
+    #[serde(default, deserialize_with = "flex::string")]
+    pub genre: String,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub x_restrict: i64,
+    /// The cover. A row calls this "url"; only the detail document uses
+    /// "coverUrl", so the two must not be confused.
+    #[serde(default)]
+    pub url: String,
+    /// Flat tag names, unlike the detail document's per-author groups.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub user_id: Id,
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default)]
+    pub pixiv_id: String,
+    #[serde(default)]
+    pub profile_image_url: String,
+    /// The character count on a row ("textCount"), not "characterCount".
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub text_count: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub word_count: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub reading_time: i64,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub bookmark_data: Option<BookmarkDataWire>,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub bookmark_count: i64,
+    #[serde(default)]
+    pub is_original: bool,
+    /// Sometimes a string, sometimes an object, as on every other payload
+    /// carrying a date.
+    #[serde(default, deserialize_with = "flex::string")]
+    pub create_date: String,
+    /// null for a standalone work, the series id for a chapter.
+    #[serde(default)]
+    pub series_id: Option<Id>,
+    #[serde(default)]
+    pub series_title: String,
+    /// This chapter's position inside its series.
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub series_content_order: i64,
+    #[serde(default)]
+    pub language: String,
+}
+
+/// Novel rows, in either of the two shapes Pixiv serves them in.
+///
+/// "/ajax/search/novels/*" and "/ajax/novel/series_content/*" answer a list
+/// ("novel.data", "thumbnails.novel"), while "/ajax/user/{id}/novels" answers a
+/// map keyed by id whose *values* are the same rows. One type covers both so the
+/// mapping layer never has to know which route answered.
+///
+/// A row that does not decode is dropped instead of failing the document: one
+/// broken entry must not blank a whole page, and the rule for this domain is
+/// that an id which does not fit is droppable.
+#[derive(Debug, Clone, Default)]
+pub struct NovelRowsWire(pub Vec<NovelItemWire>);
+
+impl<'de> Deserialize<'de> for NovelRowsWire {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d).map_err(de::Error::custom)?;
+        let rows = match value {
+            serde_json::Value::Array(items) => items,
+            serde_json::Value::Object(map) => map.into_values().collect(),
+            // "no rows" arrives as [], {}, or null depending on the route.
+            _ => Vec::new(),
+        };
+        Ok(Self(
+            rows.into_iter()
+                .filter_map(|row| serde_json::from_value::<NovelItemWire>(row).ok())
+                .collect(),
+        ))
+    }
+}
+
+/// "/ajax/search/novels/{word}" body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelSearchBodyWire {
+    #[serde(default)]
+    pub novel: NovelSearchPageWire,
+}
+
+/// The result half of a novel search.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelSearchPageWire {
+    #[serde(default)]
+    pub data: NovelRowsWire,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub total: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub last_page: i64,
+}
+
+/// "/ajax/novel/series/{id}" body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelSeriesWire {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default)]
+    pub title: String,
+    /// HTML-ish, like a novel description.
+    #[serde(default)]
+    pub caption: String,
+    #[serde(default)]
+    pub user_id: Id,
+    #[serde(default)]
+    pub user_name: String,
+    #[serde(default)]
+    pub pixiv_id: String,
+    #[serde(default)]
+    pub profile_image_url: String,
+    /// Flat tag names here, unlike the detail document's nested groups.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub cover: Option<NovelCoverWire>,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub published_content_count: i64,
+    /// Mirrors "publishedContentCount"; kept because the page header is drawn
+    /// from this one and the two have been seen to disagree.
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub total: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub published_total_character_count: i64,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub published_reading_time: i64,
+    #[serde(default)]
+    pub first_novel_id: Id,
+    #[serde(default)]
+    pub latest_novel_id: Id,
+    #[serde(default)]
+    pub is_concluded: bool,
+    #[serde(default, deserialize_with = "flex::i64")]
+    pub x_restrict: i64,
+}
+
+/// A series cover: {"urls": {<pixel tiers>}}.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NovelCoverWire {
+    #[serde(default)]
+    pub urls: NovelImageUrlsWire,
+}
+
+/// "/ajax/novel/series_content/{id}" body.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelSeriesContentWire {
+    #[serde(default)]
+    pub thumbnails: NovelThumbnailsWire,
+}
+
+/// The thumbnails block: one row list per content type, of which only "novel" is
+/// ever populated for this route.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NovelThumbnailsWire {
+    #[serde(default)]
+    pub novel: NovelRowsWire,
 }

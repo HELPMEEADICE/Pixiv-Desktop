@@ -1,0 +1,137 @@
+{
+  "_comment": "Trimmed live capture of GET https://www.pixiv.net/ajax/search/novels/%E6%81%8B%E6%84%9B?word=%E6%81%8B%E6%84%9B&order=date_d&mode=all&p=1&s_mode=s_tag_full&lang=zh (the tag page for the tag 恋爱), taken 2026-11-16: novel.data keeps the first three rows verbatim and the counters are the live ones (285651 results over 10 pages). Everything else in the document (suggestChips, popular, relatedTags, tagTranslation, zoneConfig, extraData) was dropped as it is not part of this domain.",
+  "error": false,
+  "message": "",
+  "body": {
+    "novel": {
+      "data": [
+        {
+          "id": "29647105",
+          "title": "三・趙、未だ先王の功と罪の在ること",
+          "genre": "1",
+          "xRestrict": 0,
+          "restrict": 0,
+          "url": "https://i.pximg.net/c/600x600/novel-cover-master/img/2026/11/16/00/52/25/ci29647105_2b558d676d02077faf5634ad2af08d16_master1200.jpg",
+          "tags": [
+            "創作",
+            "恋愛",
+            "歴史創作",
+            "春秋戦国"
+          ],
+          "userId": "516186",
+          "userName": "琴雪",
+          "pixivId": "celestialrain",
+          "profileImageUrl": "https://i.pximg.net/user-profile/img/2010/09/21/01/33/58/2219287_a4562002d401015f985492a22dffebe9_50.jpg",
+          "textCount": 4025,
+          "wordCount": 2326,
+          "readingTime": 483,
+          "useWordCount": false,
+          "description": "長くなったので後半を第4話にした為に、恋愛ものの筈なのに政治パートのみになってしまいました。<br />平原君の相邦時期は不明なので第一回目の就任時にしております。<br />少し不穏な第３話となりました。<br /><br />史記『廉頗藺相如列伝』を下敷きとしたオリジナル歴史物語です。フィクション度は『キングダム』くらい…と思っていただければ。<br />※ヒロインの椿は『楼椿』が正式名ですがそのまま『つばき』とお読みください。<br />※挿絵のみAIを利用しております",
+          "isBookmarkable": true,
+          "bookmarkData": null,
+          "bookmarkCount": 0,
+          "isOriginal": true,
+          "marker": null,
+          "titleCaptionTranslation": {
+            "workTitle": null,
+            "workCaption": null
+          },
+          "createDate": "2026-11-16T00:52:25+09:00",
+          "updateDate": "2026-11-16T00:52:25+09:00",
+          "isMasked": false,
+          "aiType": 1,
+          "seriesId": "15745812",
+          "seriesTitle": "華国異伝",
+          "seriesContentOrder": 8,
+          "isUnlisted": false,
+          "visibilityScope": 0,
+          "language": "ja"
+        },
+        {
+          "id": "29646940",
+          "title": "10月①―恋の闇路",
+          "genre": "0",
+          "xRestrict": 0,
+          "restrict": 0,
+          "url": "https://i.pximg.net/c/600x600/novel-cover-master/img/2022/07/10/05/27/03/ci6324068_685782fd6dc0dead940c2d6edc2ad718_master1200.jpg",
+          "tags": [
+            "ハイキュー!!",
+            "孤爪研磨",
+            "夢小説",
+            "オリキャラ",
+            "恋愛"
+          ],
+          "userId": "16959498",
+          "userName": "サライ",
+          "pixivId": "takeha777",
+          "profileImageUrl": "https://i.pximg.net/user-profile/img/2016/02/07/01/05/05/10493982_7640776f5a972a352586182771b98b89_50.jpg",
+          "textCount": 2317,
+          "wordCount": 1214,
+          "readingTime": 278,
+          "useWordCount": false,
+          "description": "（2026.11.16 投稿）<br />孤爪研磨と音駒女子の恋。愛すること、憎むこと。<br />【あらすじ】烏野高校が音駒へ合宿にやって来ることを打ち明けてから、研磨はさかんに日向のことを話すようになる。千鳥は経験したことのないような感情に苛まれはじめる。<br />********<br />※ハイキューを音駒側から見た展開。キャラの台詞・モノローグをパロって織り込んでいます。<br />※2週間おきぐらいにストーリーを追加していきます。<br />※「９月①」（全年齢）、「９月②」（R-18）を踏まえて読むと（またできれば全話通して読むと）会話への理解が深まります。",
+          "isBookmarkable": true,
+          "bookmarkData": null,
+          "bookmarkCount": 0,
+          "isOriginal": false,
+          "marker": null,
+          "titleCaptionTranslation": {
+            "workTitle": null,
+            "workCaption": null
+          },
+          "createDate": "2026-11-16T00:35:02+09:00",
+          "updateDate": "2026-11-16T00:39:02+09:00",
+          "isMasked": false,
+          "aiType": 1,
+          "seriesId": "651651",
+          "seriesTitle": "踏むことなかれ花の影",
+          "seriesContentOrder": 14,
+          "isUnlisted": false,
+          "visibilityScope": 0,
+          "language": "ja"
+        },
+        {
+          "id": "29646914",
+          "title": "bittersweet firstlove5",
+          "genre": "0",
+          "xRestrict": 0,
+          "restrict": 0,
+          "url": "https://i.pximg.net/c/600x600/novel-cover-master/img/2026/11/16/00/32/22/ci29646914_387187037491833b75e677c4835e85e6_master1200.jpg",
+          "tags": [
+            "恋愛"
+          ],
+          "userId": "25716173",
+          "userName": "イオリ1214",
+          "pixivId": "user_ujxh3435",
+          "profileImageUrl": "https://s.pximg.net/common/images/no_profile_s.png",
+          "textCount": 3348,
+          "wordCount": 1844,
+          "readingTime": 401,
+          "useWordCount": false,
+          "description": "",
+          "isBookmarkable": true,
+          "bookmarkData": null,
+          "bookmarkCount": 0,
+          "isOriginal": false,
+          "marker": null,
+          "titleCaptionTranslation": {
+            "workTitle": null,
+            "workCaption": null
+          },
+          "createDate": "2026-11-16T00:32:22+09:00",
+          "updateDate": "2026-11-16T00:36:23+09:00",
+          "isMasked": false,
+          "aiType": 2,
+          "seriesId": "16778365",
+          "seriesTitle": "bittersweet first love",
+          "seriesContentOrder": 5,
+          "isUnlisted": false,
+          "visibilityScope": 0,
+          "language": "ja"
+        }
+      ],
+      "total": 285651,
+      "lastPage": 10
+    }
+  }
+}

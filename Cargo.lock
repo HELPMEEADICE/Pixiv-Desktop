@@ -3781,6 +3781,7 @@ dependencies = [
  "pixiv-demo",
  "pixiv-download",
  "pixiv-image",
+ "pixiv-novel",
  "pixiv-store",
  "pixiv-types",
  "pixiv-ugoira",
@@ -3823,6 +3824,14 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "pixiv-novel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/pixiv-types",
+    "crates/pixiv-novel",
     "crates/pixiv-api",
     "crates/pixiv-image",
     "crates/pixiv-store",
@@ -18,6 +19,7 @@ license = "GPL-3.0-only"
 
 [workspace.dependencies]
 pixiv-types = { path = "crates/pixiv-types" }
+pixiv-novel = { path = "crates/pixiv-novel" }
 pixiv-api = { path = "crates/pixiv-api" }
 pixiv-image = { path = "crates/pixiv-image" }
 pixiv-store = { path = "crates/pixiv-store" }
@@ -67,6 +69,7 @@ pixiv-store.workspace = true
 pixiv-download.workspace = true
 pixiv-ugoira.workspace = true
 pixiv-demo.workspace = true
+pixiv-novel.workspace = true
 
 slint = "1.18"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

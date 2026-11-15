@@ -367,31 +367,9 @@ impl Illust {
     /// Build from `/ajax/illust/{id}`.
     #[must_use]
     pub fn from_detail(w: wire::IllustDetailWire) -> Self {
-        // Tags are nested per-author; flatten while keeping the first
-        // translation seen for each tag name.
-        let mut tags: Vec<Tag> = Vec::new();
-        for group in w.tags {
-            for t in group.tags {
-                if t.tag.is_empty() {
-                    continue;
-                }
-                let translated = t
-                    .translation
-                    .as_ref()
-                    .and_then(|m| m.get("zh").or_else(|| m.get("en")).cloned());
-                match tags.iter_mut().find(|existing| existing.name == t.tag) {
-                    Some(existing) => {
-                        if existing.translated.is_none() {
-                            existing.translated = translated;
-                        }
-                    }
-                    None => tags.push(Tag {
-                        name: t.tag,
-                        translated,
-                    }),
-                }
-            }
-        }
+        // Tags are nested per-author; the flattening (first translation wins) is
+        // the rule the novel detail document uses too, so it lives in one place.
+        let tags = tags_from_groups(w.tags);
 
         let mut out = Self::base(
             w.illust_id,
@@ -1254,6 +1232,622 @@ pub fn append_unique(into: &mut Vec<Illust>, incoming: impl IntoIterator<Item = 
     added
 }
 
+// ---------------------------------------------------------------------------
+// Novels
+// ---------------------------------------------------------------------------
+//
+// A novel is a different content type, not a variant of an illustration: it has a
+// body, no image pages, a position inside an optional series, and its own
+// counters. It is modelled in full so the reader, the search grid and the series
+// page all speak one vocabulary instead of counting fields per endpoint.
+//
+// The invariants every type in this section obeys:
+//
+// * a missing string is "", a missing number is 0;
+// * a negative number is clamped to 0, and a number too large for the field
+//   saturates rather than wrapping or zeroing;
+// * a row whose id does not parse is dropped by the mapping layer, never kept as
+//   id 0 -- an id-0 novel is indistinguishable from "nothing here".
+
+/// An illustration embedded in a novel body, from "textEmbeddedImages".
+///
+/// The body references these by the id in "[uploadedimage:<id>]", so the id is
+/// kept as the string Pixiv sent rather than narrowed to a number.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NovelImage {
+    pub id: String,
+    /// Reading-width tier (480mw, falling back inward then outward).
+    pub small: String,
+    /// Full-width tier (1200x1200, falling back to the original).
+    pub large: String,
+}
+
+impl NovelImage {
+    fn from_wire(key: String, w: wire::NovelImageWire) -> Self {
+        // The map key and the inner id are the same value on every capture; the
+        // key is the fallback so an image without its own id is still addressable.
+        let id = if w.novel_image_id.trim().is_empty() {
+            key
+        } else {
+            w.novel_image_id
+        };
+        Self {
+            id,
+            small: w.urls.small().to_string(),
+            large: w.urls.large().to_string(),
+        }
+    }
+}
+
+/// Where a chapter sits inside its series ("seriesNavData").
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NovelSeriesNav {
+    pub id: Id,
+    pub title: String,
+    /// 1-based position of this chapter inside the series.
+    pub order: u32,
+    /// Previous chapter, when it exists and the reader may open it.
+    pub prev: Option<Id>,
+    /// Next chapter, under the same rule.
+    pub next: Option<Id>,
+    /// Neighbour titles, so the reader footer can read "上一章 ...".
+    pub prev_title: String,
+    pub next_title: String,
+    /// True when the author marked the series finished.
+    pub concluded: bool,
+}
+
+impl NovelSeriesNav {
+    /// Build from "seriesNavData", or None when this work is standalone.
+    ///
+    /// An explicit null and an object carrying a zero series id mean the same
+    /// thing: not in a series. A neighbour whose "available" flag is false (a
+    /// private or deleted chapter) is treated as absent, because this type has no
+    /// field to carry the flag and offering the link would open an error page.
+    #[must_use]
+    fn from_wire(w: wire::NovelSeriesNavWire) -> Option<Self> {
+        if w.series_id.is_zero() {
+            return None;
+        }
+        let (prev, prev_title) = neighbour(w.prev);
+        let (next, next_title) = neighbour(w.next);
+        Some(Self {
+            id: w.series_id,
+            title: w.title,
+            order: count32(w.order),
+            prev,
+            next,
+            prev_title,
+            next_title,
+            concluded: w.is_concluded,
+        })
+    }
+}
+
+/// One neighbour: the id when it may be opened, plus its title either way.
+fn neighbour(w: Option<wire::NovelSeriesLinkWire>) -> (Option<Id>, String) {
+    match w {
+        Some(link) if link.available != Some(false) && !link.id.is_zero() => {
+            (Some(link.id), link.title)
+        }
+        _ => (None, String::new()),
+    }
+}
+
+/// A complete novel, body included.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Novel {
+    pub id: Id,
+    pub title: String,
+    pub author: Author,
+    /// Cover URL at the master tier; absent when the work has no cover.
+    pub cover: Option<String>,
+    /// The description reduced to plain text by clean_caption.
+    pub caption: String,
+    pub tags: Vec<Tag>,
+    /// The body, exactly as Pixiv sent it.
+    ///
+    /// Kept raw on purpose: ruby ("[[rb:base > reading]]"), embedded images
+    /// ("[uploadedimage:<id>]") and jump links ("[[jumpuri:..]]") are rendered by
+    /// the reader, and rewriting them here would destroy information the reader
+    /// could not recover.
+    pub body: String,
+    /// Embedded images, sorted by id.
+    ///
+    /// The wire map has no order of its own and the body is the only authority on
+    /// where an image appears; sorting at least makes this vector deterministic.
+    pub images: Vec<NovelImage>,
+    pub character_count: u32,
+    pub word_count: u32,
+    pub reading_time: u32,
+    pub page_count: u32,
+    pub views: u32,
+    pub bookmarks: u32,
+    pub likes: u32,
+    /// "YYYY-MM-DD" when the timestamp parsed, otherwise the raw string.
+    pub upload_date: String,
+    pub is_original: bool,
+    /// 0 all-ages, 1 R-18, 2 R-18G.
+    pub x_restrict: u8,
+    pub language: String,
+    pub series: Option<NovelSeriesNav>,
+    pub bookmarked: bool,
+}
+
+impl Novel {
+    /// Build from "/ajax/novel/{id}" -- the whole document, body included.
+    ///
+    /// The detail payload carries no author handle and no avatar (userName and
+    /// userId only), so those stay empty until a profile call fills them in;
+    /// inventing them here would mean guessing.
+    #[must_use]
+    pub fn from_detail(w: wire::NovelDetailWire) -> Self {
+        let mut images: Vec<NovelImage> = w
+            .text_embedded_images
+            .into_iter()
+            .map(|(key, image)| NovelImage::from_wire(key, image))
+            .filter(|image| !image.id.trim().is_empty())
+            .collect();
+        images.sort_by_key(|image| image.id.parse::<u64>().unwrap_or(u64::MAX));
+        Self {
+            id: w.id,
+            title: w.title,
+            author: Author {
+                id: w.user_id,
+                name: w.user_name,
+                account: String::new(),
+                avatar: None,
+            },
+            cover: non_empty(w.cover_url),
+            caption: clean_caption(&w.description),
+            tags: tags_from_groups(w.tags),
+            body: w.content,
+            images,
+            character_count: count32(w.character_count),
+            word_count: count32(w.word_count),
+            reading_time: count32(w.reading_time),
+            page_count: count32(w.page_count),
+            views: count32(w.view_count),
+            bookmarks: count32(w.bookmark_count),
+            likes: count32(w.like_count),
+            upload_date: date_part(&w.create_date, &w.upload_date),
+            is_original: w.is_original,
+            x_restrict: restrict8(w.x_restrict),
+            language: w.language,
+            series: w.series_nav_data.and_then(NovelSeriesNav::from_wire),
+            bookmarked: w.bookmark_data.is_some(),
+        }
+    }
+}
+
+/// A novel as it appears in a list: search results, a series page, a profile.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NovelSummary {
+    pub id: Id,
+    pub title: String,
+    pub author: Author,
+    pub cover: Option<String>,
+    pub tags: Vec<Tag>,
+    pub caption: String,
+    /// Characters, from the row's "textCount".
+    pub character_count: u32,
+    pub reading_time: u32,
+    /// Absent for a standalone work.
+    pub series_id: Option<Id>,
+    pub series_title: String,
+    /// This chapter's position inside its series; 0 when standalone.
+    pub series_order: u32,
+    pub upload_date: String,
+    pub bookmarked: bool,
+    pub x_restrict: u8,
+}
+
+impl NovelSummary {
+    /// Build from any novel row: a search hit, a series chapter, a user's work.
+    #[must_use]
+    pub fn from_row(w: wire::NovelItemWire) -> Self {
+        Self {
+            id: w.id,
+            title: w.title,
+            author: Author {
+                id: w.user_id,
+                name: w.user_name,
+                account: w.pixiv_id,
+                avatar: non_empty(w.profile_image_url),
+            },
+            cover: non_empty(w.url),
+            tags: clean_tags(w.tags),
+            caption: clean_caption(&w.description),
+            character_count: count32(w.text_count),
+            reading_time: count32(w.reading_time),
+            series_id: w.series_id.filter(|id| !id.is_zero()),
+            series_title: w.series_title,
+            series_order: count32(w.series_content_order),
+            upload_date: date_part(&w.create_date, ""),
+            bookmarked: w.bookmark_data.is_some(),
+            x_restrict: restrict8(w.x_restrict),
+        }
+    }
+}
+
+/// One page of novel search results.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NovelSearch {
+    pub novels: Vec<NovelSummary>,
+    pub total: u32,
+    pub last_page: u32,
+}
+
+impl NovelSearch {
+    /// True when the page carried no rows.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.novels.is_empty()
+    }
+}
+
+/// A novel series ("/ajax/novel/series/{id}").
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NovelSeries {
+    pub id: Id,
+    pub title: String,
+    /// The series blurb, reduced to plain text.
+    pub caption: String,
+    pub author: Author,
+    pub cover: Option<String>,
+    pub tags: Vec<Tag>,
+    /// Published chapters.
+    pub total: u32,
+    pub total_characters: u32,
+    pub total_reading_time: u32,
+    pub first_novel: Option<Id>,
+    pub latest_novel: Option<Id>,
+    pub concluded: bool,
+}
+
+impl NovelSeries {
+    /// Build from "/ajax/novel/series/{id}".
+    #[must_use]
+    pub fn from_wire(w: wire::NovelSeriesWire) -> Self {
+        // "publishedContentCount" is the count the chapter list is built from;
+        // "total" mirrors it but is the one the header renders, so it is the
+        // fallback rather than the other way round.
+        let total = if w.published_content_count > 0 {
+            w.published_content_count
+        } else {
+            w.total
+        };
+        Self {
+            id: w.id,
+            title: w.title,
+            caption: clean_caption(&w.caption),
+            author: Author {
+                id: w.user_id,
+                name: w.user_name,
+                account: w.pixiv_id,
+                avatar: non_empty(w.profile_image_url),
+            },
+            cover: w
+                .cover
+                .map(|cover| cover.urls.cover().to_string())
+                .filter(|url| !url.trim().is_empty()),
+            tags: clean_tags(w.tags),
+            total: count32(total),
+            total_characters: count32(w.published_total_character_count),
+            total_reading_time: count32(w.published_reading_time),
+            first_novel: Some(w.first_novel_id).filter(|id| !id.is_zero()),
+            latest_novel: Some(w.latest_novel_id).filter(|id| !id.is_zero()),
+            concluded: w.is_concluded,
+        }
+    }
+}
+
+/// One chapter in a series listing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SeriesChapter {
+    pub id: Id,
+    pub title: String,
+    /// 1-based position inside the series.
+    pub order: u32,
+    pub cover: Option<String>,
+    pub character_count: u32,
+    pub reading_time: u32,
+}
+
+impl SeriesChapter {
+    /// Build from a "/ajax/novel/series_content/{id}" row.
+    #[must_use]
+    pub fn from_row(w: wire::NovelItemWire) -> Self {
+        Self {
+            id: w.id,
+            title: w.title,
+            order: count32(w.series_content_order),
+            cover: non_empty(w.url),
+            character_count: count32(w.text_count),
+            reading_time: count32(w.reading_time),
+        }
+    }
+}
+
+/// Flatten Pixiv's per-author tag groups into one list, first translation wins.
+///
+/// Both the illustration and the novel detail documents nest tags one level
+/// deeper than the list payloads; the flattening happens here so no caller has to
+/// know about it.
+fn tags_from_groups(groups: Vec<wire::TagGroupWire>) -> Vec<Tag> {
+    let mut tags: Vec<Tag> = Vec::new();
+    for group in groups {
+        for t in group.tags {
+            if t.tag.is_empty() {
+                continue;
+            }
+            let translated = t
+                .translation
+                .as_ref()
+                .and_then(|m| m.get("zh").or_else(|| m.get("en")).cloned());
+            match tags.iter_mut().find(|existing| existing.name == t.tag) {
+                Some(existing) => {
+                    if existing.translated.is_none() {
+                        existing.translated = translated;
+                    }
+                }
+                None => tags.push(Tag {
+                    name: t.tag,
+                    translated,
+                }),
+            }
+        }
+    }
+    tags
+}
+
+/// Flat tag names into Tag values, dropping blanks.
+fn clean_tags(names: Vec<String>) -> Vec<Tag> {
+    names
+        .into_iter()
+        .filter(|name| !name.trim().is_empty())
+        .map(Tag::new)
+        .collect()
+}
+
+/// Narrow a wire counter to the u32 the UI renders, saturating.
+///
+/// Saturating rather than wrapping or zeroing: a count that does not fit is still
+/// "a very large number", and reporting 0 would quietly say "no views".
+fn count32(value: i64) -> u32 {
+    u32::try_from(value.max(0)).unwrap_or(u32::MAX)
+}
+
+/// "xRestrict" is 0 all-ages, 1 R-18, 2 R-18G; anything else clamps.
+fn restrict8(value: i64) -> u8 {
+    u8::try_from(value.clamp(0, 2)).unwrap_or(0)
+}
+
+/// The date half of a Pixiv timestamp, or the raw text when it does not parse.
+///
+/// Kept as a string rather than a date type: the value is displayed and never
+/// compared, and the same field arrives as "2026-11-15T15:52:25+00:00", as
+/// "2026-01-02 03:04:05" and occasionally as an object. Anything unrecognised is
+/// passed through verbatim so a new format shows up as text instead of vanishing.
+fn date_part(primary: &str, fallback: &str) -> String {
+    let raw = if primary.trim().is_empty() {
+        fallback
+    } else {
+        primary
+    };
+    let raw = raw.trim();
+    let bytes = raw.as_bytes();
+    let dated = bytes.len() >= 10
+        && bytes.iter().take(10).enumerate().all(|(i, b)| {
+            if i == 4 || i == 7 {
+                *b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        });
+    if dated {
+        raw[..10].to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+/// Reduce Pixiv's HTML-ish blurb markup to plain text.
+///
+/// A novel description is not HTML in the sense a browser parses: it is author
+/// text with "<br />" line breaks and "<a href>" links sprinkled in. Rendering it
+/// raw put the tags on screen; stripping every tag destroyed the link targets. So
+/// both halves are handled explicitly:
+///
+/// * any spelling of a break ("<br>", "<br/>", "<br />") becomes a newline --
+///   Pixiv writes "<br />" but the markup is not validated;
+/// * an anchor becomes "Y (X)" for "<a href="X">Y</a>", keeping the URL the tag
+///   would otherwise hide -- a caption's links are often the only source a work
+///   cites;
+/// * a tag without content ("<strong>", "<span style=..>") is dropped, keeping
+///   the text it wraps;
+/// * "&amp;", "&lt;", "&gt;", "&quot;", "&#39;", "&nbsp;" and numeric escapes are
+///   decoded last, so an escaped "&lt;br&gt;" stays visible text instead of
+///   turning into a line break;
+/// * "&nbsp;" decodes to a normal space: it is a visual separator in Pixiv
+///   captions, and a non-breaking space in a wrap-sensitive label would refuse to
+///   break there.
+#[must_use]
+pub fn clean_caption(html: &str) -> String {
+    decode_entities(&strip_markup(html)).trim().to_string()
+}
+
+/// Drop tags and rewrite links/breaks, without touching entities yet.
+fn strip_markup(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let tail = &rest[open..];
+        if let Some(len) = break_tag_len(tail) {
+            out.push('\n');
+            rest = &tail[len..];
+            continue;
+        }
+        if let Some((len, href, inner)) = anchor_at(tail) {
+            let text = strip_markup(inner);
+            out.push_str(&text);
+            if !repeats_the_target(&text, &href) {
+                out.push_str(" (");
+                out.push_str(href.trim());
+                out.push(')');
+            }
+            rest = &tail[len..];
+            continue;
+        }
+        match tail.find('>') {
+            // An unterminated "<" is text, not markup: keep the remainder.
+            Some(end) => rest = &tail[end + 1..],
+            None => {
+                out.push_str(tail);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Length of a break tag at the head of tail, if there is one.
+fn break_tag_len(tail: &str) -> Option<usize> {
+    if !tail.get(..3)?.eq_ignore_ascii_case("<br") {
+        return None;
+    }
+    let end = tail.find('>')?;
+    // "<br />" is the longest spelling Pixiv writes; anything longer is not a
+    // break tag.
+    if end > 6 {
+        return None;
+    }
+    if tail[3..end].chars().all(|c| c == '/' || c.is_whitespace()) {
+        Some(end + 1)
+    } else {
+        None
+    }
+}
+
+/// Parse an anchor at the head of tail into (bytes consumed, href, inner text).
+fn anchor_at(tail: &str) -> Option<(usize, String, &str)> {
+    if !tail.get(..2)?.eq_ignore_ascii_case("<a") {
+        return None;
+    }
+    let open_end = tail.find('>')?;
+    let tag = &tail[..open_end];
+    // "<abbr>" and "<area>" also start with "<a"; a real anchor is followed by a
+    // space, a slash or the closing bracket.
+    let after_name = tag.get(2..)?;
+    if !after_name.is_empty() && !after_name.starts_with([' ', '/', '>']) {
+        return None;
+    }
+    let after = tail.get(open_end + 1..)?;
+    let close = after.to_ascii_lowercase().find("</a>")?;
+    Some((open_end + 1 + close + 4, href_of(tag), &after[..close]))
+}
+
+/// True when appending the target would only repeat what the text already says.
+///
+/// Pixiv writes two kinds of link. A citation like "<a href="..">novel/1</a>"
+/// needs its target printed, because the text alone does not say where it goes.
+/// The other kind is a bare URL wrapped in "/jump.php?<percent-encoded target>",
+/// where the visible text *is* the destination: appending the wrapper prints the
+/// same address twice, once as an unreadable blob.
+fn repeats_the_target(text: &str, href: &str) -> bool {
+    let text = text.trim();
+    let href = href.trim();
+    if text.is_empty() || href.is_empty() || href == text {
+        return true;
+    }
+    // The text is already a URL: the reader can see where this points.
+    if text.starts_with("http://") || text.starts_with("https://") {
+        return true;
+    }
+    // Pixiv's outbound wrapper, whose payload is percent-encoded noise.
+    href.starts_with("/jump.php")
+}
+
+/// The "href" value of an opening tag, quoted or unquoted.
+fn href_of(tag: &str) -> String {
+    let lower = tag.to_ascii_lowercase();
+    let Some(at) = lower.find("href") else {
+        return String::new();
+    };
+    let rest = tag[at + 4..].trim_start();
+    let Some(rest) = rest.strip_prefix('=') else {
+        return String::new();
+    };
+    let rest = rest.trim_start();
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(quote @ ('"' | '\'')) => {
+            let body = &rest[1..];
+            body.find(quote)
+                .map(|end| body[..end].to_string())
+                .unwrap_or_default()
+        }
+        Some(_) => rest
+            .split(|c: char| c.is_whitespace() || c == '>')
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+        None => String::new(),
+    }
+}
+
+/// Decode the entities Pixiv's blurbs actually use.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        match entity_at(tail) {
+            Some((len, replacement)) => {
+                out.push_str(&replacement);
+                rest = &tail[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One entity at the head of tail: (bytes consumed, replacement).
+fn entity_at(tail: &str) -> Option<(usize, String)> {
+    const NAMED: [(&str, &str); 6] = [
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&nbsp;", " "),
+    ];
+    for (pattern, replacement) in NAMED {
+        if tail.starts_with(pattern) {
+            return Some((pattern.len(), (*replacement).to_string()));
+        }
+    }
+    // Numeric forms: &#39; and &#x27;.
+    let body = tail.strip_prefix("&#")?;
+    let semi = body.find(';')?;
+    if semi > 8 {
+        return None;
+    }
+    let digits = &body[..semi];
+    let code = match digits.strip_prefix('x').or_else(|| digits.strip_prefix('X')) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => digits.parse::<u32>().ok()?,
+    };
+    Some((2 + semi + 1, char::from_u32(code)?.to_string()))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1337,5 +1931,191 @@ mod tests {
             assert_eq!(RankingKind::from_mode(kind.mode()), Some(kind));
         }
         assert_eq!(RankingKind::from_mode("nope"), None);
+    }
+    // -- novels -------------------------------------------------------------
+
+    #[test]
+    fn caption_breaks_links_and_entities_become_plain_text() {
+        // Every spelling of a break Pixiv writes.
+        assert_eq!(clean_caption("a<br />b"), "a\nb");
+        assert_eq!(clean_caption("a<br>b"), "a\nb");
+        assert_eq!(clean_caption("a<br/>b"), "a\nb");
+        assert_eq!(
+            clean_caption(r#"<a href="https://x.test/p">link</a>"#),
+            "link (https://x.test/p)"
+        );
+        assert_eq!(clean_caption("&amp;&lt;&gt;&quot;&#39;"), "&<>\"'");
+        // A non-breaking space becomes a normal one, and the result is trimmed.
+        assert_eq!(clean_caption("a&nbsp;b"), "a b");
+        assert_eq!(clean_caption("<strong>bold</strong>"), "bold");
+        // Entities decode last, so an escaped tag stays visible text.
+        assert_eq!(clean_caption("a &lt;br&gt; b"), "a <br> b");
+        // An unterminated "<" is text, not markup.
+        assert_eq!(clean_caption("1 < 2"), "1 < 2");
+        assert_eq!(clean_caption(""), "");
+    }
+
+    #[test]
+    fn caption_keeps_a_link_target_that_nested_markup_wrapped() {
+        let html = r#"[[jumpuri:x &gt;<strong><a href="https://www.pixiv.net/novel/show.php?id=27815393">novel/27815393</a></strong>]]"#;
+        assert_eq!(
+            clean_caption(html),
+            "[[jumpuri:x >novel/27815393 (https://www.pixiv.net/novel/show.php?id=27815393)]]"
+        );
+    }
+
+    #[test]
+    fn a_link_whose_text_is_the_target_is_not_printed_twice() {
+        let html = r#"x <a href="/jump.php?https%3A%2F%2Fexample.test%2Fp" target="_blank">https://example.test/p</a> y"#;
+        assert_eq!(clean_caption(html), "x https://example.test/p y");
+        // A citation keeps its target, because the text does not say where it goes.
+        assert_eq!(
+            clean_caption(r#"<a href="/novel/show.php?id=1">第一章</a>"#),
+            "第一章 (/novel/show.php?id=1)"
+        );
+    }
+
+    #[test]
+    fn an_empty_detail_document_yields_a_zeroed_novel() {
+        let novel = Novel::from_detail(crate::wire::NovelDetailWire::default());
+        assert!(novel.id.is_zero());
+        assert!(novel.body.is_empty());
+        assert!(novel.caption.is_empty());
+        assert_eq!(novel.character_count, 0);
+        assert_eq!(novel.x_restrict, 0);
+        assert!(novel.cover.is_none());
+        assert!(novel.series.is_none());
+        assert!(!novel.bookmarked);
+        assert!(novel.images.is_empty());
+        assert!(novel.tags.is_empty());
+    }
+
+    #[test]
+    fn detail_numbers_clamp_and_the_date_keeps_only_the_day() {
+        let wire = crate::wire::NovelDetailWire {
+            character_count: 4025,
+            view_count: -3,
+            x_restrict: 9,
+            create_date: "2026-11-15T15:52:25+00:00".into(),
+            ..crate::wire::NovelDetailWire::default()
+        };
+        let novel = Novel::from_detail(wire);
+        assert_eq!(novel.character_count, 4025);
+        // A negative counter is zero, never a wrapped 18446744073709551613.
+        assert_eq!(novel.views, 0);
+        // Out-of-range sensitivity clamps to the highest level.
+        assert_eq!(novel.x_restrict, 2);
+        assert_eq!(novel.upload_date, "2026-11-15");
+    }
+
+    #[test]
+    fn an_unparseable_date_is_passed_through_verbatim() {
+        let wire = crate::wire::NovelDetailWire {
+            upload_date: "yesterday".into(),
+            ..crate::wire::NovelDetailWire::default()
+        };
+        assert_eq!(Novel::from_detail(wire).upload_date, "yesterday");
+    }
+
+    #[test]
+    fn series_navigation_links_the_neighbours_that_may_be_opened() {
+        let nav = crate::wire::NovelSeriesNavWire {
+            series_id: Id(15_745_812),
+            title: "華国異伝".into(),
+            order: 8,
+            prev: Some(crate::wire::NovelSeriesLinkWire {
+                id: Id(29_425_155),
+                title: "二".into(),
+                available: Some(true),
+                ..crate::wire::NovelSeriesLinkWire::default()
+            }),
+            next: Some(crate::wire::NovelSeriesLinkWire {
+                id: Id(30_000_000),
+                title: "四".into(),
+                available: Some(false),
+                ..crate::wire::NovelSeriesLinkWire::default()
+            }),
+            ..crate::wire::NovelSeriesNavWire::default()
+        };
+        let nav = NovelSeriesNav::from_wire(nav).expect("in a series");
+        assert_eq!(nav.id, Id(15_745_812));
+        assert_eq!(nav.title, "華国異伝");
+        assert_eq!(nav.order, 8);
+        assert_eq!(nav.prev, Some(Id(29_425_155)));
+        assert_eq!(nav.prev_title, "二");
+        // A private or deleted neighbour is absent, not a link to an error page.
+        assert_eq!(nav.next, None);
+        assert_eq!(nav.next_title, "");
+        assert!(!nav.concluded);
+    }
+
+    #[test]
+    fn a_zero_series_id_is_not_a_series() {
+        assert!(NovelSeriesNav::from_wire(crate::wire::NovelSeriesNavWire::default()).is_none());
+    }
+
+    #[test]
+    fn image_tiers_prefer_the_reading_width_and_the_master() {
+        let urls = crate::wire::NovelImageUrlsWire {
+            mw240: "240.jpg".into(),
+            mw480: "480.jpg".into(),
+            master1200: "1200.jpg".into(),
+            square: "128.jpg".into(),
+            original: "orig.png".into(),
+        };
+        assert_eq!(urls.small(), "480.jpg");
+        assert_eq!(urls.large(), "1200.jpg");
+        assert_eq!(urls.cover(), "1200.jpg");
+        // Falling inward when the reading tier is missing...
+        let inward = crate::wire::NovelImageUrlsWire {
+            mw480: String::new(),
+            ..urls.clone()
+        };
+        assert_eq!(inward.small(), "240.jpg");
+        // ...and outward when only the master tier is left.
+        let outward = crate::wire::NovelImageUrlsWire {
+            mw480: String::new(),
+            mw240: String::new(),
+            square: String::new(),
+            ..urls.clone()
+        };
+        assert_eq!(outward.small(), "1200.jpg");
+        assert_eq!(outward.large(), "1200.jpg");
+        assert_eq!(crate::wire::NovelImageUrlsWire::default().small(), "");
+    }
+
+    #[test]
+    fn a_row_uses_text_count_and_url_not_the_detail_field_names() {
+        let row = crate::wire::NovelItemWire {
+            id: Id(9),
+            title: "t".into(),
+            url: "cover.jpg".into(),
+            text_count: 120,
+            reading_time: 5,
+            series_id: Some(Id(7)),
+            series_content_order: 3,
+            tags: vec!["a".into(), "  ".into()],
+            ..crate::wire::NovelItemWire::default()
+        };
+        let summary = NovelSummary::from_row(row);
+        assert_eq!(summary.character_count, 120);
+        assert_eq!(summary.reading_time, 5);
+        assert_eq!(summary.cover.as_deref(), Some("cover.jpg"));
+        assert_eq!(summary.series_id, Some(Id(7)));
+        assert_eq!(summary.series_order, 3);
+        assert_eq!(summary.tags.len(), 1, "a blank tag name is not a tag");
+    }
+
+    #[test]
+    fn a_standalone_row_has_no_series_and_a_zero_series_id_is_dropped() {
+        let standalone = crate::wire::NovelItemWire {
+            id: Id(9),
+            series_id: Some(Id(0)),
+            ..crate::wire::NovelItemWire::default()
+        };
+        let summary = NovelSummary::from_row(standalone);
+        assert_eq!(summary.series_id, None);
+        assert_eq!(summary.series_order, 0);
+        assert_eq!(summary.upload_date, "");
     }
 }

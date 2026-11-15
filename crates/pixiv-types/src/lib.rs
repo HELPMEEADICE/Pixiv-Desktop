@@ -21,10 +21,11 @@ pub mod wire;
 
 pub use domain::{
     Account, Author, Bookmark, BookmarkRestrict, BookmarkState, DiscoveryBatch, FeedSource, Illust,
-    IllustKind, IllustStats, IllustUrls, LatestFeed, PageMeta, PageUrls, RankingKind, RankingRow,
-    RecommendTag, RecommendUser, SearchQuery, SearchResult, SearchTarget, SortOrder, StreetFeed,
+    IllustKind, IllustStats, IllustUrls, LatestFeed, Novel, NovelImage, NovelSearch, NovelSeries,
+    NovelSeriesNav, NovelSummary, PageMeta, PageUrls, RankingKind, RankingRow, RecommendTag,
+    RecommendUser, SearchQuery, SearchResult, SearchTarget, SeriesChapter, SortOrder, StreetFeed,
     Suggestion, SuggestionSource, TypeFilter, UgoiraFrame, UgoiraMeta, UserProfile, append_unique,
-    history_suggestions, merge_suggestions,
+    clean_caption, history_suggestions, merge_suggestions,
 };
 pub use error::PixivError;
 pub use id::Id;
