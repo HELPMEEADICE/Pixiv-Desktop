@@ -25,6 +25,18 @@ chips, and the detail page's image-dominant layout with a compact metadata colum
 | --- | --- |
 | ![downloads](docs/screenshots/readme/downloads.png) | ![settings](docs/screenshots/readme/settings.png) |
 
+
+| Novel page | Novel reader |
+| --- | --- |
+| ![novel page](docs/screenshots/readme/novel-page.png) | ![novel reader](docs/screenshots/readme/novel-reader.png) |
+
+| Reading settings |
+| --- |
+| ![reader settings](docs/screenshots/readme/novel-reader-settings.png) |
+
+Novel captures are taken with `PIXIV_DESKTOP_NOVEL_FIXTURE` pointing at a trimmed live
+capture (`fixtures/novel_detail.json`), so they are deterministic and contain no session.
+
 Screenshots are captured by `tools/shot.ps1` at 1280×800 logical on a 150% DPI
 display, cropped to the client area so a pixel can be mapped to a logical
 coordinate. The curated set above is tracked; everything else stays local (see
