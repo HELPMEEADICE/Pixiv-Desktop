@@ -238,6 +238,9 @@ impl App {
         // One row model for the life of the process: `push_downloads` patches it
         // rather than swapping it.
         let download_rows = Rc::new(VecModel::<DownloadRow>::default());
+        // The local-record band gets the same treatment (B7): one model, patched by
+        // the publish that knows which record changed.
+        let download_local_rows = Rc::new(VecModel::<LocalRow>::default());
         // Same rule for the recent-search chips: one model, patched when the
         // history changes, published on every navigation without a store read.
         let recent_searches = Rc::new(VecModel::<slint::SharedString>::default());
@@ -302,6 +305,7 @@ impl App {
             ui.set_authenticated(session.is_authenticated());
             ui.set_session_user(session.user_name.clone().unwrap_or_default().into());
             ui.set_download_rows(ModelRc::from(download_rows.clone()));
+            ui.set_download_local_rows(ModelRc::from(download_local_rows.clone()));
             ui.set_recent_searches(ModelRc::from(recent_searches.clone()));
             ui.set_download_directory(download_dir.display().to_string().into());
             ui.set_download_template(template.clone().into());
@@ -333,6 +337,8 @@ impl App {
             session,
             downloads,
             download_rows,
+            download_local_rows,
+            download_local_drawn: RefCell::new(Vec::new()),
             data_dir,
             download_dir,
             page: Destination::Home,

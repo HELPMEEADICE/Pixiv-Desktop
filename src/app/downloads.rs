@@ -340,30 +340,89 @@ impl App {
     }
 }
 
+/// What the local band's next publish changes, as writes to apply in place.
+///
+/// The band used to be a brand-new model per completed page: every row was a fresh
+/// element, so the row under the pointer lost its hover and the focused row lost
+/// focus, once per downloaded page - and Slint rebuilt a list that differed by one
+/// row's `state` flag. Deciding the diff against the records the band already drew
+/// costs no model read at all: the cost is the number of rows that changed (B7).
+pub(crate) fn local_band_patch(
+    drawn: &[LocalRecord],
+    next: &[LocalRecord],
+) -> Vec<(usize, LocalRow)> {
+    let mut writes: Vec<(usize, LocalRow)> = Vec::new();
+    for (index, record) in next.iter().enumerate() {
+        // The one comparison that makes a refresh cost what changed rather than what
+        // the band holds. The rebuild this replaced wrote every row unconditionally.
+        match drawn.get(index) {
+            Some(current) if current == record => {}
+            _ => writes.push((index, to_local_row(record.clone()))),
+        }
+    }
+    writes
+}
+
 impl App {
     /// Publish the local-download band: the records this machine holds, each row
     /// saying whether the file it names is still there.
     ///
     /// Called at start-up, when a page finishes, and after a gesture that changes a
-    /// row. It is a store read on the UI thread on purpose: it runs a handful of
-    /// times per session, and the spawn/marshal cost of doing it off-thread would
-    /// be paid by the asking gesture rather than by a background tick (the standing
-    /// UI-thread store debt is T6 in docs/OPTIMIZATION-PLAN-R11.md, and this call is
-    /// on the edge of it, not inside the tick).
+    /// row. Both halves of the read are off the UI thread now (B7): the store query
+    /// is a SQLite statement, and `Path::exists` is one stat per record - a dozen
+    /// stats on the thread that paints is a dozen chances to miss a frame. Only the
+    /// finished rows come back, and they are patched into the model in place.
     pub(crate) fn publish_local_band(&self) {
-        let records = match self.store.downloads(LOCAL_BAND_ROWS) {
-            Ok(records) => records,
-            Err(error) => {
-                tracing::debug!(%error, "读取本地下载记录失败");
-                return;
+        let store = self.store.clone();
+        let rt = self.rt.clone();
+        rt.spawn(async move {
+            let records = match store.downloads(LOCAL_BAND_ROWS) {
+                Ok(records) => records,
+                Err(error) => {
+                    tracing::debug!(%error, "读取本地下载记录失败");
+                    return;
+                }
+            };
+            let rows = match tokio::task::spawn_blocking(move || {
+                local_rows(&records, |path| std::path::Path::new(path).exists())
+            })
+            .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::debug!(%error, "本地下载记录无法转换");
+                    return;
+                }
+            };
+            on_ui(move |shared| {
+                let Ok(app) = shared.try_borrow() else {
+                    return;
+                };
+                app.adopt_local_band(rows);
+            });
+        });
+    }
+
+    /// Patch the band with the rows that changed (B7).
+    fn adopt_local_band(&self, rows: Vec<LocalRecord>) {
+        let model = &self.download_local_rows;
+        let mut drawn = self.download_local_drawn.borrow_mut();
+        let writes = local_band_patch(&drawn, &rows);
+        // Length first, and only by what left or arrived: the band is ten rows, so a
+        // resize is one push or one remove and never a rebuild.
+        while model.row_count() > rows.len() {
+            model.remove(model.row_count() - 1);
+        }
+        for (index, row) in writes {
+            if index < model.row_count() {
+                model.set_row_data(index, row);
+            } else {
+                model.push(row);
             }
-        };
-        let rows = local_rows(&records, |path| std::path::Path::new(path).exists());
+        }
         let note = missing_note(&rows);
+        *drawn = rows;
         let ui = self.ui();
-        ui.set_download_local_rows(ModelRc::from(Rc::new(VecModel::from(
-            rows.into_iter().map(to_local_row).collect::<Vec<_>>(),
-        ))));
         ui.set_download_local_missing(note.into());
     }
 }
@@ -1047,6 +1106,64 @@ mod tests {
     }
 
     // -------------------------------------------- F1: the local record band
+
+    // ------------------------------------------- B7: the band is patched, not rebuilt
+
+    /// B7 - a band refresh writes the rows that changed and nothing else.
+    ///
+    /// The band used to be republished as a brand-new model on every completed page:
+    /// every row was a fresh element (so hover and focus died with it) and a ten-row
+    /// list paid ten constructions to move one flag. The plant that makes this red is
+    /// [local_band_patch] writing every row, which is the shape the rebuild had.
+    #[test]
+    fn b7_a_band_refresh_writes_the_rows_that_changed() {
+        use crate::app::helpers::testkit::CountingModel;
+
+        let drawn: Vec<LocalRecord> = (0..10).map(band_row).collect();
+        let model = CountingModel::new(
+            drawn.iter().cloned().map(to_local_row).collect::<Vec<_>>(),
+        );
+
+        // One recorded file was deleted between two publishes: one row's state moves.
+        let mut next = drawn.clone();
+        next[3].state = 1;
+        let writes = local_band_patch(&drawn, &next);
+        assert_eq!(writes.len(), 1, "one record changed, so one row is written");
+        for (index, row) in writes {
+            model.set_row_data(index, row);
+        }
+        assert_eq!(model.writes(), 1, "one element, not ten");
+        assert_eq!(
+            model.reads(),
+            0,
+            "the diff is against the records the band drew, so the model is only written"
+        );
+
+        // A publish with nothing new writes nothing at all.
+        assert!(local_band_patch(&next, &next).is_empty());
+
+        // The shape this replaced, measured: ten fresh elements for that one flag.
+        let rebuilt = CountingModel::new(
+            next.iter().cloned().map(to_local_row).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            rebuilt.row_count(),
+            10,
+            "the rebuilt model re-created every row of the band"
+        );
+    }
+
+    /// One band row with nothing in it but its position.
+    fn band_row(index: i32) -> LocalRecord {
+        LocalRecord {
+            id: index + 1,
+            title: format!("w{index}"),
+            author: "a".into(),
+            path: format!("C:/downloads/{index}.jpg"),
+            when: "2026-11-16 21:04".into(),
+            state: 0,
+        }
+    }
 
     /// The stamp is UTC, civil, and never a locale: two machines that read the same
     /// record print the same sentence.

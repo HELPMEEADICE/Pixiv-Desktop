@@ -176,6 +176,14 @@ pub(crate) struct App {
     /// The download queue's model, created once and patched in place. Replacing
     /// it on every tick rebuilt every row five times a second.
     download_rows: Rc<VecModel<DownloadRow>>,
+    /// The local-record band's model, created once and patched in place (B7). The
+    /// band used to be a brand-new model per completed page: every row was a fresh
+    /// element, so the row under the pointer lost its hover and the focused row lost
+    /// focus, once per downloaded page.
+    download_local_rows: Rc<VecModel<LocalRow>>,
+    /// The records that model was built from, so a publish can compute what changed
+    /// without reading the model back (B7).
+    download_local_drawn: RefCell<Vec<downloads::LocalRecord>>,
     detail: Option<Illust>,
     /// Avatar URL the metadata panel is waiting for. Stored rather than recomputed:
     /// a resolved lookup lands in `author_avatars`, not in `illust.author.avatar`,
