@@ -83,6 +83,12 @@ param(
     [string]$FocusLib = "tools/focus-lib.ps1",
     [string]$PageSetLib = "tools/page-set.ps1",
     [string]$Readme = "README.md",
+    # E9: the rule read README only, while docs/ carries the same kind of sentence. The
+    # two live documents below are swept too; the round archives under docs/
+    # (OPTIMIZATION-PLAN-R7..R12) are exempt on purpose, because each of their sections
+    # quotes the count its own round printed - that is history, not a claim about today.
+    [string]$ArchDoc = "docs/ARCHITECTURE.md",
+    [string]$NovelDoc = "docs/NOVEL-READER.md",
     [string]$CiConfig = ".github/workflows/ci.yml",
     [string]$WorkDir = "target/selftest",
     [string]$SourcePng = "docs/screenshots/baseline/home-light.png",
@@ -94,7 +100,7 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 Add-Type -AssemblyName System.Drawing
 try { [void][System.Reflection.Assembly]::Load("System.Private.Windows.GdiPlus") } catch { }
 
-foreach ($required in @($VerifyScript, $GatesScript, $A11yScript, $FocusScript, $FixtureScript, $WalkLib, $FocusLib, $PageSetLib, $Readme, $CiConfig, $SourcePng)) {
+foreach ($required in @($VerifyScript, $GatesScript, $A11yScript, $FocusScript, $FixtureScript, $WalkLib, $FocusLib, $PageSetLib, $Readme, $ArchDoc, $NovelDoc, $CiConfig, $SourcePng)) {
     if (-not (Test-Path $required)) { throw "missing input: $required" }
 }
 # Absolute from here on: the gate under test is free to change directory (it
@@ -108,6 +114,8 @@ $A11yScript = (Resolve-Path $A11yScript).Path
 $FocusScript = (Resolve-Path $FocusScript).Path
 $FixtureScript = (Resolve-Path $FixtureScript).Path
 $Readme = (Resolve-Path $Readme).Path
+$ArchDoc = (Resolve-Path $ArchDoc).Path
+$NovelDoc = (Resolve-Path $NovelDoc).Path
 $CiConfig = (Resolve-Path $CiConfig).Path
 
 # G32: the page set and its comparison are the shipped ones. Compare-PageSet reads each
@@ -708,12 +716,32 @@ function Find-ProseNumber {
     return $hits.ToArray()
 }
 
-# ---- case prose-numbers: G35 - no gate-printed number is restated in README ----
-# The live half reads README.md; the experiment appends the sentence the plan names and
-# requires the same function to name the line it landed on. "Name the line" is the whole
+# ---- case prose-numbers: G35/E9 - no gate-printed number is restated in the swept docs ----
+# The live half reads every document the rule owns - README.md and the two live documents
+# under docs/ (E9: the rule read README only, so a restatement in ARCHITECTURE.md was
+# invisible), and reports the file as well as the line. The experiment appends the
+# sentence the plan names to README and requires the same function to name the line it
+# landed on; a second plant puts the same sentence into ARCHITECTURE.md, which is the file
+# the rule could not read at all before E9. "Name the file and the line" is the whole
 # difference between a rule somebody can act on and a count of hits.
-$readmeText = Get-Content $Readme -Raw
-$proseNow = @(Find-ProseNumber -Text $readmeText)
+$proseDocs = @(
+    [pscustomobject]@{ Name = "README.md"; Text = (Get-Content $Readme -Raw); Raw = (Get-Content $Readme -Raw) },
+    [pscustomobject]@{ Name = "docs/ARCHITECTURE.md"; Text = (Get-Content $ArchDoc -Raw); Raw = (Get-Content $ArchDoc -Raw) },
+    [pscustomobject]@{ Name = "docs/NOVEL-READER.md"; Text = (Get-Content $NovelDoc -Raw); Raw = (Get-Content $NovelDoc -Raw) }
+)
+$proseNow = @()
+foreach ($doc in $proseDocs) {
+    foreach ($hit in @(Find-ProseNumber -Text $doc.Text)) {
+        $proseNow += [pscustomobject]@{ Doc = $doc.Name; Line = $hit.Line; Kind = $hit.Kind; Text = $hit.Text }
+    }
+}
+$readmeText = (Get-Content $Readme -Raw)
+# The second plant goes into a document the rule could not read at all before E9. Its
+# purpose is not the count - three of the six patterns match that sentence - but that the
+# sweep reaches this file: git shows HEAD~1's case reading $Readme and nothing else.
+$archRestatement = @(Find-ProseNumber -Text ((Get-Content $ArchDoc -Raw) + [Environment]::NewLine + "The DPI gate sweeps 1060 points at 8 pages x 3 sizes."))
+$archName = $archRestatement.Count
+$archUnder = ($archName -gt 0)
 $plantedProse = $readmeText + [Environment]::NewLine + "The suite runs 327 tests and 17 uiaudit rules, diffs 20 forced-demo captures, and reports 24 checks: 8 pages x 3 sizes."
 $prosePlanted = @(Find-ProseNumber -Text $plantedProse)
 # The sentence lands on the last line, so that is the line number the four hits have to
@@ -722,8 +750,8 @@ $prosePlanted = @(Find-ProseNumber -Text $plantedProse)
 $plantedLine = ($plantedProse -split "\r?\n").Count
 $onPlantedLine = @($prosePlanted | Where-Object { $_.Line -eq $plantedLine })
 $lineReported = ($onPlantedLine.Count -ge 6) -and (@($prosePlanted | Where-Object { $_.Line -ne $plantedLine }).Count -eq $proseNow.Count)
-$liveShown = if ($proseNow.Count) { ($proseNow | ForEach-Object { "{0}:{1} {2}" -f "README.md", $_.Line, $_.Text }) -join " / " } else { "none" }
-Add-Case -Name "prose-numbers" -Wanted "README states none of the six; a planted line is named by line" -Ok ($proseNow.Count -eq 0 -and $lineReported) -Evidence ("live restatements={0} [{1}]; planted={2} hit(s), {3} of them on line {4}" -f $proseNow.Count, $liveShown, $prosePlanted.Count, $onPlantedLine.Count, $plantedLine)
+$liveShown = if ($proseNow.Count) { ($proseNow | ForEach-Object { "{0}:{1} {2}" -f $_.Doc, $_.Line, $_.Text }) -join " / " } else { "none" }
+Add-Case -Name "prose-numbers" -Wanted "none of the three swept documents states a gate-printed number; a planted line is named by file and line" -Ok ($proseNow.Count -eq 0 -and $lineReported -and $archUnder) -Evidence ("live restatements={0} in {1} documents [{2}]; planted in README={3} hit(s), {4} on line {5}; planted in docs/ARCHITECTURE.md={6} (the README-only sweep could not see it)" -f $proseNow.Count, $proseDocs.Count, $liveShown, $prosePlanted.Count, $onPlantedLine.Count, $plantedLine, $archName)
 
 Write-Host ""
 $bad = @($cases | Where-Object { -not $_.Ok })
