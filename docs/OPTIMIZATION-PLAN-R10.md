@@ -43,7 +43,7 @@ Every row was produced in this session at 1813e8b with a clean worktree.
 | clippy-driver through **1.99.1**, the version CI pins | PASS, 360 log lines, 0 per-item lints, 171.00 s | same run |
 | `tools/selftest-gates.ps1` | **15** negative experiments, 0 failed (round nine left 8) | same run |
 | `tools/gates.ps1 -SkipBuild` | 6 gates, 0 failed, 0 skipped, **342.1 s** | run this session |
-| `tools/gates.ps1 -Ui` | 14 rows (13 when the second toolchain is absent) | `tools/gates.ps1` |
+| `tools/gates.ps1 -Ui -SkipBuild -SkipTest -Lint Off` | **1 of 6 rows FAIL** - `verify-visual`: `suggestion` 3.3924 % / 60 028 px and 3.3703 % / 59 637 px, while the other **28 captures are 0.0000 %**; the last four UI verifiers never ran (§2.6) | run this session, 421.7 s |
 | `src/uiaudit.rs` design rules | **19** `#[test]` (README:280 still says 17) | `Select-String` |
 | Accessibility budget pages | **8**; novel pages absent | `tools/a11y-budget.json` |
 | Visual baselines | 30 captures / 15 page-states; `ui/` untouched since 4fd113f | `git log` |
@@ -150,6 +150,36 @@ are closed, and three of them are registered for a third time — a screen reade
 the Linux/macOS input paths, and pointer-drag gestures. This plan stops registering them as
 "unverified" and gives the two that are testable here an owner (§7 G26, G30, G31 for the tree;
 §9 names the two that stay out of scope because this machine cannot decide them).
+
+### 2.6 The UI gate is red at HEAD, and the suite hides the other four behind it
+
+Both halves are measured this session, and neither is caused by a change this round made: `ui/`
+and `src/app/feed/search.rs` have not moved since the baseline commit (`git log 4fd113f..HEAD --` over
+both paths prints nothing).
+
+**A · one capture state is not reproducible.** `tools/verify-visual.ps1` fails on `suggestion` in
+both themes — 3.3924 % / 60 028 px and 3.3703 % / 59 637 px, max delta 10 — and on nothing else:
+28 of 30 captures score exactly 0 px, so the renderer, the scale and the harness all still agree
+with the baselines. The leading cause is the fixture itself: `src/app/feed/search.rs:285-330`
+seeds twelve fixed tags and then sets the cursor **one frame later, on a 400 ms `SingleShot`
+timer**, deliberately, so that U6's auto-scroll has a state change to react to. A capture whose
+pixels depend on when `shot.ps1` fires relative to that timer is a race, and the panel's
+scroll offset is exactly what a race moves: the state built to prove U6 is the state that cannot
+be photographed twice. Not proven — the timer is the leading hypothesis. The sidecars add a
+second smell: the baseline says `page: suggestion` and today's capture says `page: home`, so
+the two were also produced by different code paths.
+
+**B · one failed gate deletes four.** `tools/gates.ps1:306-349` chains every UI gate behind
+`if (-not $failed)`, so the moment `verify-visual` returned 1, `verify-focus`, `verify-dpi`,
+`verify-icons` and `verify-layout` **never ran**. The run printed "6 gates, 1 failed" when
+that mode owns ten rows. Round nine wrote this lesson down in its own §2.1 — "a suite that stops
+at the first failing gate reports four gates instead of ten" — and applied it to CI, where each job
+now names its own failure. The script kept the hole, so the local suite still reports a fraction
+of itself the first time anything is red.
+
+Consequence for this plan: **`suggestion` has to be made deterministic *before* any
+re-baseline**, or `-Update` bakes today's race into the baseline and the next green run means
+nothing (G36).
 
 ---
 
@@ -295,7 +325,9 @@ acceptance condition. Ordered the way they should be built:
 | **G32** | `selftest-gates` gains a `page-set` case: the route enum, the three `$Pages` lists and the budget's keys must agree | delete one page from any of the four -> the case fails and prints the difference (this is the gate that would have caught §2.1 on the day) |
 | **G33** | the reader is in the pixel baseline: 12 new captures (6 novel page-states x 2 themes), exact, from the demo catalogue | change one glyph in the reader's header -> red on the novel baseline only |
 | **G34** | `EXPLAIN QUERY PLAN` on the three hot queries, asserting no `SCAN` of a large table | drop the composite index on `downloads(state, created_at)` -> the gate fails |
-| **G35** | the numbers in README are recomputed, not remembered: test count, uiaudit rule count, capture count, gate count | change one of the four numbers in README -> the case fails and prints the measured value |
+| **G35** | a number a gate prints is not restated in prose: the verification section of README carries no test count, rule count or capture count, because the run prints each one | put `"327 tests: 17 uiaudit rules"` back into README -> the case names the line. The four claims it replaces are already corrected (4922361) |
+| **G36** | **a capture state must be reproducible**: `verify-visual.ps1 -Twice` captures every state twice in one run and requires 0 px between the two, so a state whose pixels depend on a timer is a FAIL instead of a coin flip | today's tree is the fixture: `suggestion` (the 400 ms cursor timer, §2.6A) fails it and the other 14 states pass |
+| **G37** | **no gate may inherit another gate's verdict**: every row in `tools/gates.ps1` runs regardless of what came before it, and the summary counts rows attempted, not rows reached (§2.6B) | plant a failing gate as row 1 -> the run must still print all ten UI rows, not six |
 
 ---
 
@@ -328,9 +360,15 @@ Track commits:
 `perf(api): one deadline per call, not three deadlines per attempt`
 `docs(readme): four numbers the tree stopped agreeing with in round nine`
 
-**Phase 2 — Lead, and the only step that needs the desktop.** Re-baseline (12 novel captures),
-then `tools/gates.ps1 -Ui` end to end. The round is accepted when that run reports 0 failed,
-0 skipped, and `selftest-gates` reports 20+ cases.
+**Phase 2 — Lead, and the only step that needs the desktop.** In this order, because each step
+would otherwise hide the next: (1) make `suggestion` deterministic and prove it with G36 — before
+anything is re-baselined, or `-Update` bakes the race in; (2) G37, so a red gate stops hiding the
+four behind it; (3) capture the 12 novel baselines (G33); (4) `tools/gates.ps1 -Ui` end to end.
+The round is accepted when that run reports every row it owns, 0 failed, 0 skipped, and
+`selftest-gates` reports 20+ cases.
+
+`test(gates): a state that cannot be photographed twice, and a suite that never hides a row`
+`test(visual): the reader in the pixel baseline, twelve captures from the demo catalogue`
 
 ---
 
