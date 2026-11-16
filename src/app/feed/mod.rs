@@ -56,7 +56,17 @@ impl App {
             self.reached_end = true;
             return;
         }
-        all.extend(items);
+        // A page can hand back a row this feed already shows: discovery
+        // re-recommends, and a load-more retried after a failure asks for the page
+        // that failed. `index` holds one cell per id, so a second copy would claim
+        // the first card's cell - leaving that card on its placeholder for good -
+        // draw a duplicate card, and count the work twice (T3). Same rule the
+        // discovery and profile pages already merge by.
+        if append {
+            append_feed_page(&mut all, items);
+        } else {
+            all.extend(items);
+        }
         self.items = all;
         // Both paths prune. Pruning only inside `if !append` meant an endlessly
         // appended feed kept one decoded texture per work ever shown, outside the
@@ -144,6 +154,16 @@ pub(crate) fn merge_page(all: &mut Vec<Illust>, page: Vec<Illust>) -> Vec<Illust
     all[before..].to_vec()
 }
 
+/// Merge one page into the feed that is already showing, dropping repeated ids.
+///
+/// `index` holds one cell per id, so the second copy of a row that a paged feed
+/// handed back would claim the first card's cell: that card keeps its placeholder
+/// for good, a duplicate card is drawn, and the count says one work more than the
+/// feed holds (T3). Returns how many rows were actually added.
+pub(crate) fn append_feed_page(all: &mut Vec<Illust>, items: Vec<Illust>) -> usize {
+    pixiv_types::domain::append_unique(all, items)
+}
+
 /// Push one card into the shortest column, returning the row it landed on.
 ///
 /// The models are extended in place - never replaced - which is the whole point
@@ -196,6 +216,10 @@ impl App {
         // Every card drawn below it is either requested at it or, if the cache
         // already has pixels for the URL, handed over and upgraded once.
         let target = self.cover_target();
+        // One pass over the feed, not one per card (T5). On the ranking page this
+        // is the only place a card's number comes from, so the table is built here
+        // and read by every row below.
+        let ranks = rank_table(self.page, &self.items);
         let mut adopted: Vec<(String, slint::Image, bool)> = Vec::new();
         let mut upgrades: Vec<(String, String)> = Vec::new();
         let mut models = Vec::with_capacity(buckets.len());
@@ -206,7 +230,7 @@ impl App {
                 .enumerate()
                 .map(|(row, item_index)| {
                     let illust = &self.items[*item_index];
-                    let mut item = illust_to_item(illust, self.rank_of(illust));
+                    let mut item = illust_to_item(illust, rank_in(&ranks, illust));
                     self.mark_selected(&mut item);
                     let key = illust.id.to_string();
                     if let Some(image) = self.covers.get(&key) {
@@ -276,6 +300,8 @@ impl App {
         // Named apart from the `target` this loop already uses for the column the
         // next card goes in.
         let cover_target = self.cover_target();
+        // The same one-pass table a rebuild uses (T5).
+        let ranks = rank_table(self.page, &self.items);
         let mut adopted: Vec<(String, slint::Image, bool)> = Vec::new();
         let mut upgrades: Vec<(String, String)> = Vec::new();
         for index in from..self.items.len() {
@@ -284,7 +310,7 @@ impl App {
                 geometry.card_width,
                 layout::clamped_aspect(illust.width, illust.height),
             );
-            let mut item = illust_to_item(illust, self.rank_of(illust));
+            let mut item = illust_to_item(illust, rank_in(&ranks, illust));
             self.mark_selected(&mut item);
             let key = illust.id.to_string();
             if let Some(image) = self.covers.get(&key) {
@@ -325,17 +351,26 @@ impl App {
     }
 }
 
-impl App {
-    pub(crate) fn rank_of(&self, illust: &Illust) -> i32 {
-        if self.page != Destination::Ranking {
-            return 0;
-        }
-        self.items
-            .iter()
-            .position(|candidate| candidate.id == illust.id)
-            .map(|index| index as i32 + 1)
-            .unwrap_or(0)
+/// The rank every work has on the ranking page, by id, built once per render.
+///
+/// `rank_of` used to scan `items` for every card, so a 500-row page cost about
+/// 125 000 comparisons per render (T5). The numbers are identical: position in
+/// load order, one-based, and nothing at all on a page that does not rank.
+pub(crate) fn rank_table(page: Destination, items: &[Illust]) -> HashMap<u64, i32> {
+    let mut ranks: HashMap<u64, i32> = HashMap::new();
+    if page != Destination::Ranking {
+        return ranks;
     }
+    for (index, illust) in items.iter().enumerate() {
+        // First occurrence wins, the way `position` did.
+        ranks.entry(illust.id.get()).or_insert(index as i32 + 1);
+    }
+    ranks
+}
+
+/// One card's number, out of the table built for this render.
+pub(crate) fn rank_in(ranks: &HashMap<u64, i32>, illust: &Illust) -> i32 {
+    ranks.get(&illust.id.get()).copied().unwrap_or(0)
 }
 
 impl App {

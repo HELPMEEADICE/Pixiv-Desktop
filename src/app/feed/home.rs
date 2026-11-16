@@ -179,7 +179,7 @@ impl App {
                                 app.feed_owner = Some(app.route);
                                 app.render_feed(items, false);
                             }
-                            Err(error) => app.show_feed_error(&error.to_string()),
+                            Err(error) => app.show_feed_error(&describe_session_error(&error)),
                         }
                         app.refresh_chrome();
                     });
@@ -240,7 +240,28 @@ impl App {
     }
 }
 
+/// The page a "load more" asks for, given the page the feed last merged.
+pub(crate) fn next_page_cursor(cursor: u32) -> u32 {
+    cursor.saturating_add(1)
+}
+
+/// Advance the cursor, and only for a page that merged.
+///
+/// Both halves are one operation on purpose: the cursor used to be advanced
+/// before the request, so a page that failed was skipped for good and the next
+/// click asked for the one after it (T7, G44).
+pub(crate) fn commit_page(cursor: &mut u32, asked: u32, merged: bool) {
+    if merged {
+        *cursor = asked;
+    }
+}
+
 impl App {
+    /// Record a page the feed really merged (T7).
+    pub(crate) fn commit_page_cursor(&mut self, asked: u32) {
+        commit_page(&mut self.page_cursor, asked, true);
+    }
+
     pub(crate) fn load_more(shared: &Shared) {
         match shared.borrow().page {
             Destination::Home => {
@@ -263,7 +284,7 @@ impl App {
                 return;
             }
             app.loading_more = true;
-            app.page_cursor += 1;
+            // Nothing moves here: the page is only the feed's once it merges (T7).
             app.ui().set_grid_loading_more(true);
             true
         };
@@ -273,7 +294,7 @@ impl App {
 
         let (page, mode, cursor, epoch) = {
             let app = shared.borrow();
-            (app.page, app.mode, app.page_cursor, app.epoch)
+            (app.page, app.mode, next_page_cursor(app.page_cursor), app.epoch)
         };
 
         match mode {
@@ -287,6 +308,7 @@ impl App {
                     app.reached_end = true;
                     return;
                 }
+                app.commit_page_cursor(cursor);
                 app.render_feed(next, true);
             }
             Mode::Real => {
@@ -337,11 +359,17 @@ impl App {
                         let ui = app.ui();
                         ui.set_grid_loading_more(false);
                         match result {
-                            Ok(items) if !items.is_empty() => app.render_feed(items, true),
-                            Ok(_) => app.reached_end = true,
-                            Err(error) => {
-                                ui.set_status_text(format!("加载更多失败：{error}").into())
+                            Ok(items) if !items.is_empty() => {
+                                // The page arrived: only now does the feed own it, so a
+                                // failure below leaves the cursor on the page that
+                                // failed instead of skipping it (T7).
+                                app.commit_page_cursor(cursor);
+                                app.render_feed(items, true);
                             }
+                            Ok(_) => app.reached_end = true,
+                            Err(error) => ui.set_status_text(
+                                format!("加载更多失败：{}", describe_session_error(&error)).into(),
+                            ),
                         }
                     });
                 });
@@ -464,7 +492,7 @@ impl App {
                             .extend(feed.works.iter().filter_map(|w| w.author.avatar.clone()));
                     }
                     Err(error) => {
-                        let message = error.to_string();
+                        let message = describe_session_error(&error);
                         app.home.works_state = BAND_ERROR;
                         app.home.works_message = message.clone();
                         app.show_feed_error(&message);
@@ -482,7 +510,7 @@ impl App {
                     }
                     Err(error) => {
                         app.home.tags_state = BAND_ERROR;
-                        app.home.tags_message = error.to_string();
+                        app.home.tags_message = describe_session_error(&error);
                     }
                 }
 
@@ -498,7 +526,7 @@ impl App {
                     }
                     Err(error) => {
                         app.home.artists_state = BAND_ERROR;
-                        app.home.artists_message = error.to_string();
+                        app.home.artists_message = describe_session_error(&error);
                     }
                 }
 
@@ -516,7 +544,7 @@ impl App {
                     }
                     Err(error) => {
                         app.home.latest_state = BAND_ERROR;
-                        app.home.latest_message = error.to_string();
+                        app.home.latest_message = describe_session_error(&error);
                     }
                 }
 
@@ -700,5 +728,39 @@ impl App {
             ),
         };
         ui.set_home_source_note(note.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G44 - the page cursor only advances on success.
+    ///
+    /// The cursor used to be incremented before the request went out, so a failed
+    /// "load more" skipped its page for good: the next click asked for the one after
+    /// it, and the rows between were never shown. The assertion that fails on the old
+    /// tree is the middle one - the second request asked for page 3.
+    #[test]
+    fn g44_a_failed_load_more_asks_for_the_same_page_again() {
+        let mut cursor = 1;
+        let asked = next_page_cursor(cursor);
+        assert_eq!(asked, 2, "the first load-more asks for page 2");
+
+        // The page failed: nothing merged, so nothing moves.
+        commit_page(&mut cursor, asked, false);
+        assert_eq!(
+            next_page_cursor(cursor),
+            2,
+            "the page that failed is asked for again, not skipped"
+        );
+
+        // The same page this time answered.
+        commit_page(&mut cursor, asked, true);
+        assert_eq!(
+            next_page_cursor(cursor),
+            3,
+            "a page that merged is never asked for twice"
+        );
     }
 }

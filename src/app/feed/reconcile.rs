@@ -5,9 +5,10 @@ use super::*;
 /// Slint generates no changed-handler for a property that declares no callback, and
 /// `selection-mode` and `palette-open` are both written from inside the UI
 /// (the page's 「多选」 toggle, `Ctrl+P`). Reading them is therefore the only way Rust
-/// can learn about them; 50 ms keeps the window between the click and the
-/// consequence shorter than a double click, and costs one property read per tick.
-const RECONCILE_MS: u64 = 50;
+/// can learn about them. The tick used to be 20 Hz for the life of the window to
+/// read two booleans (T14); 120 ms is still shorter than a double click, and the
+/// tick stops with the window instead of outliving it.
+const RECONCILE_MS: u64 = 120;
 
 thread_local! {
     /// One timer for the life of the window. It lives here because it owns nothing
@@ -26,10 +27,27 @@ pub(crate) fn start_reconcile(app: &Shared) {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
                 };
+                // No window, no page, and no page can own either flag: the tick is
+                // disarmed rather than left reading properties of a component that
+                // no longer exists (T8/T14). A page-level gate would be the better
+                // rule and is not reachable from Rust today - `Ctrl+P` flips
+                // `palette-open` inside Slint with no callback, so `publish_palette`
+                // (which writes the property back) would close the panel on the first
+                // keystroke on any page whose tick had been stopped. See the track report.
+                if !app.ui_alive() {
+                    stop_reconcile();
+                    return;
+                }
                 app.reconcile_shell_state();
             },
         );
     });
+}
+
+/// Stop the shell tick. Reachable from inside the tick, because the handle lives in
+/// the same thread-local.
+pub(crate) fn stop_reconcile() {
+    RECONCILE.with(|timer| timer.stop());
 }
 
 impl App {
@@ -61,5 +79,22 @@ impl App {
         if selection != self.selection.active {
             self.selection_set_mode(selection);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RECONCILE_MS;
+
+    /// T14 - the tick reads two booleans; 20 Hz for the life of the window was the
+    /// price of a poll nobody needed at that rate.
+    ///
+    /// The old tree fails this on the number alone: RECONCILE_MS was 50.
+    #[test]
+    fn t14_the_shell_tick_runs_at_ten_hertz_not_twenty() {
+        assert!(
+            (100..=150).contains(&RECONCILE_MS),
+            "the shell tick is {RECONCILE_MS} ms; the plan asks for 100-150 ms"
+        );
     }
 }
