@@ -5,6 +5,30 @@ use super::*;
 /// The model is `Selection` (src/app/selection.rs); this file is the half that
 /// talks to Slint: which property carries the mode, which rows get the check, and
 /// what a click with or without a modifier means.
+/// Write one card's two selection flags if they disagree. Returns whether it wrote.
+///
+/// This is the whole of a click now (B10). The publish used to read every row of the
+/// page, parse its id and ask the selection about it: selecting one card in five
+/// hundred rows was 500 row clones on the UI thread, and every row it did not change
+/// still paid a read.
+pub(crate) fn patch_card_selection<M: Model<Data = IllustItem>>(
+    model: &M,
+    row: usize,
+    selected: bool,
+    selectable: bool,
+) -> bool {
+    let Some(mut item) = model.row_data(row) else {
+        return false;
+    };
+    if item.selected == selected && item.selectable == selectable {
+        return false;
+    }
+    item.selected = selected;
+    item.selectable = selectable;
+    model.set_row_data(row, item);
+    true
+}
+
 impl App {
     /// The works the page is showing, in load order - the order a Shift range and
     /// the published count are both defined over.
@@ -50,11 +74,37 @@ impl App {
         self.sync_selected_rows();
     }
 
+    /// Write the rows one click changed, addressed by the cell the feed holds (B10).
+    ///
+    /// The two properties are O(1) either way; what changed is that the rows are
+    /// looked up through `index` instead of scanned, so a click costs one row.
+    pub(crate) fn publish_selection_rows(&self, changed: &[u64]) {
+        let ui = self.ui();
+        ui.set_selection_mode(self.selection.active);
+        ui.set_selected_count(self.selection.ids.len() as i32);
+        for id in changed {
+            let Some((column, row)) = self.index.get(&id.to_string()).copied() else {
+                continue;
+            };
+            let Some(model) = self.columns.get(column) else {
+                continue;
+            };
+            patch_card_selection(
+                model,
+                row,
+                self.selection.contains(*id),
+                self.selection.active,
+            );
+        }
+    }
+
     /// Write `selected` and `selectable` back into the column models.
     ///
-    /// `set_row_data` rather than a rebuilt model: the grid is a set of
+    /// The mode-change path, so it walks every row: `selectable` flips on all of
+    /// them at once. A single click does not come here - it addresses one cell
+    /// (B10). `set_row_data` rather than a rebuilt model: the grid is a set of
     /// `Rc<VecModel<IllustItem>>` that a reload is allowed to replace and a
-    /// selection is not (the same rule `resync_bookmarks` follows). `selectable` is
+    /// selection is not. `selectable` is
     /// what draws the 22 px check at all, so it is set from the mode even on the
     /// rows that are not chosen.
     fn sync_selected_rows(&self) {
@@ -67,11 +117,7 @@ impl App {
                     continue;
                 };
                 let want_selected = self.selection.contains(id);
-                if item.selected != want_selected || item.selectable != self.selection.active {
-                    item.selected = want_selected;
-                    item.selectable = self.selection.active;
-                    column.set_row_data(row, item);
-                }
+                patch_card_selection(column, row, want_selected, self.selection.active);
             }
         }
     }
@@ -113,7 +159,8 @@ impl App {
                 }
                 app.selection.toggle(raw, &order);
                 app.selection.anchor_to(raw, &order);
-                app.publish_selection();
+                // One card changed, so one card is written (B10).
+                app.publish_selection_rows(&[raw]);
                 false
             } else {
                 true
@@ -138,7 +185,7 @@ impl App {
     pub(crate) fn clear_selection(shared: &Shared) {
         let mut app = shared.borrow_mut();
         app.reconcile_shell_state();
-        app.selection.ids.clear();
+        app.selection.clear();
         app.selection.anchor = None;
         app.publish_selection();
     }
@@ -162,9 +209,54 @@ impl App {
             return false;
         }
         self.selection.active = true;
-        self.selection.ids = order[..order.len().min(count)].to_vec();
+        self.selection.set_ids(order[..order.len().min(count)].to_vec());
         self.selection.anchor_to(order[0], &order);
         self.publish_selection();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::helpers::testkit::{bare_card, CountingModel};
+
+    /// B10 - one click writes one row, not the page.
+    ///
+    /// Every click used to publish the whole selection: a read per row of the page,
+    /// an id parse per row and a membership test per row. The plant that makes this
+    /// red is [patch_card_selection] walking the model, which is the shape it had.
+    #[test]
+    fn b10_one_click_writes_one_row_not_the_page() {
+        const ROWS: usize = 500;
+        let model = CountingModel::new(
+            (0..ROWS)
+                .map(|index| bare_card(&format!("id{index}")))
+                .collect::<Vec<_>>(),
+        );
+
+        // The card that was clicked becomes selected, and the page is in selection
+        // mode, so its check is drawn.
+        assert!(patch_card_selection(&model, 7, true, true));
+        assert_eq!(model.reads(), 1, "one row read, not five hundred");
+        assert_eq!(model.writes(), 1, "one row written");
+
+        // A click that changes nothing writes nothing.
+        model.reset();
+        assert!(!patch_card_selection(&model, 7, true, true));
+        assert_eq!(model.writes(), 0);
+
+        // The shape this replaced, measured on the same model: every row, per click.
+        model.reset();
+        for row in 0..ROWS {
+            let Some(mut item) = model.row_data(row) else {
+                continue;
+            };
+            if item.selected != true {
+                item.selected = true;
+                model.set_row_data(row, item);
+            }
+        }
+        assert_eq!(model.reads(), ROWS, "the old publish cloned every row");
     }
 }

@@ -4,6 +4,8 @@
 //! parallel track editing `src/app/mod.rs`. The feed track fills in the methods
 //! and removes the `allow` below.
 
+use std::collections::HashSet;
+
 /// One grid page's selection.
 ///
 /// `ids` keeps the work ids in **load order** (the order `self.items` holds
@@ -16,6 +18,15 @@ pub(crate) struct Selection {
     pub active: bool,
     /// Selected works, in load order, without duplicates.
     pub ids: Vec<u64>,
+    /// The same ids as a set (B10).
+    ///
+    /// Every card of the page asked "is this one of mine?" through a linear scan of
+    /// ids, so one click on a five-hundred-row page cost 500 comparisons, and Ctrl+A
+    /// (500 ids) followed by one more click cost about 250 000. ids stays because it
+    /// *is* the order a Shift range and the printed count are defined over; this
+    /// mirrors it, and every mutation goes through one of the methods below, so the
+    /// two cannot disagree.
+    set: HashSet<u64>,
     /// Where a Shift+click range starts, as a position in `ids`' source order.
     pub anchor: Option<usize>,
 }
@@ -26,7 +37,25 @@ impl Selection {
     }
 
     pub(crate) fn contains(&self, id: u64) -> bool {
-        self.ids.contains(&id)
+        self.set.contains(&id)
+    }
+
+    /// Replace the selection wholesale, keeping the mirror in step.
+    pub(crate) fn set_ids(&mut self, ids: Vec<u64>) {
+        self.ids = ids;
+        self.rebuild_set();
+    }
+
+    /// Drop every id, keeping the mode and the mirror in step.
+    pub(crate) fn clear(&mut self) {
+        self.ids.clear();
+        self.set.clear();
+    }
+
+    /// The one place the mirror is refilled, so no mutation can drift from ids.
+    fn rebuild_set(&mut self) {
+        self.set.clear();
+        self.set.extend(self.ids.iter().copied());
     }
 
     /// Re-order `ids` into load order, dropping whatever the page no longer
@@ -38,20 +67,26 @@ impl Selection {
     fn resort(&mut self, order: &[u64]) {
         let mut kept: Vec<u64> = Vec::with_capacity(self.ids.len());
         for id in order {
-            if self.ids.contains(id) && !kept.contains(id) {
+            if self.set.contains(id) && !kept.contains(id) {
                 kept.push(*id);
             }
         }
         self.ids = kept;
+        self.rebuild_set();
     }
 
     /// Toggle one work, keeping load order. Returns whether it is now selected.
     pub(crate) fn toggle(&mut self, id: u64, order: &[u64]) -> bool {
-        if let Some(position) = self.ids.iter().position(|candidate| *candidate == id) {
-            self.ids.remove(position);
+        if self.set.remove(&id) {
+            if let Some(position) = self.ids.iter().position(|candidate| *candidate == id) {
+                self.ids.remove(position);
+            }
             false
         } else {
             self.ids.push(id);
+            // The mirror moves with the list: resort reads the set, so an id that is
+            // not in it would be dropped on the way through.
+            self.set.insert(id);
             self.resort(order);
             true
         }
@@ -83,6 +118,7 @@ impl Selection {
         };
         self.ids = order[low..=high].to_vec();
         self.ids.dedup();
+        self.rebuild_set();
         self.ids.len()
     }
 
@@ -90,6 +126,7 @@ impl Selection {
     pub(crate) fn select_all(&mut self, order: &[u64]) -> usize {
         self.ids = order.to_vec();
         self.ids.dedup();
+        self.rebuild_set();
         self.ids.len()
     }
 
@@ -98,7 +135,7 @@ impl Selection {
     pub(crate) fn set_mode(&mut self, active: bool) {
         self.active = active;
         if !active {
-            self.ids.clear();
+            self.clear();
             self.anchor = None;
         }
     }
@@ -218,5 +255,54 @@ mod tests {
         selection.set_mode(false);
         assert!(selection.ids.is_empty());
         assert_eq!(selection.anchor, None);
+    }
+}
+
+#[cfg(test)]
+mod membership_tests {
+    use super::Selection;
+
+    /// B10 - the membership mirror is exact after every mutation.
+    ///
+    /// A set that drifts from the ids is the worst possible failure here: the check
+    /// on a card would disagree with the count in the batch bar and with what a batch
+    /// action would act on. Every mutation therefore goes through one of the methods,
+    /// and this test walks all of them.
+    #[test]
+    fn b10_the_set_mirror_matches_the_id_list_after_every_mutation() {
+        let order: Vec<u64> = (1..=500).collect();
+        let mut selection = Selection::default();
+        selection.set_mode(true);
+
+        selection.select_all(&order);
+        assert_eq!(selection.ids.len(), 500);
+        assert_eq!(selection.set.len(), 500, "the mirror took every id");
+        for id in &order {
+            assert!(selection.contains(*id));
+        }
+
+        // Removing one keeps both halves in step.
+        selection.toggle(250, &order);
+        assert!(!selection.contains(250));
+        assert!(!selection.ids.contains(&250));
+        assert_eq!(selection.set.len(), selection.ids.len());
+
+        // A range replaces the ids wholesale.
+        selection.anchor_to(10, &order);
+        selection.extend_to(20, &order);
+        assert_eq!(selection.ids.len(), 11);
+        assert!(selection.contains(15));
+        assert!(!selection.contains(250));
+        assert_eq!(selection.set.len(), selection.ids.len());
+
+        // A wholesale write from outside goes through the setter.
+        selection.set_ids(vec![3, 4, 5]);
+        assert_eq!(selection.set.len(), 3);
+        assert!(selection.contains(5) && !selection.contains(6));
+
+        // Leaving the mode empties both.
+        selection.set_mode(false);
+        assert!(selection.ids.is_empty());
+        assert!(selection.set.is_empty(), "no id survives the mode");
     }
 }
