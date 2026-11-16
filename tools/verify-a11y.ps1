@@ -68,6 +68,7 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 # G32: the page list, the launch recipe for each page and the budget key set all come
 # from here, so this script cannot drift from the three other verifiers or from
 # tools/a11y-budget.json.
+. (Join-Path $PSScriptRoot "walk-lib.ps1") | Out-Null
 . (Join-Path $PSScriptRoot "page-set.ps1") | Out-Null
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
