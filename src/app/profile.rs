@@ -1,5 +1,8 @@
 use super::*;
 
+// The one busy-slot rule every surface uses (see `detail::toggle_allowed`).
+use super::detail::toggle_allowed;
+
 /// A user page that is currently open.
 pub(crate) struct ProfileState {
     pub(crate) user: Id,
@@ -490,8 +493,36 @@ pub(crate) fn apply_profile_more(
     }
 }
 
+/// Write one follow reply onto the user page it belongs to.
+///
+/// Returns false, and writes nothing, when the page on screen is another account.
+/// `publish_profile` republishes `profile-followed` from whatever `ProfileState` is
+/// current, so without the check A's reply flipped B's button (B2): a reply is an
+/// answer about one account, and a page showing another account is not its home.
+/// The key is the account rather than the page's epoch, because the answer stays
+/// true for that account even when the page was reloaded while it was in flight.
+pub(crate) fn adopt_profile_follow(
+    state: Option<&mut ProfileState>,
+    asked: Id,
+    confirmed: bool,
+) -> bool {
+    let Some(state) = state else {
+        return false;
+    };
+    if state.user != asked {
+        return false;
+    }
+    state.profile.is_followed = confirmed;
+    true
+}
+
 impl App {
     /// Follow or unfollow the user on the open profile page.
+    ///
+    /// Two guards from one invariant (B2): the reply lands on the account that asked
+    /// for it, and the page takes one reply at a time - `profile-busy` was written by
+    /// every click and read by nothing, so two clicks raced and the later reply won
+    /// invisibly.
     pub(crate) fn toggle_profile_follow(&mut self) {
         let Some(state) = self.profile.as_ref() else {
             return;
@@ -504,7 +535,13 @@ impl App {
         let Some(client) = self.client.clone() else {
             return;
         };
-        self.ui().set_profile_busy(true);
+        {
+            let ui = self.ui();
+            if !toggle_allowed(ui.get_profile_busy()) {
+                return;
+            }
+            ui.set_profile_busy(true);
+        }
         let rt = self.rt.clone();
         rt.spawn(async move {
             let outcome = async {
@@ -519,13 +556,14 @@ impl App {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
                 };
+                // The slot is free again whatever the answer was.
                 app.ui().set_profile_busy(false);
                 match outcome {
                     Ok((wanted, confirmed)) => {
-                        if let Some(state) = app.profile.as_mut() {
-                            state.profile.is_followed = confirmed;
+                        // The verdict, onto the page that asked for it (B2).
+                        if adopt_profile_follow(app.profile.as_mut(), target, confirmed) {
+                            app.publish_profile();
                         }
-                        app.publish_profile();
                         if confirmed == wanted {
                             app.notify(
                                 1,
@@ -549,6 +587,46 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B2 · A's follow reply must not flip B's button.
+    ///
+    /// The reply used to be written into whatever `ProfileState` was current and
+    /// then republished, so a slow answer for account 7 landed on account 9's page.
+    /// The plant that makes this red is the identity check removed from
+    /// [`adopt_profile_follow`] - the shape the code had.
+    #[test]
+    fn b2_a_follow_reply_lands_only_on_the_account_that_asked() {
+        // The page that asked: the verdict is written, and the republish follows.
+        let mut page = page_state();
+        page.profile.is_followed = false;
+        assert!(adopt_profile_follow(Some(&mut page), Id(7), true));
+        assert!(page.profile.is_followed, "the button follows the server");
+
+        // Another account's page is on screen when the reply lands: nothing is
+        // written, so the button keeps what the server last said about *it*.
+        let mut other = page_state();
+        other.user = Id(9);
+        other.profile.is_followed = false;
+        assert!(
+            !adopt_profile_follow(Some(&mut other), Id(7), true),
+            "account 7's reply must not reach account 9's page"
+        );
+        assert!(
+            !other.profile.is_followed,
+            "the visible button still says what account 9 told us"
+        );
+
+        // No page at all draws nothing either.
+        assert!(!adopt_profile_follow(None, Id(7), true));
+
+        // The other half of the same invariant: one reply at a time, so the second
+        // click of a double click is dropped rather than raced (B2's busy slot).
+        assert!(toggle_allowed(false), "the first click goes through");
+        assert!(
+            !toggle_allowed(true),
+            "the second is dropped while one reply is in flight"
+        );
+    }
 
     fn work(id: u64) -> Illust {
         history_illust(&pixiv_store::HistoryEntry {
