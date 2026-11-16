@@ -14,6 +14,10 @@
 //!   into the filename template and recorded in SQLite by the app layer.
 //! * Re-queuing an already present file must be detected and reported rather than
 //!   silently overwriting.
+//! * Two requests never render to one path. A template without `{page}` sends every
+//!   page of an artwork to one file, and a queue that lets both through publishes
+//!   one page, loses the other with nothing said, and reports both `Completed` - so
+//!   the second request is refused when it is queued.
 //! * Cancellation releases the in-flight request promptly.
 //!
 //! # Transport
@@ -41,6 +45,7 @@
 //!    │           ├────▶ Cancelled    ──retry──▶ Queued
 //!    │           └────▶ Skipped        (destination already exists)
 //!    ├──cancel──▶ Cancelled
+//!    ├──refuse──▶ Failed(msg)          (another task renders the same file)
 //!    └──pause───▶ Paused   ──resume──▶ Queued
 //! Running ──pause──▶ Paused ──resume──▶ Queued
 //! ```

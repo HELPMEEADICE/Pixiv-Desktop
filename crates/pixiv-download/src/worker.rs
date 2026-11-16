@@ -305,7 +305,63 @@ impl Inner {
         *guard = Arc::new(config);
     }
 
+    /// The file one request publishes under `config`.
+    ///
+    /// Collisions are judged on this path and never on the template string: one
+    /// template renders two pages to one name (`{illust_id}` with no `{page}`), and
+    /// two different templates can render one name just as well.
+    fn rendered_destination(config: &DownloadConfig, request: &DownloadRequest) -> PathBuf {
+        config
+            .directory
+            .join(download_file_name(&config.filename_template, request))
+    }
+
+    /// The file one record has already taken, or the one its claim would take.
+    ///
+    /// A claimed record carries the path it was claimed with, and that is the path
+    /// it will write; a queued one renders under the template current *now*, which
+    /// is what [`Self::take_next_queued`] is about to do with it.
+    fn destination_of(config: &DownloadConfig, record: &Record) -> PathBuf {
+        record
+            .destination
+            .clone()
+            .unwrap_or_else(|| Self::rendered_destination(config, &record.request))
+    }
+
+    /// The live row that already publishes `destination`, if one does.
+    ///
+    /// Live means it can still write: queued, running or paused. A terminal row has
+    /// either published the file (`Completed`, `Skipped`) or given the name up
+    /// (`Failed`, `Cancelled`), so a new request for that path is a fresh decision -
+    /// and a file that is already on disk is reported as `Skipped`, not refused.
+    fn clash(
+        queue: &Queue,
+        config: &DownloadConfig,
+        destination: &Path,
+        except: Option<TaskId>,
+    ) -> Option<TaskId> {
+        queue
+            .records
+            .iter()
+            .filter(|record| !record.state.is_terminal())
+            .filter(|record| Some(record.id) != except)
+            .find(|record| {
+                same_destination(&Self::destination_of(config, record), destination)
+            })
+            .map(|record| record.id)
+    }
+
+    /// Queue one request per page, refusing the ones that would write a file
+    /// another live task already owns.
+    ///
+    /// The decision is made here, on the *rendered* path, and not at the rename: by
+    /// then both bodies are on disk, the second rename wins whole, the first page is
+    /// gone with nothing said, and both rows report `Completed`. A refused request
+    /// still gets its id and a row, so the caller can show why that page is missing
+    /// instead of finding a queue that quietly has one entry fewer than the pages it
+    /// asked for.
     fn enqueue(&self, requests: Vec<DownloadRequest>) -> Vec<TaskId> {
+        let config = self.config();
         let mut ids = Vec::with_capacity(requests.len());
         {
             let mut queue = self.tasks.lock();
@@ -314,10 +370,24 @@ impl Inner {
                     .next_id
                     .fetch_add(1, Ordering::Relaxed)
                     .saturating_add(1);
+                let destination = Self::rendered_destination(&config, &request);
+                // Checked against every row already in the queue, this call's
+                // earlier requests included: the record is pushed below, so the next
+                // iteration sees it.
+                let state = match Self::clash(&queue, &config, &destination, None) {
+                    Some(owner) => TaskState::Failed(format!(
+                        "目标文件与其他任务重复：{}（任务 {owner}）",
+                        destination
+                            .file_name()
+                            .map(|name| truncate(&name.to_string_lossy(), 60))
+                            .unwrap_or_default()
+                    )),
+                    None => TaskState::Queued,
+                };
                 queue.records.push(Record {
                     id,
                     request,
-                    state: TaskState::Queued,
+                    state,
                     bytes_done: 0,
                     bytes_total: None,
                     rate: RateWindow::default(),
@@ -442,19 +512,39 @@ impl Inner {
         true
     }
 
+    /// Re-queue a failed or cancelled task, unless a live row has taken its file.
+    ///
+    /// Retry is a second door into the queue, so it faces the same rule as
+    /// [`Self::enqueue`]: a row that sat failed while a newer request claimed its
+    /// path must not be re-queued onto it. The refusal lands in the row's own
+    /// `Failed` message, so the queue says why rather than doing nothing.
     fn retry(&self, id: TaskId) -> bool {
-        let retried = {
+        let config = self.config();
+        let mut retried = false;
+        {
             let mut queue = self.tasks.lock();
-            match queue.records.iter_mut().find(|r| r.id == id) {
-                Some(record)
-                    if matches!(record.state, TaskState::Failed(_) | TaskState::Cancelled) =>
-                {
-                    record.requeue();
-                    true
-                }
-                _ => false,
+            let Some(position) = queue.records.iter().position(|r| r.id == id) else {
+                return false;
+            };
+            if !matches!(
+                queue.records[position].state,
+                TaskState::Failed(_) | TaskState::Cancelled
+            ) {
+                return false;
             }
-        };
+            let destination = Self::destination_of(&config, &queue.records[position]);
+            match Self::clash(&queue, &config, &destination, Some(id)) {
+                Some(owner) => {
+                    queue.records[position].state = TaskState::Failed(format!(
+                        "目标文件已被任务 {owner} 占用，无法重新排队"
+                    ));
+                }
+                None => {
+                    queue.records[position].requeue();
+                    retried = true;
+                }
+            }
+        }
         if retried {
             self.wake();
         }
@@ -619,7 +709,12 @@ impl DownloadManager {
             .update_config(|config| config.filename_template = template);
     }
 
-    /// Queue one request per page. Returns the new task ids.
+    /// Queue one request per page. Returns one id per request.
+    ///
+    /// An id is returned even for a request that was refused, because another live
+    /// task renders the same file: that row arrives `Failed` with the reason, so the
+    /// caller can say which page is missing and why rather than finding a queue one
+    /// entry shorter than the pages it asked for.
     pub fn enqueue(&self, requests: Vec<DownloadRequest>) -> Vec<TaskId> {
         self.inner.enqueue(requests)
     }
@@ -978,6 +1073,21 @@ struct LogCtx {
 /// two images interleaved into one file. The id makes each writer's temp its own;
 /// the rename then means "publish the file that is mine", and the last writer
 /// wins whole rather than in pieces.
+/// Do two rendered paths name one file?
+///
+/// Compared the way the filesystem compares them: NTFS is case-insensitive, so
+/// `42.jpg` and `42.JPG` are one file there and must collide here too. Exactly
+/// equal otherwise. What is compared is the rendered path, never the template that
+/// produced it.
+fn same_destination(left: &Path, right: &Path) -> bool {
+    if cfg!(windows) {
+        left.as_os_str().to_string_lossy().to_lowercase()
+            == right.as_os_str().to_string_lossy().to_lowercase()
+    } else {
+        left == right
+    }
+}
+
 fn part_path(destination: &Path, id: TaskId) -> PathBuf {
     let mut name = destination
         .file_name()
@@ -1479,28 +1589,44 @@ mod tests {
         );
     }
 
-    /// Two requests whose template renders one name must publish one of the two
-    /// bodies, whole. The `.part` name used to be a function of the destination
-    /// alone, so both tasks opened it, wrote into it and renamed it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn two_tasks_rendering_one_name_publish_one_whole_body() {
-        let dir = temp_dir("same-name");
+    /// G42: two requests never render to one path.
+    ///
+    /// The template has no `{page}`, so page 0 and page 1 both render `42.jpg`. The
+    /// second request is refused when it is queued; the first still completes and
+    /// publishes its own bytes, whole. On the old queue both rows reached
+    /// `Completed` while the directory held one of the two pages.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_requests_rendering_one_path_are_refused_at_enqueue() {
+        let dir = temp_dir("g42-one-path");
         let mut settings = config(dir.clone(), 2);
-        // No `{page}`: page 0 and page 1 both render "42.jpg".
         settings.filename_template = "{illust_id}".to_string();
         let manager = DownloadManager::new(settings);
-        manager.enqueue(vec![request(0), request(1)]);
+        let ids = manager.enqueue(vec![request(0), request(1)]);
+        assert_eq!(ids.len(), 2, "one id per request, refused or not");
 
-        // Four chunks each, so the old code interleaved them inside one temp file
-        // instead of merely racing on the rename.
-        let bodies = [vec![b'A'; 4 * 64 * 1024], vec![b'B'; 4 * 64 * 1024]];
-        let served = bodies.clone();
-        let fetch = move |url: String| {
-            let body = if url.contains("/0.jpg") {
-                served[0].clone()
-            } else {
-                served[1].clone()
-            };
+        let queued = manager.tasks();
+        let first = queued.iter().find(|t| t.id == ids[0]).expect("first row");
+        assert_eq!(first.state, TaskState::Queued, "the first request is the owner");
+        let second = queued.iter().find(|t| t.id == ids[1]).expect("second row");
+        match &second.state {
+            TaskState::Failed(reason) => {
+                assert!(
+                    reason.contains("重复") && reason.contains("42.jpg"),
+                    "the refusal names the file: {reason}"
+                );
+                assert!(
+                    reason.contains(&ids[0].to_string()),
+                    "and the task that owns it: {reason}"
+                );
+            }
+            other => panic!("the second request must be refused at enqueue, got {other:?}"),
+        }
+
+        // The accepted request still runs to completion, and it is the only writer.
+        let body = vec![b'A'; 4 * 64 * 1024];
+        let served = body.clone();
+        let fetch = move |_url: String| {
+            let body = served.clone();
             async move { Ok::<_, PixivError>((body, None::<String>)) }
         };
         let runner = manager.clone();
@@ -1508,24 +1634,15 @@ mod tests {
         let tasks = wait_terminal(&manager).await;
         handle.abort();
 
+        let first = tasks.iter().find(|t| t.id == ids[0]).expect("first row");
+        assert_eq!(first.state, TaskState::Completed, "{tasks:?}");
         assert!(
-            tasks.iter().all(|t| t.state == TaskState::Completed),
-            "{tasks:?}"
+            matches!(tasks.iter().find(|t| t.id == ids[1]).map(|t| &t.state), Some(TaskState::Failed(_))),
+            "the refused row never runs: {tasks:?}"
         );
-        let destination = tasks
-            .iter()
-            .filter_map(|t| t.destination.clone())
-            .next()
-            .expect("destination recorded");
-        assert_eq!(destination, dir.join("42.jpg"), "both tasks share one name");
-        let published = std::fs::read(&destination).expect("the name was published");
-        assert!(
-            published == bodies[0] || published == bodies[1],
-            "the published file must be exactly one task's body: {} bytes starting {:?}",
-            published.len(),
-            published.first()
-        );
-        // No temp file survives either task.
+        let published = std::fs::read(dir.join("42.jpg")).expect("the file was published");
+        assert_eq!(published, body, "the accepted page, whole");
+        // And the writer's own temp file is gone, so the refusal left nothing behind.
         let leftovers: Vec<String> = std::fs::read_dir(&dir)
             .expect("read dir")
             .filter_map(|entry| entry.ok())
@@ -1536,6 +1653,48 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retry is a second door into the queue, so it faces the same rule: a row that
+    /// sat failed while a newer request claimed its path must not be re-queued onto
+    /// it. The refusal is written into the row, because "nothing happened" is not an
+    /// answer the queue can give.
+    #[test]
+    fn a_retry_that_would_collide_is_refused_and_says_so() {
+        let dir = temp_dir("retry-clash");
+        let mut settings = config(dir.clone(), 1);
+        settings.filename_template = "{illust_id}".to_string();
+        let manager = DownloadManager::new(settings);
+        let first = manager.enqueue(vec![request(0)]);
+        assert!(manager.cancel(first[0]));
+
+        // The cancelled row is terminal and owns nothing, so the next request for
+        // that rendered path is accepted and becomes the owner.
+        let second = manager.enqueue(vec![request(1)]);
+        assert_eq!(manager.tasks()[0].state, TaskState::Queued);
+
+        assert!(!manager.retry(first[0]), "the retry is refused");
+        let row = manager
+            .tasks()
+            .into_iter()
+            .find(|task| task.id == first[0])
+            .expect("the refused row is still listed");
+        match row.state {
+            TaskState::Failed(reason) => {
+                assert!(
+                    reason.contains(&second[0].to_string()),
+                    "the refusal names the owner: {reason}"
+                );
+            }
+            other => panic!("expected a Failed refusal, got {other:?}"),
+        }
+        let owner = manager
+            .tasks()
+            .into_iter()
+            .find(|task| task.id == second[0])
+            .expect("the owner is still there");
+        assert_eq!(owner.state, TaskState::Queued, "the owner was not disturbed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

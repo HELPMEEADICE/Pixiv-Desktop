@@ -2,9 +2,12 @@
 //!
 //! Nothing in this module reads the clock, the filesystem, the network or any
 //! thread-local state: the byte stream is a pure function of `(width, height,
-//! seed)`. That keeps image caches and layout snapshots stable across runs and
-//! across machines, and it is why the repository can ship zero third-party
-//! imagery.
+//! seed)`. That keeps image caches and layout snapshots stable across runs, and
+//! it is why the repository can ship zero third-party imagery. Across *machines*
+//! the guarantee is one target and one toolchain, because the shading goes
+//! through f32 `sin`/`cos`/`sin_cos`/`powf`/`powi`/`sqrt` in the motif functions
+//! below, which are libm calls and not bit-reproducible by contract. The crate's
+//! module docs say what making the bytes portable would take.
 //!
 //! Demo Mode used to paint a two-stop gradient with a soft blob in it. At card
 //! size that reads as a colour swatch, not as artwork, so the grid looked like a

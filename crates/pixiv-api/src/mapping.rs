@@ -116,8 +116,9 @@ fn snippet(body: &str) -> Option<String> {
 /// Map a non-success HTTP status onto the error the UI will show.
 ///
 /// Order matters and is fixed by the API contract: `404` is "gone", `401`/`403`
-/// are "sign in", `429` is "slow down", a flagged body carries Pixiv's own
-/// message, and everything else is a plain transport failure.
+/// are "sign in", `429` is "slow down", and every other status is an
+/// [`PixivError::Http`] that keeps its code - with Pixiv's own message when the
+/// body flags one, and a quoted excerpt of the body otherwise.
 ///
 /// This form is for callers that have only the status and the body. The
 /// transport uses [`map_status_error_with_hint`] so that a `Retry-After` reaches
@@ -153,10 +154,18 @@ pub(crate) fn map_status_error_with_hint(
         ),
         401 | 403 => PixivError::Unauthorized,
         429 => PixivError::RateLimited(retry_after.unwrap_or(BACKOFF_BASE)),
-        _ => match flagged {
-            Some(message) => PixivError::Api(message),
-            None => PixivError::http(status, snippet(body).unwrap_or_default()),
-        },
+        // Every other status keeps its code. A flagged body used to become
+        // `Api(message)`, which is a variant with no status in it: the caller got
+        // Pixiv's sentence and lost the number, so a `400` and a `422` were
+        // indistinguishable and `Failure::status` had to carry the code beside the
+        // error on the `POST` path only. `Http` is the variant whose documented
+        // meaning *is* "a non-success HTTP status", so the code survives to every
+        // reader - and a flagged `5xx` is then retryable by the same rule as any
+        // other `5xx`, which is the policy [`PixivError::is_retryable`] states.
+        _ => PixivError::http(
+            status,
+            flagged.or_else(|| snippet(body)).unwrap_or_default(),
+        ),
     }
 }
 
@@ -1472,11 +1481,23 @@ mod tests {
             map_status_error(403, ""),
             PixivError::Unauthorized
         ));
-        // A 400 carrying Pixiv's own message is reported as an API error.
+        // A 400 carrying Pixiv's own message keeps *both*: the sentence is
+        // Pixiv's, and the status stays on the error. It used to arrive as
+        // `Api(message)`, a variant with no status in it, so the caller could not
+        // tell a 400 from a 422 - which is why `Failure` had to carry the code
+        // beside the error on the POST path only.
         match map_status_error(400, r#"{"error":true,"message":"不正确的请求。"}"#) {
-            PixivError::Api(message) => assert_eq!(message, "不正确的请求。"),
-            other => panic!("expected Api error, got {other:?}"),
+            PixivError::Http { status, message } => {
+                assert_eq!(status, 400);
+                assert_eq!(message, "不正确的请求。");
+            }
+            other => panic!("expected Http error, got {other:?}"),
         }
+        // The code CSRF recovery keys on survives the same way.
+        assert!(matches!(
+            map_status_error(422, r#"{"error":true,"message":"トークンが不正です"}"#),
+            PixivError::Http { status: 422, .. }
+        ));
         // Anything else stays a transport error, with the body quoted.
         match map_status_error(502, "<html>bad gateway</html>") {
             PixivError::Http { status, message } => {

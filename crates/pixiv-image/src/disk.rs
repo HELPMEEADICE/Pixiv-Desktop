@@ -105,8 +105,26 @@ impl DiskTier {
         }
         // The one scan the tier needs: everything after this is maintained by `put`
         // and `remove`, and a tier opened over an existing directory must start with
-        // a ledger that describes it.
-        let index = scan_index(&dir).unwrap_or_default();
+        // a ledger that describes it. The same pass lists the temp files other
+        // processes left behind.
+        let (index, stale_temps) = scan_index(&dir).unwrap_or_default();
+        // A killed process leaves its `.part` files behind. `bytes()` cannot count
+        // them - an index entry is what `put` publishes, and a temp is not one - and
+        // `enforce_budget` only ever trims entries, so nothing else would ever
+        // reclaim them: the directory outgrows `disk_budget_bytes` by their size,
+        // permanently and invisibly. `open` is the one moment that knows this
+        // process is not the one that wrote them.
+        for temp in stale_temps {
+            match fs::remove_file(&temp) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => warn!(
+                    path = %temp.display(),
+                    error = %err,
+                    "could not remove a stale cache temp file"
+                ),
+            }
+        }
         let bytes: u64 = index.values().map(|entry| entry.size).sum();
         Some(Self {
             dir,
@@ -201,7 +219,13 @@ impl DiskTier {
         &self.dir
     }
 
-    /// Bytes currently held on disk.
+    /// Bytes the tier's *entries* hold.
+    ///
+    /// A temp file being written is not counted: it becomes an entry at the rename,
+    /// and crediting it earlier would let a trim delete a file with no entry. What
+    /// keeps that uncounted excess bounded is the sweep in [`Self::open`], which
+    /// deletes the temps a dead process left behind instead of letting them sit
+    /// outside the budget for the life of the directory.
     pub(crate) fn bytes(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
     }
@@ -466,17 +490,27 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-/// `key -> (stamp, size)` for every entry `dir` holds.
+/// `key -> (stamp, size)` for every entry `dir` holds, plus the temp files that
+/// belong to no live writer here.
 ///
 /// Runs once, in [`DiskTier::open`]. Two things are deliberately not entries:
 /// anything outside a shard folder, and a `*.part` temp, which belongs to a writer
 /// that is about to rename it - the index is the list a trim may delete from, so a
-/// temp in it would be a file deleted under a live writer.
-fn scan_index(dir: &Path) -> io::Result<BTreeMap<String, IndexEntry>> {
+/// temp in it would be a file deleted under a live writer. Those temps are returned
+/// separately instead of dropped, because a temp whose pid is not this process's is
+/// a dead writer's leftover: no entry will ever describe it, and the caller sweeps
+/// it.
+fn scan_index(dir: &Path) -> io::Result<(BTreeMap<String, IndexEntry>, Vec<PathBuf>)> {
     let mut index = BTreeMap::new();
+    let mut temps = Vec::new();
     for shard in fs::read_dir(dir)? {
         let shard = shard?;
         if !shard.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            // A `.part` outside a shard is nobody's live write in this layout, so
+            // it is a leftover like any other.
+            if is_stale_temp(&shard.file_name().to_string_lossy()) {
+                temps.push(shard.path());
+            }
             continue;
         }
         let folder = shard.path();
@@ -490,6 +524,9 @@ fn scan_index(dir: &Path) -> io::Result<BTreeMap<String, IndexEntry>> {
             }
             let name = file.file_name().to_string_lossy().into_owned();
             if name.ends_with(".part") {
+                if is_stale_temp(&name) {
+                    temps.push(file.path());
+                }
                 continue;
             }
             index.insert(
@@ -501,7 +538,37 @@ fn scan_index(dir: &Path) -> io::Result<BTreeMap<String, IndexEntry>> {
             );
         }
     }
-    Ok(index)
+    Ok((index, temps))
+}
+
+/// Is this temp file's name one this process did not write?
+///
+/// [`DiskTier::temp_path`] writes `{key}.{pid}-{seq}.part`, so the pid is the field
+/// between the key and the sequence. A name that does not parse as that shape
+/// belongs to no writer this build can have started - it is a leftover too - so it
+/// is swept rather than kept forever. A temp belonging to *this* pid is left alone:
+/// it may be a write in flight on another thread.
+///
+/// Trade-off, stated rather than hidden: a second live instance sharing this
+/// directory loses the one temp the sweep takes, its rename fails, and `put`
+/// returns the error to a caller that already treats a cache write as best effort.
+/// The alternative - a directory that grows past its budget for the life of the
+/// cache, with no accounting and no trim that can see it - is the worse failure.
+fn is_stale_temp(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".part") else {
+        return false;
+    };
+    let Some((before_seq, seq)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    let Some((_, pid)) = before_seq.rsplit_once('.') else {
+        return false;
+    };
+    // The sequence has to parse too: `{key}-{anything}.part` is not this layout.
+    if seq.parse::<u64>().is_err() {
+        return false;
+    }
+    pid.parse::<u32>() != Ok(std::process::id())
 }
 
 /// `(modified, size, path)` for every file under `dir`, recursively.
@@ -756,6 +823,40 @@ mod tests {
             1,
             "the measurement must be able to report one writer at a time"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A killed process leaves `.part` files that `bytes()` and `enforce_budget`
+    /// cannot see - no index entry describes them, and a trim only deletes entries -
+    /// so the directory outgrows `disk_budget_bytes` with nothing to trim. `open`
+    /// sweeps the ones whose pid is not this process's.
+    #[test]
+    fn open_sweeps_temp_files_left_by_a_dead_process() {
+        let dir = scratch("disk-stale-temps");
+        let shard = dir.join("ab");
+        let tier = DiskTier::open(dir.clone(), 1 << 20).expect("disk tier");
+        tier.put("abcdef", b"keep").expect("put");
+        drop(tier);
+
+        // One temp this process could have written, one it never could:
+        // `u32::MAX` is not a pid Windows or Unix hands out.
+        let ours = shard.join(format!("abcdef.{}-7.part", std::process::id()));
+        let dead = shard.join("abcdef.4294967295-3.part");
+        fs::write(&ours, b"mine").expect("write our temp");
+        fs::write(&dead, b"orphan").expect("write the orphan temp");
+
+        let reopened = DiskTier::open(dir.clone(), 1 << 20).expect("reopen");
+        assert!(
+            !dead.exists(),
+            "a temp file no live process owns must not survive an open"
+        );
+        assert!(ours.exists(), "this process's own temp file is left alone");
+        assert_eq!(
+            reopened.bytes(),
+            4,
+            "the entry is the only thing the counter credits"
+        );
+        assert_eq!(reopened.get("abcdef").as_deref(), Some(&b"keep"[..]));
         let _ = fs::remove_dir_all(&dir);
     }
 

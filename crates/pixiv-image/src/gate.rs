@@ -16,7 +16,7 @@ use crate::Priority;
 struct Waiter {
     priority: Priority,
     seq: u64,
-    tx: oneshot::Sender<()>,
+    tx: oneshot::Sender<GatePermit>,
 }
 
 struct State {
@@ -60,18 +60,31 @@ impl PriorityGate {
             state.waiters.push(Waiter { priority, seq, tx });
             rx
         };
-        if rx.await.is_err() {
+        match rx.await {
+            // The released slot arrived as a value: hold exactly that permit.
+            Ok(permit) => permit,
             // The gate is gone; nothing to release.
-            return GatePermit { gate: None };
-        }
-        GatePermit {
-            gate: Some(Arc::clone(self)),
+            Err(_) => GatePermit { gate: None },
         }
     }
 
-    fn release(&self) {
-        let mut state = self.state.lock();
-        loop {
+    /// Hand this slot to the highest-priority waiter, or back to the pool.
+    ///
+    /// The permit itself travels through the channel. `()` in it was the defect:
+    /// a waiter cancelled between the hand-over and its poll drops the receiver,
+    /// the value vanished with it, and that slot was gone for the life of the
+    /// gate - one per cancellation until `acquire` waited forever. A `GatePermit`
+    /// instead comes back in the `Err` arm and puts the slot wherever it belongs,
+    /// here or in the next waiter's queue entry.
+    ///
+    /// The state lock is *not* held across the send: a waiter cancelled while
+    /// queued hands the permit straight back, and dropping it re-enters this
+    /// function, which behind a lock the sender still held would wait on itself
+    /// forever.
+    fn release(self: &Arc<Self>) {
+        // Queue bookkeeping under the lock, the hand-over outside it.
+        let waiter = {
+            let mut state = self.state.lock();
             let Some(pos) = state
                 .waiters
                 .iter()
@@ -79,15 +92,17 @@ impl PriorityGate {
                 .min_by_key(|(_, waiter)| (waiter.priority, waiter.seq))
                 .map(|(pos, _)| pos)
             else {
+                // Nobody is queued, so the slot returns to the pool.
                 state.available += 1;
                 return;
             };
-            let waiter = state.waiters.swap_remove(pos);
-            // A caller that was cancelled drops its receiver; pass the slot on
-            // rather than losing it.
-            if waiter.tx.send(()).is_ok() {
-                return;
-            }
+            state.waiters.swap_remove(pos)
+        };
+        // The lock is gone here on purpose - see the doc comment above.
+        if let Err(returned) = waiter.tx.send(GatePermit { gate: Some(Arc::clone(self)) }) {
+            // Dropping it *is* the re-entry: the slot goes to the next waiter, or
+            // back to the pool. Nothing is lost either way.
+            drop(returned);
         }
     }
 
@@ -115,7 +130,9 @@ mod tests {
     use super::PriorityGate;
     use crate::Priority;
     use parking_lot::Mutex;
+    use std::future::Future;
     use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     async fn wait_for(condition: impl Fn() -> bool) {
@@ -156,6 +173,77 @@ mod tests {
             task.await.expect("waiter task");
         }
         assert_eq!(*order.lock(), vec!["visible", "near", "prefetch"]);
+    }
+
+    /// Poll a future once, with a waker that wakes nobody.
+    ///
+    /// No runtime drives it afterwards, so the single poll is deterministic: the
+    /// caller is queued by it and never woken, which is the shape of one that has
+    /// already been cancelled.
+    fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+        let mut cx = Context::from_waker(Waker::noop());
+        std::pin::Pin::new(future).poll(&mut cx)
+    }
+
+    /// G43: a cancelled waiter returns its permit.
+    ///
+    /// The waiter is queued by exactly one poll and then dropped without a second
+    /// one, so the release below lands between the hand-over and the poll - the
+    /// window the old `send(())` lost the slot in. At capacity 1 a lost slot is
+    /// the whole gate: the last `acquire` would wait for a release that can never
+    /// come. The timeout is a hang detector, not an assertion about a duration.
+    #[tokio::test]
+    async fn a_cancelled_waiter_returns_its_permit() {
+        let gate = PriorityGate::new(1);
+        let held = gate.acquire(Priority::Visible).await;
+
+        let mut queued = Box::pin(gate.acquire(Priority::Near));
+        assert!(
+            poll_once(&mut queued).is_pending(),
+            "the second caller must queue behind the only permit"
+        );
+        assert_eq!(gate.waiting(), 1, "the caller is queued, not running");
+
+        // Release hands the permit to that queued caller; the caller then goes
+        // away without ever receiving it.
+        drop(held);
+        assert_eq!(gate.waiting(), 0, "the hand-over left the queue");
+        drop(queued);
+
+        // The slot came back through `GatePermit::drop`, so this resolves.
+        let again = tokio::time::timeout(Duration::from_secs(5), gate.acquire(Priority::Visible))
+            .await
+            .expect("a cancelled waiter returns its permit");
+        assert_eq!(gate.waiting(), 0, "nobody is left queued");
+        drop(again);
+    }
+
+    /// A waiter cancelled *while queued* hands the permit straight back out of
+    /// `send`, and that drop re-enters `release`.
+    ///
+    /// This is the shape that proves the lock discipline: with the state mutex
+    /// held across the send, the re-entry blocks on a lock the same thread is
+    /// holding and the gate is wedged for good. The timeout is a hang detector.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiter_cancelled_while_queued_does_not_wedge_the_gate() {
+        let gate = PriorityGate::new(1);
+        let held = gate.acquire(Priority::Visible).await;
+
+        let mut queued = Box::pin(gate.acquire(Priority::Near));
+        assert!(poll_once(&mut queued).is_pending());
+        // Cancelled before the hand-over: the queue entry is still there, its
+        // receiver is gone.
+        drop(queued);
+
+        // `release` finds the dead waiter and the slot has to come back out.
+        tokio::time::timeout(Duration::from_secs(5), async { drop(held) })
+            .await
+            .expect("a dead waiter must not wedge the release");
+        assert_eq!(gate.waiting(), 0, "the dead entry left the queue");
+        let again = tokio::time::timeout(Duration::from_secs(5), gate.acquire(Priority::Visible))
+            .await
+            .expect("the slot survived a waiter cancelled while queued");
+        drop(again);
     }
 
     #[tokio::test]

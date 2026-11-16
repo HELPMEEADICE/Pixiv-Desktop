@@ -24,8 +24,20 @@
 //!
 //! The catalogue is a pure function of a single integer seed (`catalog::SEED`)
 //! and the placeholder renderer is a pure function of `(width, height, seed)`.
-//! No clock, entropy or I/O is involved anywhere, so two runs — on two
-//! machines — produce exactly the same data and the same PNG bytes.
+//! No clock, entropy or I/O is involved anywhere, so the same seed produces the
+//! same data and the same pixels on every run.
+//!
+//! The same *bytes* hold for one target and one toolchain, not for every pair of
+//! machines. Every shaded pixel goes through f32 `sin`, `cos`, `sin_cos`, `powf`,
+//! `powi` and `sqrt` in `render.rs` (`sunset`, `bloom`, `poster`, `night`,
+//! `drift`), and those are libm calls: a different libm - another OS, another C
+//! runtime, an upgraded toolchain that re-implements them - may return a value
+//! that differs in the last bit, which a colour step rounds into a different
+//! pixel and a checksum into a different PNG. The catalogue identifiers, titles
+//! and geometry are portable; the pixel buffer is reproducible per (target,
+//! toolchain). Making it portable would mean a fixed-point or integer-only path
+//! for those calls, or a pinned software implementation of them instead of the
+//! platform's.
 
 mod catalog;
 mod prng;

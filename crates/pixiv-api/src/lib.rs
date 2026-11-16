@@ -227,10 +227,12 @@ struct Failure {
     retry_after: Option<Duration>,
     /// HTTP status of the attempt, when the failure came from one.
     ///
-    /// Kept because [`PixivError`] deliberately flattens a flagged `4xx` into
-    /// [`PixivError::Api`], and the one place that needs the raw code is CSRF
-    /// recovery: Pixiv answers a stale token with `422`, which is worth exactly
-    /// one retry after refreshing the token.
+    /// The error carries its own status now (`Http` keeps it even when the body
+    /// flags a message), so this field is only what the *retry* policy reads:
+    /// Pixiv answers a stale CSRF token with `422`, worth exactly one retry after
+    /// refreshing the token, and a mutation is only replayed on a `429`/`503` that
+    /// also sent a `Retry-After`. Both are a status question, not an error-variant
+    /// question.
     status: Option<u16>,
 }
 

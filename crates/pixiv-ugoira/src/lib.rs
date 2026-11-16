@@ -14,9 +14,19 @@
 //! resident cost of one film is `width * height * 4 * frames` bytes and it stays
 //! alive until the film is dropped. Frames are inflated and decoded one at a
 //! time — nothing ever holds a staging copy of the whole archive — so the peak is
-//! that same film footprint plus one entry. Exporting to GIF temporarily costs
-//! one extra frame copy because the GIF encoder takes ownership of the buffer it
-//! converts; that copy is released as soon as the frame is encoded.
+//! that same film footprint plus one entry.
+//!
+//! The two operations that cost more say by how much:
+//!
+//! * [`UgoiraFilm::export_gif`] holds the film, the encoded GIF and one frame copy
+//!   at once. The encoder takes ownership of the buffer it converts, so one frame
+//!   is copied while it is encoded and released as soon as it is; the GIF itself is
+//!   bounded by [`MAX_EXPORT_BYTES`], so the export peak is the film plus that
+//!   ceiling plus one frame — not "as much as the frames add up to". Before that
+//!   ceiling existed the encoder appended until it ran out of memory.
+//! * [`UgoiraFilm::scaled_to_width`] takes the film by value and returns a second,
+//!   smaller film, so both footprints are resident while both are alive. Asking
+//!   for the width it already has hands back the same film, buffer and all.
 //!
 //! # Hostile input
 //!
@@ -28,6 +38,8 @@
 //! enforced.
 
 use std::io::{Cursor, Read};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use image::codecs::gif::{GifEncoder, Repeat};
@@ -57,6 +69,17 @@ use zip::result::ZipError;
 /// 3. the `image` decoder itself is given the remaining budget as its `max_alloc`
 ///    limit, so an image header claiming absurd dimensions fails to allocate.
 pub const MAX_DECODED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Ceiling on the encoded bytes one [`UgoiraFilm::export_gif`] may produce: 256 MiB.
+///
+/// The decoded ceiling above admits a legitimate full-HD film, which is exactly
+/// why the encoder needs a ceiling of its own instead of borrowing that one: the
+/// GIF is a *second* copy of the film in palette indices, and nothing bounded it.
+/// A palettised 1920x1080 frame is at most ~2.9 MB of indices before LZW and Pixiv
+/// serves tens of frames, so 256 MiB is several times a real export — a 60-frame
+/// full-HD ugoira lands around a sixth of it — and still far below what one
+/// allocation should be allowed to grow to unattended.
+pub const MAX_EXPORT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Largest accepted frame edge, in pixels.
 ///
@@ -263,27 +286,39 @@ impl UgoiraFilm {
         self.frames.iter().map(|f| u64::from(f.delay_ms)).sum()
     }
 
-    /// A copy of this film scaled to `width` pixels wide, keeping the aspect ratio.
+    /// This film scaled to `width` pixels wide, keeping the aspect ratio.
     ///
-    /// `0`, the current width and anything wider return the film unchanged: a
-    /// viewer asking for a size it already holds must not pay for a second copy of
-    /// every frame, and an upscale would invent pixels the archive never carried.
+    /// `0`, the current width and anything wider return the film unchanged, and
+    /// with no copy of it: the film comes in by value, so the unchanged case is a
+    /// move. That is the whole reason for the signature — the `&self` form could
+    /// only honour the promise by cloning every frame, which is a second copy of a
+    /// film that can be 512 MiB (see [`MAX_DECODED_BYTES`]). A caller that wants to
+    /// keep the original clones it before the call, where the cost is visible.
+    ///
     /// Everything else is an area average — see [`area_average`] for why that
     /// filter and not a sample.
     #[must_use]
-    pub fn scaled_to_width(&self, width: u32) -> Self {
+    pub fn scaled_to_width(self, width: u32) -> Self {
         if width == 0 || width >= self.width {
-            return self.clone();
+            return self;
         }
-        let height = scaled_height(self.width, self.height, width);
-        let frames = self
-            .frames
-            .iter()
-            .map(|frame| FilmFrame {
-                file: frame.file.clone(),
-                // Timing is metadata; a smaller frame has the same delay.
-                delay_ms: frame.delay_ms,
-                rgba: area_average(&frame.rgba, self.width, self.height, width, height),
+        let Self {
+            width: source_width,
+            height: source_height,
+            frames,
+        } = self;
+        let height = scaled_height(source_width, source_height, width);
+        let frames = frames
+            .into_iter()
+            .map(|frame| {
+                let rgba =
+                    area_average(&frame.rgba, source_width, source_height, width, height);
+                FilmFrame {
+                    file: frame.file,
+                    // Timing is metadata; a smaller frame has the same delay.
+                    delay_ms: frame.delay_ms,
+                    rgba,
+                }
             })
             .collect();
         Self {
@@ -303,20 +338,47 @@ impl UgoiraFilm {
     /// # Errors
     ///
     /// [`UgoiraError::Encode`] when the film is empty or a frame's buffer does
-    /// not match `width * height * 4`, or the GIF encoder rejects the frame.
+    /// not match `width * height * 4`, when the GIF encoder rejects the frame, or
+    /// when the encoded GIF would pass [`MAX_EXPORT_BYTES`] — the buffer is bounded
+    /// as it is written, so the refusal costs the ceiling and not the machine.
     pub fn export_gif(&self) -> Result<Vec<u8>, UgoiraError> {
+        self.export_gif_within(MAX_EXPORT_BYTES)
+    }
+
+    /// [`Self::export_gif`] with the ceiling passed in.
+    ///
+    /// The ceiling is a parameter so the refusal can be asserted at a size a test
+    /// can afford: encoding 256 MiB of frames to prove that 256 MiB is refused
+    /// would make the gate the slowest thing in the crate.
+    fn export_gif_within(&self, ceiling: u64) -> Result<Vec<u8>, UgoiraError> {
         if self.frames.is_empty() {
             return Err(UgoiraError::Encode("没有任何帧可导出".to_owned()));
         }
 
         let mut out = Vec::new();
+        // Set by the writer when it refused bytes, so the encoder's `IoError` can
+        // be reported as the ceiling it hit rather than as a frame that failed.
+        let ceiling_hit = Arc::new(AtomicBool::new(false));
+        let encode_error = |err: image::ImageError| {
+            if ceiling_hit.load(Ordering::Relaxed) {
+                over_export_ceiling(ceiling)
+            } else {
+                UgoiraError::Encode(err.to_string())
+            }
+        };
         {
             // Scoped so the encoder drops (and writes the GIF trailer) before the
             // buffer is handed back.
-            let mut encoder = GifEncoder::new(&mut out);
+            let mut writer = LimitedWriter {
+                out: &mut out,
+                ceiling,
+                written: 0,
+                refused: Arc::clone(&ceiling_hit),
+            };
+            let mut encoder = GifEncoder::new(&mut writer);
             encoder
                 .set_repeat(Repeat::Infinite)
-                .map_err(|e| UgoiraError::Encode(e.to_string()))?;
+                .map_err(encode_error)?;
             for frame in &self.frames {
                 // The encoder needs an owned buffer, so this is the one place the
                 // film is copied; the copy is dropped as soon as it is encoded.
@@ -329,11 +391,60 @@ impl UgoiraFilm {
                     })?;
                 encoder
                     .encode_frame(Frame::from_parts(buffer, 0, 0, gif_delay(frame.delay_ms)))
-                    .map_err(|e| UgoiraError::Encode(format!("帧 {} 编码失败：{e}", frame.file)))?;
+                    .map_err(|e| {
+                        if ceiling_hit.load(Ordering::Relaxed) {
+                            over_export_ceiling(ceiling)
+                        } else {
+                            UgoiraError::Encode(format!("帧 {} 编码失败：{e}", frame.file))
+                        }
+                    })?;
             }
+        }
+        // The trailer is the last write, so the ceiling is checked once more after
+        // the encoder is gone: a GIF cut off before its trailer is not a smaller
+        // GIF, it is a broken one, and it must not be handed back as a success.
+        if ceiling_hit.load(Ordering::Relaxed) {
+            return Err(over_export_ceiling(ceiling));
         }
         Ok(out)
     }
+}
+
+/// A writer that refuses to grow its buffer past `ceiling` bytes.
+///
+/// The GIF encoder takes a `Write` and appends until it is done, which is how
+/// `export_gif` came to accumulate an unbounded second copy of the film. A
+/// `Vec` cannot carry that limit itself, so this is where it lives: the bytes are
+/// checked before they are appended, never after, and the flag tells the caller
+/// which refusal to report.
+struct LimitedWriter<'a> {
+    out: &'a mut Vec<u8>,
+    ceiling: u64,
+    written: u64,
+    refused: Arc<AtomicBool>,
+}
+
+impl std::io::Write for LimitedWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let want = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        if self.written.saturating_add(want) > self.ceiling {
+            self.refused.store(true, Ordering::Relaxed);
+            return Err(std::io::Error::other("导出体积上限"));
+        }
+        self.out.extend_from_slice(buf);
+        self.written = self.written.saturating_add(want);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // The buffer is memory: there is nothing to push anywhere.
+        Ok(())
+    }
+}
+
+/// The refusal for an export that would pass its ceiling.
+fn over_export_ceiling(ceiling: u64) -> UgoiraError {
+    UgoiraError::Encode(format!("导出体积超过 {ceiling} 字节上限"))
 }
 
 /// Read one ZIP entry without trusting its declared size.

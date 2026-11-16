@@ -14,7 +14,7 @@ use pixiv_types::{UgoiraFrame, UgoiraMeta};
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-use super::{MAX_DECODED_BYTES, UgoiraError, UgoiraFilm};
+use super::{MAX_DECODED_BYTES, MAX_EXPORT_BYTES, UgoiraError, UgoiraFilm};
 
 const RED: [u8; 4] = [220, 20, 20, 255];
 const GREEN: [u8; 4] = [20, 200, 60, 255];
@@ -489,7 +489,7 @@ fn empty_film_has_no_timeline() {
 #[test]
 fn scaled_to_width_keeps_the_aspect_ratio_and_frame_layout() {
     let film = film(&[200, 100, 300]); // 8x6, three frames
-    let scaled = film.scaled_to_width(4);
+    let scaled = film.clone().scaled_to_width(4);
     assert_eq!((scaled.width, scaled.height), (4, 3), "8x6 halved is 4x3");
     assert_eq!(scaled.frames.len(), 3);
     for (original, shrunk) in film.frames.iter().zip(&scaled.frames) {
@@ -499,13 +499,8 @@ fn scaled_to_width_keeps_the_aspect_ratio_and_frame_layout() {
     }
     // 8x6 at 3 wide is a height of 2.25, rounded to 2 rather than truncated to 2
     // by luck; the point is that it is nearest, and never zero.
-    assert_eq!(
-        (
-            film.scaled_to_width(3).width,
-            film.scaled_to_width(3).height
-        ),
-        (3, 2)
-    );
+    let three = film.clone().scaled_to_width(3);
+    assert_eq!((three.width, three.height), (3, 2));
     let sliver = film.scaled_to_width(1);
     assert_eq!(
         (sliver.width, sliver.height),
@@ -599,7 +594,7 @@ fn scaled_to_width_averages_the_pixels_each_destination_covers() {
 fn scaled_to_width_returns_the_film_unchanged_at_zero_equal_or_wider() {
     let film = film(&[200, 100, 300]);
     for width in [0, film.width, film.width + 4] {
-        let same = film.scaled_to_width(width);
+        let same = film.clone().scaled_to_width(width);
         assert_eq!(
             (same.width, same.height),
             (film.width, film.height),
@@ -610,6 +605,65 @@ fn scaled_to_width_returns_the_film_unchanged_at_zero_equal_or_wider() {
             assert_eq!(kept.file, original.file);
             assert_eq!(kept.delay_ms, original.delay_ms);
         }
+    }
+}
+
+/// The unchanged case must be a *move*, not a copy: the old `&self` signature
+/// cloned every frame to honour "returns the film unchanged", which for a film at
+/// the decode ceiling is a second 512 MiB.
+///
+/// The pointer is the observable, and it needs no clock: if the buffer had been
+/// copied, the returned film would own a different allocation.
+#[test]
+fn scaled_to_width_moves_the_film_it_does_not_copy_it() {
+    let film = raw_film(
+        4,
+        1,
+        (
+            "000000.png",
+            100,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        ),
+    );
+    let before = film.frames[0].rgba.as_ptr();
+    let same = film.scaled_to_width(4);
+    assert_eq!(
+        same.frames[0].rgba.as_ptr(),
+        before,
+        "the frame buffer is the same allocation, so the film was moved"
+    );
+}
+
+#[test]
+fn export_ceiling_is_two_hundred_fifty_six_mebibytes() {
+    assert_eq!(MAX_EXPORT_BYTES, 256 * 1024 * 1024);
+    // Above every film the decode ceiling admits: 60 full-HD frames are ~119 MiB
+    // of palette indices before LZW, and MAX_DECODED_BYTES allows exactly that.
+    assert!(MAX_EXPORT_BYTES > 1920 * 1080 * 60);
+}
+
+/// The export has a ceiling of its own. `out` used to grow with the frames while
+/// `MAX_DECODED_BYTES` (512 MiB) already admitted a legitimate film, so one export
+/// could hold a second copy of that film as palette indices.
+///
+/// The ceiling is a parameter here, so the refusal costs one frame instead of
+/// 256 MiB of encoding. On the old tree there is no such parameter and no refusal.
+#[test]
+fn export_gif_stops_at_the_ceiling_with_an_encode_error() {
+    let film = film(&[200, 100, 300]);
+    let gif = film.export_gif().expect("a legitimate film is under the ceiling");
+    assert!((gif.len() as u64) < MAX_EXPORT_BYTES);
+
+    // A ceiling the header alone cannot fit: the writer refuses and the error is
+    // `Encode`, not a truncated GIF handed back as if it were finished.
+    match film.export_gif_within(16) {
+        Err(UgoiraError::Encode(message)) => {
+            assert!(
+                message.contains("上限"),
+                "the message names the ceiling: {message}"
+            );
+        }
+        other => panic!("expected an Encode refusal, got {:?}", other.map(|g| g.len())),
     }
 }
 

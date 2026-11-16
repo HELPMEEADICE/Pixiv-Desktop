@@ -644,12 +644,18 @@ fn normalise(body: &str) -> String {
 }
 
 /// The value of `name="..."` inside one tag, or an empty string.
+///
+/// Only an attribute *name* can match: `<a title="href=x" href="y">` carries the
+/// text `href=` inside another attribute's value, and a plain substring search
+/// handed `title`'s value back as the link - which then surfaced in the caption
+/// as a URL the anchor never had. So the scan keeps its own state: skip quoted
+/// regions, and require the match to start where an attribute name may start.
 fn attribute(tag: &str, name: &str) -> String {
     let lower = tag.to_ascii_lowercase();
-    let needle = format!("{name}=");
-    let Some(at) = lower.find(&needle) else {
+    let Some(at) = find_attribute(&lower, &name.to_ascii_lowercase()) else {
         return String::new();
     };
+    let needle = format!("{name}=");
     let mut rest = &tag[at + needle.len()..];
     let quote = rest.chars().next();
     match quote {
@@ -665,6 +671,39 @@ fn attribute(tag: &str, name: &str) -> String {
             rest[..end].to_string()
         }
     }
+}
+
+/// Where `name=` starts as an attribute name, not as text inside a value.
+///
+/// Walks the tag once, tracking the quote it is inside: an unquoted stretch may
+/// hold a match only when it starts at a word boundary and the character before
+/// the name is not the one that ends another attribute's name (`-` in
+/// `data-href=`, `.` or `:` in a namespaced name). Comparison runs on the
+/// lowercased tag, so the caller passes a lowercased name and gets a byte offset
+/// that indexes either form.
+fn find_attribute(lower_tag: &str, lower_name: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    for (at, ch) in lower_tag.char_indices() {
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None => {
+                if !lower_tag[at..].starts_with(lower_name) {
+                    continue;
+                }
+                let after = lower_tag[at + lower_name.len()..].starts_with('=');
+                let before_is_name = !matches!(
+                    lower_tag[..at].chars().next_back(),
+                    Some('-' | '.' | ':' | '_')
+                );
+                if after && before_is_name {
+                    return Some(at);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Named and numeric entities. An unknown entity stays as written.
@@ -732,7 +771,11 @@ fn numeric_entity(body: &str) -> Option<char> {
         Some(hex) => u32::from_str_radix(hex, 16).ok()?,
         None => digits.parse::<u32>().ok()?,
     };
-    char::from_u32(value)
+    // `&#0;` (and `&#x0;`) is not a character the reader may hold: U+0000
+    // truncates C strings, breaks a Slint text model, and reads as nothing at
+    // all - so it stays literal text like any other entity this module does not
+    // know. `char::from_u32(0)` is `Some`, which is why the filter is explicit.
+    char::from_u32(value).filter(|ch| *ch != '\0')
 }
 
 #[cfg(test)]
@@ -1127,6 +1170,46 @@ mod tests {
         // Escaped markup decodes to visible text instead of being stripped.
         assert_eq!(clean_caption("&lt;b&gt;"), "<b>");
         assert_eq!(clean_caption(""), "");
+    }
+
+    /// `&#0;` must stay literal text: `char::from_u32(0)` is `Some`, so the old
+    /// entity decoder accepted it and put a NUL into a caption, where a Slint text
+    /// model truncates and the reader loses every character after it.
+    #[test]
+    fn a_nul_entity_stays_literal_text() {
+        assert_eq!(clean_caption("あ&#0;い"), "あ&#0;い");
+        assert_eq!(clean_caption("&#x0;"), "&#x0;");
+        assert_eq!(clean_caption("&#00;"), "&#00;");
+        // The entities around it still decode, and no NUL reaches the output.
+        let decoded = clean_caption("&#65;&#0;&#66;");
+        assert_eq!(decoded, "A&#0;B");
+        assert!(!decoded.contains('\u{0}'));
+    }
+
+    /// An `href=` that lives inside another attribute's value is not this
+    /// anchor's href.
+    ///
+    /// The old search was a substring find over the whole tag, so
+    /// `<a title="href=x" href="y">` reported `x` - a URL the anchor never
+    /// carried, printed as if it did.
+    #[test]
+    fn an_attribute_is_not_found_inside_another_attributes_value() {
+        assert_eq!(
+            clean_caption(r#"<a title="href=x" href="y">label</a>"#),
+            "label (y)"
+        );
+        assert_eq!(clean_caption(r#"<a title='href=x'>label</a>"#), "label");
+        assert_eq!(
+            clean_caption(r#"<a data-href="z" href="y">label</a>"#),
+            "label (y)"
+        );
+        // A value may hold the other quote character, and unquoted values still
+        // resolve: the rule is about attribute boundaries, not about quoting.
+        assert_eq!(clean_caption("<a href=\"a'b\">label</a>"), "label (a'b)");
+        assert_eq!(
+            clean_caption("<a href=https://x.example/>l</a>"),
+            "l (https://x.example/)"
+        );
     }
 
     #[test]
