@@ -306,7 +306,12 @@ export component NovelsPage inherits Rectangle {
             }
 
             // ---- results ----
-            if root.rows.length > 0 : Rectangle {
+            // A10: `state == 1` is "this search is in flight" and the loading block above is
+            // 120 px in the same column. Both used to render, so every search pushed the
+            // previous result list down 120 px and pulled it back when the payload landed —
+            // the page jumped instead of refreshing. The two are exclusive: while a search
+            // runs, the block above is what the column says.
+            if root.rows.length > 0 && root.state != 1 : Rectangle {
                 height: results-card.preferred-height;
                 border-radius: Theme.radius-lg;
                 background: Theme.layer;
