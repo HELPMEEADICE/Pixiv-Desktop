@@ -819,10 +819,10 @@ mod tests {
         for id in ["a", "b", "c", "d"] {
             covers.insert(id.to_string(), slint::Image::default());
         }
-        let order = ["a", "b", "c"].iter().copied();
+        let order = ["a", "b", "c"].map(str::to_string);
         // Only the first `keep` entries of the feed survive, and an id the feed no
         // longer lists is dropped even when it would have fitted.
-        assert_eq!(super::prune_covers(&mut covers, order, 2), 2);
+        assert_eq!(super::prune_covers(&mut covers, &order, 2), 2);
         assert!(covers.contains_key("a") && covers.contains_key("b"));
         assert!(!covers.contains_key("c") && !covers.contains_key("d"));
     }

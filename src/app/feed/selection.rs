@@ -252,7 +252,7 @@ mod tests {
             let Some(mut item) = model.row_data(row) else {
                 continue;
             };
-            if item.selected != true {
+            if !item.selected {
                 item.selected = true;
                 model.set_row_data(row, item);
             }

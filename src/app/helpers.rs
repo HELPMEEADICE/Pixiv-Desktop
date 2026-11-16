@@ -256,14 +256,14 @@ pub(crate) fn refill_ids(ids: &mut Vec<String>, items: &[Illust]) -> usize {
 /// entry, so an hour of browsing kept every cover alive for the rest of the
 /// session. `keep` bounds it even for an endless feed: the top of the feed is what
 /// a column rebuild can paint without waiting.
-pub(crate) fn prune_covers<'a>(
+pub(crate) fn prune_covers(
     covers: &mut HashMap<String, slint::Image>,
-    order: impl Iterator<Item = &'a str>,
+    order: &[String],
     keep: usize,
 ) -> usize {
     // Borrowed keys (B11): the set was 512 owned id strings, built and dropped on
     // every render, next to the id buffer the plan needs anyway.
-    let live: HashSet<&str> = order.take(keep).collect();
+    let live: HashSet<&str> = order.iter().take(keep).map(String::as_str).collect();
     let before = covers.len();
     covers.retain(|id, _| live.contains(id.as_str()));
     before - covers.len()

@@ -87,7 +87,7 @@ impl App {
             } = self;
             let mut ids = cover_ids.borrow_mut();
             refill_ids(&mut ids, items.as_slice());
-            prune_covers(covers, ids.iter().map(String::as_str), COVERS_KEEP);
+            prune_covers(covers, ids.as_slice(), COVERS_KEEP);
         }
         // A new page extends the columns it finds. Rebuilding them re-ran the
         // balancer over the whole feed, so every card above silently moved to a
@@ -930,7 +930,7 @@ mod tests {
         }
         let before = covers.len();
         assert_eq!(
-            prune_covers(&mut covers, ids.iter().map(String::as_str), COVERS_KEEP),
+            prune_covers(&mut covers, ids.as_slice(), COVERS_KEEP),
             0,
             "every cover the feed names stays"
         );
@@ -952,7 +952,7 @@ mod tests {
         covers.insert("pruned".to_string(), slint::Image::default());
         // The append path prunes too now; the model above must survive it.
         assert_eq!(
-            prune_covers(&mut covers, std::iter::once("a"), COVERS_KEEP),
+            prune_covers(&mut covers, &["a".to_string()], COVERS_KEEP),
             1
         );
 

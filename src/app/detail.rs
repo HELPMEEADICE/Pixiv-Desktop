@@ -1382,7 +1382,7 @@ mod tests {
                 let Some(mut item) = model.row_data(row) else {
                     continue;
                 };
-                if item.bookmarked != true {
+                if !item.bookmarked {
                     item.bookmarked = true;
                     model.set_row_data(row, item);
                 }
