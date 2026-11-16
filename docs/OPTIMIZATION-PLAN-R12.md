@@ -57,10 +57,13 @@ one into a rule that can fail.
   `Get-PageSet -For visual` (`:167`) contains `detail`, and the tracked baselines carry
   `detail-light`, `detail-dark` and the ugoira pair (re-read): the page is photographed and
   baselined, and has no accessibility floor and no gap check.
-* **The demo fixtures cannot see one class of real defect.** `fixtures/illust_detail.json`'s
-  `description` carries no markup at all, while the real `/ajax/illust/{id}` `description` and
-  `illustComment` are HTML with `<br />` and `<a href>`. `crates/pixiv-types/src/domain.rs:383-387`
-  copies it verbatim and `:1745`'s `clean_caption` is called on the novel path only (re-read).
+* **The captions are markup, and one fixture already proves it.** `fixtures/illust_detail.json`'s
+  `description` carries `<br />` nine times (JSON-escaped as `\u003Cbr \/\u003E`, which is why a
+  plain-text grep misses it) and no `<a href>`; the real `/ajax/illust/{id}` payload carries both.
+  `crates/pixiv-types/src/domain.rs:383-387` copies it verbatim and `:1745`'s `clean_caption` is
+  called on the novel path only, so the demo-and-fixture capture path has always had this defect in
+  front of it whenever a caption reached a `Text`. Track C adds a second fixture with a link as well,
+  because one of the two tag kinds was never exercised (corrected during the round by track C).
 
 ## 2 · Interface contract (frozen before anything is filled)
 
@@ -139,7 +142,7 @@ in place and moves `exists()` into `rt.spawn`. B8 derives rows from `summaries` 
 
 | ID | Evidence | Symptom | Sev |
 | --- | --- | --- | --- |
-| C1 | `crates/pixiv-types/src/domain.rs:383-387`, `:1745`; `ui/pages/detail.slint:494-495` | `from_detail` copies `description`/`illustComment` verbatim into `Illust.description`; the module's own `clean_caption` is called on the novel path only, and the detail page binds the string straight into a `Text`. Every work whose caption has a line break shows `<br />`, and a linked one shows `<a href="…">`. No fixture carries markup, so no capture can see it | **P1** |
+| C1 | `crates/pixiv-types/src/domain.rs:383-387`, `:1745`; `ui/pages/detail.slint:494-495` | `from_detail` copies `description`/`illustComment` verbatim into `Illust.description`; the module's own `clean_caption` is called on the novel path only, and the detail page binds the string straight into a `Text`. Every work whose caption has a line break shows `<br />`, and a linked one shows `<a href="…">` | **P1** |
 | C2 | `crates/pixiv-types/src/wire.rs:263-264,649-650` → `domain.rs:273-293,369-408` | `ai_type` reaches the wire and not `Illust`; `SearchItemWire` has no `ai_type` at all, though every row of `fixtures/search_artworks.json` carries `"aiType":1` | P2 |
 | C3 | `crates/pixiv-types/src/domain.rs:404-405`; no reader in `src/` | `is_masked` and `sl` are transported and read by nobody: a work Pixiv marks sensitive is shown unmasked, and the detail page hands out the `original` URL | P2 |
 | C4 | `crates/pixiv-types/src/domain.rs:426-458` | a ranking row carries its own `date` (`fixtures/ranking_daily.json`: `"2026年11月09日 00:00"`) and `illust_upload_timestamp`; `from_ranking` reads neither and never sets `create_date` (`from_search` sets it at `:439`), so the ranking is the one surface with no dates on any card | P3 |
