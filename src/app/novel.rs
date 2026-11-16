@@ -1857,8 +1857,12 @@ mod tests {
         assert_eq!(progress_percent(0, 4, -0.25), Some(0.0));
 
         // The shape `load_novels_page` publishes: -1 when the store has no row.
-        let none: f32 = None.unwrap_or(-1.0);
-        assert!(none < 0.0, "a row at -1 draws no rule");
+        // Written through a function so the literal-`None` lint cannot rewrite the
+        // shape being asserted (clippy::unnecessary_literal_unwrap).
+        fn published(stored: Option<f32>) -> f32 {
+            stored.unwrap_or(-1.0)
+        }
+        assert!(published(None) < 0.0, "a row at -1 draws no rule");
     }
 
     #[test]

@@ -639,7 +639,12 @@ fn export_ceiling_is_two_hundred_fifty_six_mebibytes() {
     assert_eq!(MAX_EXPORT_BYTES, 256 * 1024 * 1024);
     // Above every film the decode ceiling admits: 60 full-HD frames are ~119 MiB
     // of palette indices before LZW, and MAX_DECODED_BYTES allows exactly that.
-    assert!(MAX_EXPORT_BYTES > 1920 * 1080 * 60);
+    const {
+        assert!(MAX_EXPORT_BYTES > 1920 * 1080 * 60);
+    }
+    // The comparison above is a constant expression, so it is checked at compile
+    // time: a ceiling lowered under a legitimate film stops the build rather than a
+    // test run (clippy::assertions_on_constants).
 }
 
 /// The export has a ceiling of its own. `out` used to grow with the frames while
