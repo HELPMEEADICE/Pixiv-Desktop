@@ -1,4 +1,471 @@
 use super::*;
+use pixiv_types::domain::{SearchTarget, SortOrder};
+
+// ======================================================================
+// The search surface's controls (round twelve, plan §7 F1)
+//
+// Same file as the suggestion panel because they are the same surface: the box the
+// user types into, the panel that suggests words, and the three controls that say
+// which works a word returns. R11 froze the vocabulary and the Slint half and wired
+// neither; this is the Rust half.
+// ======================================================================
+
+/// The search surface's controls, as one value.
+///
+/// R11 froze the vocabulary (SortOrder/SearchTarget each carry ALL, labels(),
+/// as_param()) and the Slint half (two SegmentedControls and a related-tag strip in
+/// ui/pages/gallery.slint), and wired neither: sort_chosen, mode_chosen and
+/// related_tag reached nothing in src/. This is the Rust half of that seam — one
+/// value the page mirrors, so the three controls cannot drift apart.
+///
+/// The request is built here too (query), because the control index, the parameter
+/// the URL carries and the query the client is handed are three views of one
+/// decision: endpoint.rs serialises order={order} and s_mode={target} from exactly
+/// the two fields this type holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct FeedControls {
+    pub(crate) sort: SortOrder,
+    pub(crate) target: SearchTarget,
+    /// The "exclude AI" switch. It describes the *next* request only: the flag is
+    /// read when a request is issued, so flipping the switch never rewrites what is
+    /// on screen (plan §7 F4).
+    pub(crate) exclude_ai: bool,
+}
+
+impl FeedControls {
+    /// The sort group's name for assistive technology. A control may not invent its
+    /// own label (§3, G31), so the owner of sort-labels names it.
+    pub(crate) const SORT_GROUP: &'static str = "排序方式";
+    /// The match-mode group's name, for the same reason.
+    pub(crate) const TARGET_GROUP: &'static str = "匹配方式";
+    /// How many related tags the strip offers.
+    pub(crate) const RELATED_LIMIT: usize = 12;
+
+    pub(crate) fn sort_index(self) -> i32 {
+        sort_index_of(self.sort)
+    }
+
+    pub(crate) fn target_index(self) -> i32 {
+        target_index_of(self.target)
+    }
+
+    /// The same controls with the order the control at "index" offers.
+    ///
+    /// The page reports *the index the gesture picked* and never assigns its own
+    /// sort-index; this is the write that makes the report the model's.
+    pub(crate) fn with_sort_index(self, index: i32) -> Self {
+        Self {
+            sort: sort_at(index),
+            ..self
+        }
+    }
+
+    pub(crate) fn with_target_index(self, index: i32) -> Self {
+        Self {
+            target: target_at(index),
+            ..self
+        }
+    }
+
+    /// The query a search request carries.
+    ///
+    /// "page" is the caller's: a control change is page 1 (reload_feed resets the
+    /// cursor), a "load more" is the next one, and both spell the same request.
+    pub(crate) fn query(self, word: &str, page: u32) -> SearchQuery {
+        let mut query = SearchQuery::new(word);
+        query.sort = self.sort;
+        query.target = self.target;
+        query.page = page.max(1);
+        query
+    }
+
+    /// Drop AI-generated works from a page this request brought.
+    ///
+    /// Pixiv's search endpoint has no AI parameter, so "exclude AI" is a filter over
+    /// the reply — applied at landing time, which is what keeps it a property of the
+    /// request and not of the render: sending the switch on does not re-filter the
+    /// page already on screen.
+    pub(crate) fn without_ai(self, items: Vec<Illust>) -> Vec<Illust> {
+        if !self.exclude_ai {
+            return items;
+        }
+        items
+            .into_iter()
+            .filter(|illust| illust.ai_type == 0)
+            .collect()
+    }
+
+    /// The next state when a pick asks for a different page, or None when the value
+    /// on screen was picked again.
+    pub(crate) fn changed(self, next: Self) -> Option<Self> {
+        if next == self { None } else { Some(next) }
+    }
+}
+
+/// The order at a control index, clamped to the vocabulary: an index the page
+/// cannot have picked asks for the first order rather than for nothing.
+fn sort_at(index: i32) -> SortOrder {
+    if index < 0 {
+        return SortOrder::default();
+    }
+    SortOrder::from_index(index as usize).unwrap_or_default()
+}
+
+fn target_at(index: i32) -> SearchTarget {
+    if index < 0 {
+        return SearchTarget::default();
+    }
+    SearchTarget::from_index(index as usize).unwrap_or_default()
+}
+
+/// Where an order sits in the control, i.e. the index the control draws as current.
+pub(crate) fn sort_index_of(order: SortOrder) -> i32 {
+    SortOrder::ALL
+        .iter()
+        .position(|known| *known == order)
+        .map_or(0, |index| index as i32)
+}
+
+pub(crate) fn target_index_of(target: SearchTarget) -> i32 {
+    SearchTarget::ALL
+        .iter()
+        .position(|known| *known == target)
+        .map_or(0, |index| index as i32)
+}
+
+/// Related tags for a result page.
+///
+/// SearchBodyWire.related_tags (the list the web page draws) is dropped by
+/// SearchResult::from_wire, which lives in a crate this track may not edit; the
+/// page's own works carry the same information, so the row is built from what the
+/// reply actually brought: the tags most of those works share, minus the word that
+/// was searched for. Ties keep the order the tags first appeared in, so two replies
+/// with the same counts draw the same row instead of reshuffling it.
+pub(crate) fn related_tags(items: &[Illust], word: &str, limit: usize) -> Vec<String> {
+    let searched = word.trim().to_lowercase();
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for illust in items {
+        for tag in &illust.tags {
+            let name = tag.name.trim();
+            if name.is_empty() || name.to_lowercase() == searched {
+                continue;
+            }
+            match counts.iter_mut().find(|(known, _)| known == name) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((name.to_string(), 1)),
+            }
+        }
+    }
+    counts.sort_by(|left, right| right.1.cmp(&left.1));
+    counts
+        .into_iter()
+        .take(limit)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+impl App {
+    /// Put the frozen vocabulary and the current selection on the page.
+    ///
+    /// The values live here, never in the page: the page draws what it is handed,
+    /// reports the index a gesture picked, and this writes the model back (§2.1 U28).
+    pub(crate) fn publish_controls(&self) {
+        let ui = self.ui();
+        let sort: Vec<slint::SharedString> =
+            SortOrder::labels().into_iter().map(Into::into).collect();
+        ui.set_grid_sort_labels(ModelRc::from(Rc::new(VecModel::from(sort))));
+        ui.set_grid_sort_index(self.controls.sort_index());
+        ui.set_grid_sort_label(FeedControls::SORT_GROUP.into());
+        let target: Vec<slint::SharedString> = SearchTarget::labels()
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        ui.set_grid_mode_labels(ModelRc::from(Rc::new(VecModel::from(target))));
+        ui.set_grid_mode_index(self.controls.target_index());
+        ui.set_grid_mode_label(FeedControls::TARGET_GROUP.into());
+    }
+
+    /// The related-tag row of the page the reply belongs to.
+    pub(crate) fn publish_related_tags(&self, tags: Vec<String>) {
+        let labels: Vec<slint::SharedString> = tags.into_iter().map(Into::into).collect();
+        self.ui()
+            .set_grid_related_tags(ModelRc::from(Rc::new(VecModel::from(labels))));
+    }
+
+    /// A control was picked.
+    ///
+    /// Re-picking the index already on screen is not a new question and asks for
+    /// nothing; any real change clears the loaded-feed owner, and reload_feed is
+    /// where the cursor goes back to page 1 and the epoch is bumped — so a reply for
+    /// the old parameters can no longer land (the guard the rest of this round's
+    /// replies already use).
+    pub(crate) fn control_chosen(
+        shared: &Shared,
+        pick: impl FnOnce(FeedControls) -> FeedControls,
+    ) {
+        {
+            let mut app = shared.borrow_mut();
+            let Some(next) = app.controls.changed(pick(app.controls)) else {
+                return;
+            };
+            app.controls = next;
+            app.feed_owner = None;
+            app.publish_controls();
+        }
+        App::reload_feed(shared);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pixiv_types::domain::Tag;
+
+    fn work(id: u64, ai: u8, tags: &[&str]) -> Illust {
+        Illust {
+            id: pixiv_types::Id(id),
+            title: String::new(),
+            kind: IllustKind::Illustration,
+            page_count: 1,
+            width: 600,
+            height: 800,
+            urls: IllustUrls::default(),
+            author: Author::default(),
+            tags: tags.iter().map(|name| Tag::new(*name)).collect(),
+            description: String::new(),
+            create_date: None,
+            bookmark: Bookmark::default(),
+            stats: IllustStats::default(),
+            x_restrict: 0,
+            ai_type: ai,
+            alt: String::new(),
+            sl: 0,
+            is_masked: false,
+            is_bookmarkable: true,
+        }
+    }
+
+    /// The endpoint's own query string, read from its source.
+    ///
+    /// endpoint::search is private to pixiv-api and this track may not edit a crate
+    /// to publish it, so the contract is read where it is written. That keeps one
+    /// assertion end to end — control index, as_param(), the URL the client
+    /// actually requests — instead of three assertions each half proving itself.
+    fn endpoint_search_template() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/pixiv-api/src/endpoint.rs");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        source
+            .lines()
+            .find(|line| line.contains("&order={order}"))
+            .expect("the search endpoint must build one URL")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn every_control_index_reaches_the_endpoint_url() {
+        let template = endpoint_search_template();
+        assert!(
+            template.contains("order={order}") && template.contains("s_mode={target}"),
+            "the search URL must carry the two parameters the controls fill:\n{template}"
+        );
+        let controls = FeedControls::default();
+        for index in 0..SortOrder::ALL.len() {
+            let order = SortOrder::from_index(index).expect("every index has an order");
+            let query = controls.with_sort_index(index as i32).query("landscape", 1);
+            let url = template
+                .replace("{order}", query.sort.as_param())
+                .replace("{target}", query.target.as_param());
+            assert!(
+                url.contains(&format!("order={}", order.as_param())),
+                "index {index} must reach the URL as order={}:\n{url}",
+                order.as_param()
+            );
+        }
+        for index in 0..SearchTarget::ALL.len() {
+            let target = SearchTarget::from_index(index).expect("every index has a mode");
+            let query = controls.with_target_index(index as i32).query("landscape", 1);
+            let url = template
+                .replace("{order}", query.sort.as_param())
+                .replace("{target}", query.target.as_param());
+            assert!(
+                url.contains(&format!("s_mode={}", target.as_param())),
+                "index {index} must reach the URL as s_mode={}:\n{url}",
+                target.as_param()
+            );
+        }
+    }
+
+    #[test]
+    fn the_labels_are_the_vocabulary_in_its_own_order() {
+        let labels = SortOrder::labels();
+        assert_eq!(labels.len(), SortOrder::ALL.len());
+        for (index, order) in SortOrder::ALL.iter().enumerate() {
+            assert_eq!(labels[index], order.label(), "the label list is the order list");
+            assert_eq!(
+                FeedControls::default().with_sort_index(index as i32).sort,
+                *order,
+                "the control's index addresses the same array its labels came from"
+            );
+        }
+        let modes = SearchTarget::labels();
+        assert_eq!(modes.len(), SearchTarget::ALL.len());
+        for (index, target) in SearchTarget::ALL.iter().enumerate() {
+            assert_eq!(modes[index], target.label());
+            assert_eq!(
+                FeedControls::default().with_target_index(index as i32).target,
+                *target
+            );
+        }
+    }
+
+    #[test]
+    fn every_selectable_index_has_its_own_parameter() {
+        let mut seen: Vec<&str> = Vec::new();
+        for order in SortOrder::ALL {
+            let param = order.as_param();
+            assert!(!param.is_empty(), "an order without a parameter is a dead control");
+            assert!(!seen.contains(&param), "{param} is carried by two control indices");
+            seen.push(param);
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for target in SearchTarget::ALL {
+            let param = target.as_param();
+            assert!(!param.is_empty(), "a mode without a parameter is a dead control");
+            assert!(!seen.contains(&param), "{param} is carried by two indices");
+            seen.push(param);
+        }
+    }
+
+    #[test]
+    fn a_control_index_round_trips_through_the_index_it_draws() {
+        for (index, _) in SortOrder::ALL.iter().enumerate() {
+            let controls = FeedControls::default().with_sort_index(index as i32);
+            assert_eq!(controls.sort_index(), index as i32);
+        }
+        for (index, _) in SearchTarget::ALL.iter().enumerate() {
+            let controls = FeedControls::default().with_target_index(index as i32);
+            assert_eq!(controls.target_index(), index as i32);
+        }
+        // An index past the vocabulary is not a crash and not a wrong order.
+        assert_eq!(
+            FeedControls::default().with_sort_index(99).sort,
+            SortOrder::default()
+        );
+        assert_eq!(
+            FeedControls::default().with_target_index(-3).target,
+            SearchTarget::default()
+        );
+    }
+
+    #[test]
+    fn a_changed_control_asks_for_the_first_page_and_an_unchanged_one_for_nothing() {
+        let current = FeedControls::default();
+        assert_eq!(
+            current.with_sort_index(current.sort_index()),
+            current,
+            "re-picking the index on screen is not a new question"
+        );
+        let next = current.with_sort_index(2);
+        assert_ne!(next, current);
+        let next = current.changed(next).expect("a new order asks again");
+        assert_eq!(next.sort, SortOrder::PopularDesc);
+        let query = next.query("landscape", 1);
+        assert_eq!(query.sort.as_param(), "popular_d");
+        assert_eq!(
+            current.changed(current.with_sort_index(0)),
+            None,
+            "the page already on screen asked the question the pick repeats"
+        );
+    }
+
+    #[test]
+    fn the_query_carries_the_controls_and_the_word() {
+        let controls = FeedControls {
+            sort: SortOrder::DateAsc,
+            target: SearchTarget::TitleCaption,
+            exclude_ai: false,
+        };
+        let query = controls.query("landscape", 3);
+        assert_eq!(query.word, "landscape");
+        assert_eq!(query.page, 3);
+        assert_eq!(query.sort.as_param(), "date_a");
+        assert_eq!(query.target.as_param(), "s_tc");
+        // Page zero is not a page: the cursor starts at one and a clamp keeps a bug
+        // in it from asking Pixiv for p=0.
+        assert_eq!(controls.query("w", 0).page, 1);
+    }
+
+    #[test]
+    fn related_tags_rank_by_how_many_works_share_them_and_skip_the_searched_word() {
+        let items = vec![
+            work(1, 0, &["landscape", "桜", "空"]),
+            work(2, 0, &["landscape", "空"]),
+            work(3, 0, &["landscape", "猫"]),
+        ];
+        assert_eq!(
+            related_tags(&items, "landscape", 3),
+            vec!["空".to_string(), "桜".to_string(), "猫".to_string()],
+            "the two works that share 空 rank above the two singletons, which keep \
+             first-seen order"
+        );
+        assert_eq!(
+            related_tags(&items, "landscape", 1),
+            vec!["空".to_string()],
+            "the limit is the strip's width, and it is a limit"
+        );
+    }
+
+    #[test]
+    fn an_empty_result_offers_no_related_tags() {
+        assert!(
+            related_tags(&[], "landscape", FeedControls::RELATED_LIMIT).is_empty(),
+            "an empty tag list is what keeps the strip off the page"
+        );
+        let one = vec![work(1, 0, &["landscape"])];
+        assert!(
+            related_tags(&one, "landscape", FeedControls::RELATED_LIMIT).is_empty(),
+            "a page whose only tag is the searched word offers nothing to click"
+        );
+    }
+
+    #[test]
+    fn the_ai_switch_filters_the_reply_and_never_the_page_on_screen() {
+        let items = vec![work(1, 0, &[]), work(2, 1, &[]), work(3, 2, &[])];
+        let off = FeedControls::default();
+        assert_eq!(
+            off.without_ai(items.clone()).len(),
+            3,
+            "the switch off keeps every work"
+        );
+        let on = FeedControls {
+            exclude_ai: true,
+            ..off
+        };
+        let kept: Vec<u64> = on
+            .without_ai(items)
+            .into_iter()
+            .map(|illust| illust.id.get())
+            .collect();
+        assert_eq!(kept, vec![1], "AI-assisted (2) is AI too, not only AI-generated");
+    }
+
+    #[test]
+    fn the_same_value_twice_is_one_state() {
+        let controls = FeedControls {
+            sort: SortOrder::PopularDesc,
+            target: SearchTarget::TagPartial,
+            exclude_ai: true,
+        };
+        assert_eq!(controls, controls.with_sort_index(2).with_target_index(1));
+        let mut flipped = controls;
+        flipped.exclude_ai = false;
+        assert_ne!(flipped, controls, "the AI switch is part of the state");
+    }
+}
+
 
 /// Search-suggestion panel state.
 pub(crate) struct SuggestState {
@@ -368,7 +835,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+mod control_tests {
     use super::*;
 
     fn item(tag: &str, active: bool) -> SuggestionItem {

@@ -2,6 +2,10 @@ use super::*;
 
 pub(crate) fn install(app: &Shared) {
     let ui = app.borrow().ui();
+    // F1: the vocabulary the two segmented controls draw is this crate's, and it
+    // exists before any request does — a control that appears only after the first
+    // reply is a control the user cannot use to make it.
+    app.borrow().publish_controls();
     {
         let shared = app.clone();
         ui.on_toggle_bookmark(move |id| {
@@ -88,6 +92,35 @@ pub(crate) fn install(app: &Shared) {
     {
         let shared = app.clone();
         ui.on_load_more(move || App::load_more(&shared));
+    }
+
+    // ---- round twelve (F1): the search surface's controls ----
+    //
+    // The page reports the index a gesture picked and never writes its own
+    // `sort-index`/`mode-index`; these three write the model and then ask for page 1
+    // again through `reload_feed`, which is the one place that resets the cursor and
+    // bumps the epoch — so a reply for the old parameters cannot land.
+    {
+        let shared = app.clone();
+        ui.on_search_sort_chosen(move |index| {
+            App::control_chosen(&shared, |controls| controls.with_sort_index(index));
+        });
+    }
+
+    {
+        let shared = app.clone();
+        ui.on_search_mode_chosen(move |index| {
+            App::control_chosen(&shared, |controls| controls.with_target_index(index));
+        });
+    }
+
+    {
+        let shared = app.clone();
+        ui.on_search_related_tag_chosen(move |tag| {
+            // One implementation of "run this word", shared with the search box, the
+            // suggestion panel and the palette.
+            App::submit_search(&shared, tag.as_str());
+        });
     }
 
     {

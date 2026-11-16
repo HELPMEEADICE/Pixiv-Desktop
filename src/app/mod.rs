@@ -145,6 +145,9 @@ pub(crate) struct App {
     loading_more: bool,
     search_word: String,
     ranking_kind: RankingKind,
+    /// Round twelve (F1): the order, the match mode and the AI switch of the search
+    /// surface. One value, because the three controls describe one request.
+    controls: FeedControls,
 
     // ---- home, discovery, suggestions and the native profile ----
     home: HomeBands,

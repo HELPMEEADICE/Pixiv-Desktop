@@ -128,6 +128,10 @@ impl App {
                 let word = app.search_word.clone();
                 let kind = app.ranking_kind;
                 let session = app.session.clone();
+                // Round twelve (F1): the request carries the controls as they are
+                // *now*, so a reply that lands belongs to the parameters that asked
+                // for it even if the user moved the control meanwhile.
+                let controls = app.controls;
                 drop(app);
 
                 // The history page needs no network at all, so it is answered
@@ -140,9 +144,9 @@ impl App {
                                 .await
                                 .map(|rows| rows.into_iter().map(|r| r.illust).collect()),
                             Destination::Search => client
-                                .search(&SearchQuery::new(&word))
+                                .search(&controls.query(&word, 1))
                                 .await
-                                .map(|r| r.items),
+                                .map(|reply| controls.without_ai(reply.items)),
                             // Never fall back to a default id: user 0 does not
                             // exist, so the request would either 404 or answer
                             // somebody else's page.
@@ -177,6 +181,18 @@ impl App {
                         match result {
                             Ok(items) => {
                                 app.feed_owner = Some(app.route);
+                                // The related-tag row describes the page that just
+                                // arrived, so it is published before the rows are.
+                                let tags = if page == Destination::Search {
+                                    related_tags(
+                                        &items,
+                                        &word,
+                                        FeedControls::RELATED_LIMIT,
+                                    )
+                                } else {
+                                    Vec::new()
+                                };
+                                app.publish_related_tags(tags);
                                 app.render_feed(items, false);
                             }
                             Err(error) => app.show_feed_error(&describe_session_error(&error)),
@@ -191,6 +207,10 @@ impl App {
 
 impl App {
     pub(crate) fn show_feed_error(&mut self, message: &str) {
+        // A failed read has nothing to describe: the related-tag strip belongs to a
+        // page that arrived, and a stale one over an error block would offer to
+        // search a result set nobody has.
+        self.publish_related_tags(Vec::new());
         let ui = self.ui();
         ui.set_grid_state(3);
         ui.set_grid_state_title("载入失败".into());
@@ -220,11 +240,10 @@ impl App {
                 .into_iter()
                 .map(|row| row.illust)
                 .collect(),
-            Destination::Search => {
-                let mut query = SearchQuery::new(&self.search_word);
-                query.page = page;
-                self.demo.search(&query).items
-            }
+            Destination::Search => self
+                .demo
+                .search(&self.controls.query(&self.search_word, page))
+                .items,
             Destination::Bookmarks => self.demo.bookmarks().items,
             _ => {
                 let all = self.demo.feed();
@@ -323,6 +342,7 @@ impl App {
                 let word = app.search_word.clone();
                 let kind = app.ranking_kind;
                 let session = app.session.clone();
+                let controls = app.controls;
                 drop(app);
                 rt.spawn(async move {
                     let result = match client {
@@ -331,11 +351,10 @@ impl App {
                                 .ranking(kind, cursor)
                                 .await
                                 .map(|rows| rows.into_iter().map(|r| r.illust).collect()),
-                            Destination::Search => {
-                                let mut query = SearchQuery::new(&word);
-                                query.page = cursor;
-                                client.search(&query).await.map(|r| r.items)
-                            }
+                            Destination::Search => client
+                                .search(&controls.query(&word, cursor))
+                                .await
+                                .map(|reply| controls.without_ai(reply.items)),
                             Destination::Bookmarks => match session.user_id {
                                 Some(user) => {
                                     client.bookmarks(user, false, cursor).await.map(|r| r.items)

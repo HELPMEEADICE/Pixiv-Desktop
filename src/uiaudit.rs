@@ -3011,25 +3011,20 @@ last in its component:\n{}",
     /// `show-header`, the two label knobs, the three cursors and the four other pages'
     /// `tag-cursor` / `focus-request` declarations are the same class — an `in` the shell
     /// never fills — and they are recorded here rather than left outside the rule's reach.
+    ///
+    /// Round twelve's track D bound the ten `GalleryPage` declarations of plan §7 F1
+    /// (`main.slint` hands the page the two label lists, the two cursors and the three
+    /// verbs) and deleted their entries; the nine that remain are the ones no track in
+    /// this round owned.
     #[test]
     fn every_page_property_is_bound_by_the_shell() {
         // (page, declaration, who owes it)
-        const KNOWN_UNBOUND: [(&str, &str, &str); 19] = [
+        const KNOWN_UNBOUND: [(&str, &str, &str); 9] = [
             ("DetailPage", "focus-request", "the U21 focus counter, filed for the shell"),
             ("DetailPage", "tag-cursor", "R11's tag strip, filed for track D"),
-            ("GalleryPage", "mode-chosen", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
-            ("GalleryPage", "mode-index", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
-            ("GalleryPage", "mode-label", "the selected mode's name, filed for track D"),
-            ("GalleryPage", "mode-labels", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
             ("GalleryPage", "recent-cursor", "the recent-tag strip, filed for track D"),
             ("GalleryPage", "related-cursor", "the related-tag strip, filed for track D"),
-            ("GalleryPage", "related-tag-chosen", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
-            ("GalleryPage", "related-tags", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
             ("GalleryPage", "show-header", "defaults to true on every instantiation, filed"),
-            ("GalleryPage", "sort-chosen", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
-            ("GalleryPage", "sort-index", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
-            ("GalleryPage", "sort-label", "the selected order's name, filed for track D"),
-            ("GalleryPage", "sort-labels", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
             ("GalleryPage", "tag-cursor", "R11's tag strip, filed for track D"),
             ("HomePage", "tag-cursor", "the home tag strip, filed for track D"),
             ("NovelPage", "tag-cursor", "the novel tag strip, filed for track D"),

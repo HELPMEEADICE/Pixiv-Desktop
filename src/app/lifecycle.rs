@@ -363,6 +363,7 @@ impl App {
             loading_more: false,
             search_word: String::new(),
             ranking_kind: RankingKind::Daily,
+            controls: FeedControls::default(),
             home: HomeBands::loading(),
             discovery: DiscoveryBands::default(),
             suggest: SuggestState::default(),

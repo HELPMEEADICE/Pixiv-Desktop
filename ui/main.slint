@@ -395,6 +395,18 @@ export component AppWindow inherits Window {
     in property <[string]> recent-searches: [];
     in property <[string]> grid-tags: [];
     in property <string> grid-active-tag: "";
+    /// Round twelve (F1): the search surface's two segmented groups and the
+    /// related-tag strip. The labels are SortOrder::labels() / SearchTarget::labels()
+    /// in Rust, never a second copy here: the index the control reports is an index
+    /// into the array the owner filled, and the parameter the URL carries comes from
+    /// the same value (src/app/feed/controls.rs).
+    in property <[string]> grid-sort-labels: [];
+    in property <int> grid-sort-index: 0;
+    in property <string> grid-sort-label: "";
+    in property <[string]> grid-mode-labels: [];
+    in property <int> grid-mode-index: 0;
+    in property <string> grid-mode-label: "";
+    in property <[string]> grid-related-tags: [];
     in property <bool> grid-loading-more: false;
     in property <int> ranking-filter: 0;
     in property <[string]> ranking-filters: [];
@@ -485,6 +497,11 @@ export component AppWindow inherits Window {
     callback grid-action();
     callback load-more();
     callback select-ranking-filter(int);
+    /// F1: the two segmented groups and the related-tag strip. The page reports the
+    /// index a gesture picked; Rust owns the value and reloads page 1 of the search.
+    callback search-sort-chosen(int);
+    callback search-mode-chosen(int);
+    callback search-related-tag-chosen(string);
 
     // ---- detail ----
     callback detail-back();
@@ -1163,6 +1180,20 @@ export component AppWindow inherits Window {
                         open-user(id) => { root.open-profile(id); }
                         filters: root.page == Destination.Ranking ? root.ranking-filters : [];
                         active-filter: root.page == Destination.Ranking ? root.ranking-filter : -1;
+                        // F1: the sort and match-mode groups belong to the search page —
+                        // it is the only destination whose request takes order and s_mode —
+                        // so every other page is handed an empty label list and draws no
+                        // row at all.
+                        sort-labels: root.page == Destination.Search ? root.grid-sort-labels : [];
+                        sort-index: root.grid-sort-index;
+                        sort-label: root.grid-sort-label;
+                        mode-labels: root.page == Destination.Search ? root.grid-mode-labels : [];
+                        mode-index: root.grid-mode-index;
+                        mode-label: root.grid-mode-label;
+                        related-tags: root.grid-related-tags;
+                        sort-chosen(i) => { root.search-sort-chosen(i); }
+                        mode-chosen(i) => { root.search-mode-chosen(i); }
+                        related-tag-chosen(t) => { root.search-related-tag-chosen(t); }
                         loading-more: root.grid-loading-more;
                         scroll-y <=> root.grid-scroll-y;
                         measured(w) => { root.grid-measured(w); }
