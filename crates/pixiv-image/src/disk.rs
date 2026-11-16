@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tracing::warn;
 
 /// One entry the tier believes it holds.
@@ -43,6 +43,21 @@ pub(crate) struct DiskTier {
     index: Mutex<BTreeMap<String, IndexEntry>>,
     /// Distinguishes two writers' temp files for one key.
     writes: AtomicU64,
+    /// Writers run together; a sweep runs alone.
+    ///
+    /// The index mutex decides the arithmetic, and it is held only for the
+    /// arithmetic now (O11). What it cannot decide is whether a file may be
+    /// unlinked while another writer's bytes are on their way to it: a sweep that
+    /// deletes a file whose entry is not yet credited is exactly the drift O2
+    /// removed from the counter. So every unlink path - remove, clear,
+    /// enforce_budget - takes this guard for writing, and put takes it for reading
+    /// across create, write, fsync and rename. Six writers then wait only for the
+    /// disk, and a trim waits for the writers to finish - never the other way
+    /// round, because no path holds the index while asking for this one.
+    sweep: RwLock<()>,
+    /// How long a test write pretends to take. Test-only.
+    #[cfg(test)]
+    slow_write: Mutex<Option<std::time::Duration>>,
     /// Directory scans this tier has run, the opening one included.
     ///
     /// O2's acceptance is "zero on the hot path", and a counter is the only way to
@@ -87,6 +102,9 @@ impl DiskTier {
             bytes: AtomicU64::new(bytes),
             index: Mutex::new(index),
             writes: AtomicU64::new(0),
+            sweep: RwLock::new(()),
+            #[cfg(test)]
+            slow_write: Mutex::new(None),
             // The scan above is this tier's first, and counting it keeps
             // `scans()` honest about what a hot path is allowed to cost.
             scans: AtomicU64::new(1),
@@ -101,6 +119,27 @@ impl DiskTier {
     fn scan(&self) -> io::Result<Vec<(SystemTime, u64, PathBuf)>> {
         self.scans.fetch_add(1, Ordering::Relaxed);
         walk(&self.dir)
+    }
+
+    /// Make every write take this long. Test-only: O11's measurement.
+    #[cfg(test)]
+    pub(crate) fn slow_write(&self, pause: std::time::Duration) {
+        *self.slow_write.lock() = Some(pause);
+    }
+
+    /// Write one temp file, with the test's artificial cost in front of it.
+    fn write_temp(&self, temp: &Path, bytes: &[u8]) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            // Copied out of the mutex before sleeping: the guard from a
+            // scrutinee lives to the end of its `if let`, and holding it across the
+            // sleep would serialise the very writers this seam exists to release.
+            let pause = *self.slow_write.lock();
+            if let Some(pause) = pause {
+                std::thread::sleep(pause);
+            }
+        }
+        write_synced(temp, bytes)
     }
 
     /// Directory scans run so far, the opening one included. Test-only.
@@ -175,32 +214,43 @@ impl DiskTier {
     /// nothing behind it.
     ///
     /// Cost: four syscalls per entry (create, write, fsync, rename) where it used
-    /// to be two (write, rename), and the whole sequence runs under the index lock
-    /// so the counter and the entry list can never disagree. The tier is written
-    /// from a blocking pool, one entry at a time; a cover is worth the fsync and the
-    /// serialisation is what makes [`Self::enforce_budget`] exact.
+    /// to be two (write, rename). The tier is written from a blocking pool, and a
+    /// cover is worth the fsync.
+    ///
+    /// The index lock covers the arithmetic and nothing else (O11). It used to be
+    /// held across create, write, sync_all and rename as well, so six concurrent
+    /// covers queued behind six fsyncs: one disk queue where six were available.
+    /// What still has to be exclusive is the *unlink* side - a trim or a clear that
+    /// deletes a file this call has not credited yet is the drift O2 removed from
+    /// the counter - and that is what `sweep` is for: writers share it, sweeps take
+    /// it alone.
     pub(crate) fn put(&self, key: &str, bytes: &[u8]) -> io::Result<()> {
         let path = self.path(key);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        // Held for the write as well as the arithmetic: a file that exists but is
-        // not yet credited is a file a concurrent trim may delete and then
-        // subtract, which is the same drift in the other direction.
-        let mut index = self.index.lock();
-        // The previous size comes from the index, not from a `metadata` call: the
-        // entry is either there or it is not, and one fewer stat per write is what
-        // O2 was for.
-        let previous = index.get(key).map_or(0, |entry| entry.size);
+        let added = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        // Held across the file's whole life: a file that exists but is not yet
+        // credited is a file a concurrent trim may delete and then subtract, which
+        // is the same drift in the other direction.
+        let writing = self.sweep.read();
         let temp = self.temp_path(&path);
-        let written = write_synced(&temp, bytes).and_then(|()| fs::rename(&temp, &path));
+        let written = self
+            .write_temp(&temp, bytes)
+            .and_then(|()| fs::rename(&temp, &path));
         if let Err(err) = written {
             // Never leave a temp file behind on the failure path: the next scan
             // would find it, and the entry it belongs to was never credited.
             let _ = fs::remove_file(&temp);
             return Err(err);
         }
-        let added = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        // The previous size comes from the index, not from a `metadata` call: the
+        // entry is either there or it is not, and one fewer stat per write is what
+        // O2 was for. It is read *here*, under the same lock as the insert, because
+        // two writers of one key that both read the old size before either inserted
+        // would each credit the file and the counter would count it twice.
+        let mut index = self.index.lock();
+        let previous = index.get(key).map_or(0, |entry| entry.size);
         index.insert(
             key.to_owned(),
             IndexEntry {
@@ -210,7 +260,14 @@ impl DiskTier {
         );
         self.bytes.fetch_add(added, Ordering::Relaxed);
         let _ = self.subtract(previous);
+        drop(index);
+        drop(writing);
         if self.bytes() > self.budget {
+            // The sweep guard *before* the index lock: every path that unlinks a
+            // file takes the two in that order, and no path holds the index while
+            // asking for the sweep - which is why this cannot deadlock.
+            let _sweep = self.sweep.write();
+            let mut index = self.index.lock();
             self.enforce_budget(&mut index);
         }
         Ok(())
@@ -237,6 +294,9 @@ impl DiskTier {
     /// `parking_lot` does not poison, so a panic elsewhere cannot wedge the tier.
     pub(crate) fn remove(&self, key: &str) -> io::Result<()> {
         let path = self.path(key);
+        // The guard first, because this call unlinks: a writer that is between its
+        // rename and its credit must not lose the file underneath itself.
+        let _sweep = self.sweep.write();
         let mut index = self.index.lock();
         let freed = index.get(key).map_or(0, |entry| entry.size);
         match fs::remove_file(&path) {
@@ -265,6 +325,9 @@ impl DiskTier {
     /// was the defect when the lock only covered the arithmetic and a concurrent
     /// `put` could be erased by it.
     pub(crate) fn clear(&self) -> io::Result<u64> {
+        // Alone in the tier: no writer may be between a rename and its credit, and
+        // no concurrent remove may be unlinking the files this pass is counting.
+        let _sweep = self.sweep.write();
         let mut index = self.index.lock();
         let entries = self.scan()?;
         let mut reclaimed = 0;
@@ -280,7 +343,11 @@ impl DiskTier {
         Ok(reclaimed)
     }
 
-    /// Drop oldest entries until the budget holds. The caller holds the index lock.
+    /// Drop oldest entries until the budget holds.
+    ///
+    /// The caller holds the index lock *and* the `sweep` guard for writing, in that
+    /// acquisition order (sweep, then index): this is the one path that unlinks
+    /// files a writer may still be crediting.
     ///
     /// `store(total)` used to be the defect here: the total came from a snapshot and
     /// was written back over a counter that `put`/`remove` maintain with
@@ -562,6 +629,57 @@ mod tests {
             "the counter must describe the tree, not a stale total"
         );
         assert!(on_disk <= 16, "trimming kept the budget: {on_disk} bytes");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// O11: six concurrent writers pay for one write, not six.
+    ///
+    /// `put` used to hold the index lock across create, write, sync_all and
+    /// rename, so six covers serialised behind six fsyncs. With a 20 ms write
+    /// injected, six writers finish in about one sleep instead of six - and the
+    /// accounting still describes the tree, which is the invariant the lock was
+    /// widened for in the first place (O2).
+    #[test]
+    fn six_concurrent_writers_do_not_queue_behind_one_write() {
+        use std::sync::Arc;
+        const SLOW: std::time::Duration = std::time::Duration::from_millis(20);
+        let dir = scratch("disk-parallel-put");
+        let tier = Arc::new(DiskTier::open(dir.clone(), 1 << 20).expect("disk tier"));
+        tier.slow_write(SLOW);
+
+        let started = std::time::Instant::now();
+        let mut writers = Vec::new();
+        for index in 0..6u32 {
+            let tier = Arc::clone(&tier);
+            writers.push(std::thread::spawn(move || {
+                tier.put(&format!("{index:02}-entry"), b"1234")
+                    .expect("put");
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= SLOW,
+            "the injected write cost was paid: {elapsed:?}"
+        );
+        assert!(
+            elapsed < SLOW * 3,
+            "six writers queued behind one another: {elapsed:?}, not about {SLOW:?}"
+        );
+
+        let on_disk: u64 = super::walk(&dir)
+            .expect("walk")
+            .iter()
+            .map(|entry| entry.1)
+            .sum();
+        assert_eq!(
+            tier.bytes(),
+            on_disk,
+            "the counter still describes the tree"
+        );
+        assert_eq!(tier.indexed().len(), 6, "every writer published its entry");
         let _ = fs::remove_dir_all(&dir);
     }
 

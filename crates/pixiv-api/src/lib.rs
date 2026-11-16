@@ -88,6 +88,16 @@ impl Session {
 pub struct ClientConfig {
     /// Per-request timeout.
     pub timeout: Duration,
+    /// Ceiling on one *call*, retries and backoff sleeps included.
+    ///
+    /// [`Self::timeout`] bounds one attempt and there are `max_retries + 1` of
+    /// those, so a connection that never answers used to hold a caller for three
+    /// timeouts plus the two sleeps between them - the download worker wrote the
+    /// same number in its own comment ("up to 3 x 20 s",
+    /// `crates/pixiv-download/src/worker.rs:95`). The deadline is the figure a
+    /// queue and a UI can plan around, and it is what makes the retry budget
+    /// finite rather than merely exponential.
+    pub call_deadline: Duration,
     /// Extra attempts after the first, for retryable failures only.
     pub max_retries: u32,
     /// Minimum spacing between outbound requests, to stay polite to Pixiv.
@@ -113,6 +123,21 @@ pub struct ClientConfig {
     pub max_image_bytes: u64,
 }
 
+/// 25 s: see [`ClientConfig::call_deadline`].
+///
+/// One `timeout` of 20 s plus the backoff between the second and third attempt,
+/// with a few seconds of slack for a slow DNS answer or a large image. It is
+/// deliberately below `timeout * (max_retries + 1)`: the point of the deadline is
+/// that the worst case stops being the product of the knobs.
+pub const DEFAULT_CALL_DEADLINE: Duration = Duration::from_secs(25);
+
+/// The most one call may spend asleep between attempts, all attempts together.
+///
+/// [`mapping::backoff_delay`] caps a single sleep at five seconds; this caps the
+/// sum, which is the half that used to be unbounded: a `Retry-After` chain with
+/// `max_retries` raised had no ceiling at all.
+const BACKOFF_CAP: Duration = Duration::from_secs(15);
+
 /// 32 MiB: see [`ClientConfig::max_body_bytes`].
 pub const DEFAULT_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 /// 64 MiB: see [`ClientConfig::max_image_bytes`].
@@ -122,6 +147,7 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(20),
+            call_deadline: DEFAULT_CALL_DEADLINE,
             max_retries: 2,
             min_interval: Duration::from_millis(250),
             user_agent: DEFAULT_USER_AGENT.to_string(),
@@ -175,6 +201,12 @@ struct FakeWire {
     replies: Vec<(String, u16, Option<String>, String)>,
     /// Every URL this client asked for, in the order it asked.
     seen: Vec<String>,
+    /// How long one scripted attempt takes to answer.
+    ///
+    /// The table answers instantly, and a deadline is only observable against an
+    /// attempt that does not: this stands in for the connection that never replies
+    /// without opening a socket.
+    hang: Option<Duration>,
 }
 
 impl std::fmt::Debug for Client {
@@ -985,27 +1017,58 @@ impl Client {
     /// answers 403. Returns the body plus its `Content-Type` when present.
     pub async fn fetch_bytes(&self, url: &str) -> Result<(Vec<u8>, Option<String>), PixivError> {
         let max_retries = self.inner.config.max_retries;
-        let mut attempt = 0;
-        loop {
-            let failure = match self.attempt_bytes(url).await {
-                Ok(body) => return Ok(body),
-                Err(failure) => failure,
-            };
-            if !mapping::should_retry(attempt, max_retries, &failure.error) {
-                return Err(failure.error);
+        self.within_deadline(async {
+            let mut attempt = 0;
+            let mut slept = Duration::ZERO;
+            loop {
+                let failure = match self.attempt_bytes(url).await {
+                    Ok(body) => return Ok(body),
+                    Err(failure) => failure,
+                };
+                if !mapping::should_retry(attempt, max_retries, &failure.error) {
+                    return Err(failure.error);
+                }
+                let pause = mapping::backoff_delay(attempt, failure.retry_after);
+                if slept.saturating_add(pause) > BACKOFF_CAP {
+                    // The budget for waiting is spent. A caller that waited longer
+                    // would learn nothing new: the attempts that remain are the
+                    // same request against the same failure.
+                    return Err(failure.error);
+                }
+                tracing::debug!(
+                    attempt,
+                    url = %url,
+                    error = %failure.error,
+                    "重试 Pixiv 二进制请求"
+                );
+                tokio::time::sleep(pause).await;
+                slept = slept.saturating_add(pause);
+                attempt += 1;
             }
-            tracing::debug!(
-                attempt,
-                url = %url,
-                error = %failure.error,
-                "重试 Pixiv 二进制请求"
-            );
-            tokio::time::sleep(mapping::backoff_delay(attempt, failure.retry_after)).await;
-            attempt += 1;
-        }
+        })
+        .await
     }
 
     // -- transport --------------------------------------------------------
+
+    /// One call's whole retry budget, under the per-call deadline (O10).
+    ///
+    /// [`ClientConfig::timeout`] bounds a single attempt; this bounds the call,
+    /// so "three attempts of twenty seconds each" can no longer be what a caller
+    /// waits for.
+    async fn within_deadline<T>(
+        &self,
+        work: impl std::future::Future<Output = Result<T, PixivError>>,
+    ) -> Result<T, PixivError> {
+        let deadline = self.inner.config.call_deadline;
+        match tokio::time::timeout(deadline, work).await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(PixivError::Network(format!(
+                "一次请求超过 {} ms 上限",
+                deadline.as_millis()
+            ))),
+        }
+    }
 
     /// Refuse to send anything when the endpoint needs credentials we do not
     /// have. This happens before a socket is opened: retrying a request that
@@ -1079,7 +1142,9 @@ impl Client {
     async fn attempt_text(&self, url: &str) -> Result<String, Failure> {
         #[cfg(test)]
         {
-            if let Some((status, _, body)) = self.scripted(url) {
+            let reply = self.scripted(url);
+            self.scripted_hang().await;
+            if let Some((status, _, body)) = reply {
                 return finish_text(status, body, None);
             }
         }
@@ -1103,7 +1168,9 @@ impl Client {
     async fn attempt_bytes(&self, url: &str) -> Result<(Vec<u8>, Option<String>), Failure> {
         #[cfg(test)]
         {
-            if let Some((status, content_type, body)) = self.scripted(url) {
+            let reply = self.scripted(url);
+            self.scripted_hang().await;
+            if let Some((status, content_type, body)) = reply {
                 return finish_bytes(status, body.into_bytes(), content_type, None);
             }
         }
@@ -1144,7 +1211,9 @@ impl Client {
     ) -> Result<String, Failure> {
         #[cfg(test)]
         {
-            if let Some((status, _, body)) = self.scripted(url) {
+            let reply = self.scripted(url);
+            self.scripted_hang().await;
+            if let Some((status, _, body)) = reply {
                 return finish_post(status, body, None);
             }
         }
@@ -1171,24 +1240,35 @@ impl Client {
     /// `GET` returning the response body, retrying retryable failures.
     async fn get_text(&self, url: &str) -> Result<String, PixivError> {
         let max_retries = self.inner.config.max_retries;
-        let mut attempt = 0;
-        loop {
-            let failure = match self.attempt_text(url).await {
-                Ok(text) => return Ok(text),
-                Err(failure) => failure,
-            };
-            if !mapping::should_retry(attempt, max_retries, &failure.error) {
-                return Err(failure.error);
+        self.within_deadline(async {
+            let mut attempt = 0;
+            let mut slept = Duration::ZERO;
+            loop {
+                let failure = match self.attempt_text(url).await {
+                    Ok(text) => return Ok(text),
+                    Err(failure) => failure,
+                };
+                if !mapping::should_retry(attempt, max_retries, &failure.error) {
+                    return Err(failure.error);
+                }
+                let pause = mapping::backoff_delay(attempt, failure.retry_after);
+                if slept.saturating_add(pause) > BACKOFF_CAP {
+                    // See `fetch_bytes`: the sum of the sleeps is bounded as well
+                    // as each one.
+                    return Err(failure.error);
+                }
+                tracing::debug!(
+                    attempt,
+                    url = %url,
+                    error = %failure.error,
+                    "重试 Pixiv 请求"
+                );
+                tokio::time::sleep(pause).await;
+                slept = slept.saturating_add(pause);
+                attempt += 1;
             }
-            tracing::debug!(
-                attempt,
-                url = %url,
-                error = %failure.error,
-                "重试 Pixiv 请求"
-            );
-            tokio::time::sleep(mapping::backoff_delay(attempt, failure.retry_after)).await;
-            attempt += 1;
-        }
+        })
+        .await
     }
 
     /// `POST` a form body.
@@ -1229,45 +1309,69 @@ impl Client {
         content_type: &'static str,
     ) -> Result<String, MutationFailure> {
         let max_retries = self.inner.config.max_retries;
-        let mut attempt = 0;
-        let mut sent = 0_u32;
-        let mut refreshed = false;
-        loop {
-            sent = sent.saturating_add(1);
-            let failure = match self.attempt_post(url, body.clone(), content_type).await {
-                Ok(text) => return Ok(text),
-                Err(failure) => failure,
-            };
-            // One attempt that produced no reply at all is a mutation of unknown
-            // state; two attempts prove the request reached the server at least once.
-            let possibly_applied = sent > 1 || failure.status.is_none();
-            if !refreshed && failure.is_csrf_rejection() {
-                // The session token rotated out from under us. Refresh once and
-                // replay: retrying with the same token would just fail again.
-                tracing::debug!(url = %url, "CSRF 校验失败，刷新令牌后重试");
-                self.refresh_identity()
-                    .await
-                    .map_err(|error| MutationFailure {
-                        error,
+        let deadline = self.inner.config.call_deadline;
+        let attempts = async {
+            let mut attempt = 0;
+            let mut sent = 0_u32;
+            let mut refreshed = false;
+            let mut slept = Duration::ZERO;
+            loop {
+                sent = sent.saturating_add(1);
+                let failure = match self.attempt_post(url, body.clone(), content_type).await {
+                    Ok(text) => return Ok(text),
+                    Err(failure) => failure,
+                };
+                // One attempt that produced no reply at all is a mutation of unknown
+                // state; two attempts prove the request reached the server at least once.
+                let possibly_applied = sent > 1 || failure.status.is_none();
+                if !refreshed && failure.is_csrf_rejection() {
+                    // The session token rotated out from under us. Refresh once and
+                    // replay: retrying with the same token would just fail again.
+                    tracing::debug!(url = %url, "CSRF 校验失败，刷新令牌后重试");
+                    self.refresh_identity()
+                        .await
+                        .map_err(|error| MutationFailure {
+                            error,
+                            possibly_applied,
+                        })?;
+                    refreshed = true;
+                    continue;
+                }
+                if !should_retry_mutation(attempt, max_retries, &failure) {
+                    return Err(MutationFailure {
+                        error: failure.error,
                         possibly_applied,
-                    })?;
-                refreshed = true;
-                continue;
+                    });
+                }
+                let pause = mapping::backoff_delay(attempt, failure.retry_after);
+                if slept.saturating_add(pause) > BACKOFF_CAP {
+                    return Err(MutationFailure {
+                        error: failure.error,
+                        possibly_applied,
+                    });
+                }
+                tracing::debug!(
+                    attempt,
+                    url = %url,
+                    error = %failure.error,
+                    "服务端要求稍后重试写操作"
+                );
+                tokio::time::sleep(pause).await;
+                slept = slept.saturating_add(pause);
+                attempt += 1;
             }
-            if !should_retry_mutation(attempt, max_retries, &failure) {
-                return Err(MutationFailure {
-                    error: failure.error,
-                    possibly_applied,
-                });
-            }
-            tracing::debug!(
-                attempt,
-                url = %url,
-                error = %failure.error,
-                "服务端要求稍后重试写操作"
-            );
-            tokio::time::sleep(mapping::backoff_delay(attempt, failure.retry_after)).await;
-            attempt += 1;
+        };
+        match tokio::time::timeout(deadline, attempts).await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(MutationFailure {
+                error: PixivError::Network(format!(
+                    "一次请求超过 {} ms 上限",
+                    deadline.as_millis()
+                )),
+                // A request whose reply never arrived has an unknown outcome: the
+                // caller re-reads the server instead of assuming either way.
+                possibly_applied: true,
+            }),
         }
     }
 }
@@ -1281,6 +1385,13 @@ impl Client {
     /// bug, and panicking here is the only way to keep that bug from turning into
     /// a live request (the whole point of the fake is that the suite never opens a
     /// socket).
+    async fn scripted_hang(&self) {
+        let hang = self.inner.fake.lock().as_ref().and_then(|fake| fake.hang);
+        if let Some(hang) = hang {
+            tokio::time::sleep(hang).await;
+        }
+    }
+
     fn scripted(&self, url: &str) -> Option<(u16, Option<String>, String)> {
         let mut fake = self.inner.fake.lock();
         let fake = fake.as_mut()?;
@@ -1403,6 +1514,125 @@ mod tests {
         );
     }
 
+    // -- O10: one deadline per call, not one per attempt --------------------
+
+    /// A client whose scripted attempt hangs, and a deadline small enough to
+    /// measure in a test.
+    fn hanging_client(deadline: Duration, hang: Duration) -> (Client, String) {
+        let url = endpoint::street_recommend_tags();
+        let client = Client::new(
+            ClientConfig {
+                min_interval: Duration::ZERO,
+                call_deadline: deadline,
+                ..ClientConfig::default()
+            },
+            Session::default(),
+        )
+        .expect("client builds");
+        *client.inner.fake.lock() = Some(FakeWire {
+            replies: vec![(url.clone(), 200, None, "{}".to_string())],
+            seen: Vec::new(),
+            hang: Some(hang),
+        });
+        (client, url)
+    }
+
+    /// O10: one call, one deadline. Retry used to be per *attempt* twenty
+    /// seconds with nothing above it, so a connection that never answered held the
+    /// caller for three of them plus the sleeps between - the download worker's
+    /// own comment said "up to 3 x 20 s".
+    #[tokio::test]
+    async fn a_call_that_never_answers_returns_within_the_deadline() {
+        const DEADLINE: Duration = Duration::from_millis(150);
+        let (client, url) = hanging_client(DEADLINE, Duration::from_secs(6));
+
+        let started = std::time::Instant::now();
+        let outcome = client.get_text(&url).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(outcome, Err(PixivError::Network(_))),
+            "the deadline is a network failure: {outcome:?}"
+        );
+        assert!(elapsed >= DEADLINE, "the deadline elapsed: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "returned after {elapsed:?}, but the attempt hangs for 6 s"
+        );
+        // The deadline fired inside the first attempt, so no retry could start a
+        // second one: one request left this process, not three.
+        assert_eq!(asked(&client).len(), 1, "one attempt, not the whole budget");
+    }
+
+    /// The production numbers, asserted rather than remembered: twenty-five
+    /// seconds is below the product of the knobs it replaces, and the sleeps a
+    /// full retry series may take stay under the cap the loop enforces.
+    #[test]
+    fn the_default_budget_cannot_outlast_the_deadline() {
+        let config = ClientConfig::default();
+        assert_eq!(DEFAULT_CALL_DEADLINE, Duration::from_secs(25));
+        assert_eq!(config.call_deadline, DEFAULT_CALL_DEADLINE);
+        let per_attempt_worst = config.timeout * (config.max_retries + 1);
+        assert!(
+            config.call_deadline < per_attempt_worst,
+            "the deadline must bind: {per_attempt_worst:?} per attempt budget"
+        );
+
+        // Every sleep this budget can take on its own terms fits under the cap:
+        // 0.3 s then 0.6 s.
+        let slept: Duration = (0..config.max_retries)
+            .map(|attempt| mapping::backoff_delay(attempt, None))
+            .sum();
+        assert!(slept <= BACKOFF_CAP, "{slept:?} against {BACKOFF_CAP:?}");
+
+        // The cap is not decorative. A server that names its wait twice at the
+        // largest hint the mapping accepts - sixty seconds, twice - asks for more
+        // than the whole budget, and the loop returns instead of sleeping through
+        // it. That is the case this constant exists for.
+        let hinted: Duration = (0..config.max_retries)
+            .map(|attempt| mapping::backoff_delay(attempt, Some(Duration::from_secs(86_400))))
+            .sum();
+        assert!(hinted > BACKOFF_CAP, "{hinted:?} must not fit the cap");
+    }
+
+    /// The measured half of the same claim: a transport that always answers a
+    /// retryable failure costs the caller the backoff sleeps and nothing more.
+    #[tokio::test]
+    async fn a_series_of_failures_sleeps_less_than_the_cap() {
+        let url = endpoint::street_recommend_tags();
+        let client = Client::new(
+            ClientConfig {
+                min_interval: Duration::ZERO,
+                ..ClientConfig::default()
+            },
+            Session::default(),
+        )
+        .expect("client builds");
+        *client.inner.fake.lock() = Some(FakeWire {
+            replies: vec![(url.clone(), 500, None, "{}".to_string())],
+            seen: Vec::new(),
+            hang: None,
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = client.get_text(&url).await;
+        let elapsed = started.elapsed();
+
+        assert!(outcome.is_err(), "a 500 is not an answer");
+        assert_eq!(
+            asked(&client).len(),
+            3,
+            "the first attempt plus max_retries"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "the two backoff sleeps happened: {elapsed:?}"
+        );
+        assert!(
+            elapsed <= BACKOFF_CAP,
+            "one call waited {elapsed:?}, over the {BACKOFF_CAP:?} cap"
+        );
+    }
     // -- credential gating -------------------------------------------------
 
     #[tokio::test]
@@ -1589,6 +1819,7 @@ mod tests {
                 .map(|(url, status, body)| ((*url).to_string(), *status, None, (*body).to_string()))
                 .collect(),
             seen: Vec::new(),
+            hang: None,
         });
         client
     }

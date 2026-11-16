@@ -14,12 +14,14 @@
 //! * Nothing sensitive is ever written: the session cookie lives in a separate
 //!   file with restrictive handling, not in SQLite.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, MutexGuard};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{CachedStatement, Connection, OptionalExtension, params};
 use thiserror::Error;
 
 mod novel;
@@ -85,6 +87,39 @@ pub struct StoreStats {
 
 /// How long a statement waits for the write lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
+
+// ---------------------------------------------------------------------------
+// The statements on the hot paths
+// ---------------------------------------------------------------------------
+//
+// One copy each, named, because the prepared-statement cache is keyed by the SQL
+// text and the query plan is a fact about that text: a query written out twice
+// would be compiled twice, and G34's EXPLAIN QUERY PLAN assertion would then be
+// asserting about a different string from the one the store runs.
+
+const SQL_SEARCH_HISTORY: &str = "SELECT word FROM search_history ORDER BY seq DESC LIMIT ?1";
+const SQL_SEARCH_NEXT_SEQ: &str = "SELECT COALESCE(MAX(seq), 0) + 1 FROM search_history";
+const SQL_PUSH_SEARCH: &str =
+    "INSERT INTO search_history (word, searched_at, seq) VALUES (?1, ?2, ?3)
+     ON CONFLICT(word) DO UPDATE SET searched_at = excluded.searched_at, seq = excluded.seq";
+const SQL_VIEW_NEXT_SEQ: &str = "SELECT COALESCE(MAX(seq), 0) + 1 FROM view_history";
+const SQL_RECORD_VIEW: &str =
+    "INSERT INTO view_history (illust_id, title, author, thumb_url, viewed_at, seq)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+     ON CONFLICT(illust_id) DO UPDATE SET
+         title     = excluded.title,
+         author    = excluded.author,
+         thumb_url = excluded.thumb_url,
+         viewed_at = excluded.viewed_at,
+         seq       = excluded.seq";
+const SQL_VIEW_HISTORY: &str = "SELECT illust_id, title, author, thumb_url, viewed_at
+     FROM view_history
+     ORDER BY viewed_at DESC, seq DESC
+     LIMIT ?1";
+const SQL_DOWNLOADS: &str = "SELECT id, illust_id, title, author, page_index, file_path, created_at
+     FROM downloads
+     ORDER BY created_at DESC, id DESC
+     LIMIT ?1";
 
 /// Migration step 1: every table this crate ever reads or writes.
 ///
@@ -232,6 +267,7 @@ fn prepare(mut conn: Connection) -> Result<Store, StoreError> {
     apply_migrations(&mut conn)?;
     Ok(Store {
         inner: Arc::new(Mutex::new(conn)),
+        cache: Arc::new(StatementCache::default()),
     })
 }
 
@@ -248,10 +284,39 @@ fn limit_to_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
+/// The prepared-statement cache, plus the count O9 is measured by.
+///
+/// `rusqlite` already keeps compiled statements on the connection
+/// (`Connection::prepare_cached`), keyed by SQL text. It does not report whether a
+/// call was a hit, and O9's acceptance is a number, so the store keeps the mirror
+/// image of that cache: the set of texts this connection has already compiled, and
+/// a counter of the misses. The two cannot drift apart here because every text is a
+/// constant, the cache holds more statements than this crate has, and the only
+/// thing that empties a rusqlite statement cache is a schema change - which happens
+/// in `apply_migrations`, before any `Store` exists to ask a question through.
+#[derive(Debug, Default)]
+struct StatementCache {
+    compiled: Mutex<BTreeSet<&'static str>>,
+    compiles: AtomicU64,
+}
+
+impl StatementCache {
+    /// Record one request for `sql`; `true` when it has to be compiled.
+    fn miss(&self, sql: &'static str) -> bool {
+        if !self.compiled.lock().insert(sql) {
+            return false;
+        }
+        self.compiles.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+}
+
 /// The local database.
 #[derive(Clone, Debug)]
 pub struct Store {
     inner: Arc<Mutex<Connection>>,
+    /// Compiled statements, and how many compiles there were.
+    cache: Arc<StatementCache>,
 }
 
 impl Store {
@@ -288,13 +353,34 @@ impl Store {
         self.inner.lock()
     }
 
+    /// One statement, from the cache when it is already compiled.
+    ///
+    /// Every query on a hot path goes through here, which is why the count is the
+    /// measurement O9 asks for: a second call with the same SQL text costs no
+    /// compile at all.
+    fn cached<'a>(
+        &self,
+        conn: &'a Connection,
+        sql: &'static str,
+    ) -> Result<CachedStatement<'a>, StoreError> {
+        if self.cache.miss(sql) {
+            tracing::trace!(sql, "已编译并缓存一条语句");
+        }
+        Ok(conn.prepare_cached(sql)?)
+    }
+
+    /// Statements this store has compiled. Test-only: O9's unit.
+    #[cfg(test)]
+    pub(crate) fn compiles(&self) -> u64 {
+        self.cache.compiles.load(Ordering::Relaxed)
+    }
+
     // ---- search history -------------------------------------------------
 
     /// Most recent search words, newest first, de-duplicated.
     pub fn search_history(&self, limit: usize) -> Result<Vec<String>, StoreError> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare("SELECT word FROM search_history ORDER BY seq DESC LIMIT ?1")?;
+        let mut stmt = self.cached(&conn, SQL_SEARCH_HISTORY)?;
         let rows = stmt.query_map(params![limit_to_i64(limit)], |row| row.get::<_, String>(0))?;
         let mut words = Vec::new();
         for word in rows {
@@ -311,16 +397,11 @@ impl Store {
         }
         let conn = self.lock();
         // A monotonic sequence keeps "front" exact even within one second.
-        let next_seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM search_history",
-            [],
-            |row| row.get(0),
-        )?;
-        conn.execute(
-            "INSERT INTO search_history (word, searched_at, seq) VALUES (?1, ?2, ?3)
-             ON CONFLICT(word) DO UPDATE SET searched_at = excluded.searched_at, seq = excluded.seq",
-            params![word, now_secs(), next_seq],
-        )?;
+        let next_seq: i64 = self
+            .cached(&conn, SQL_SEARCH_NEXT_SEQ)?
+            .query_row([], |row| row.get(0))?;
+        self.cached(&conn, SQL_PUSH_SEARCH)?
+            .execute(params![word, now_secs(), next_seq])?;
         Ok(())
     }
 
@@ -335,40 +416,23 @@ impl Store {
     /// Record a view; repeat views update the timestamp rather than duplicating.
     pub fn record_view(&self, entry: &HistoryEntry) -> Result<(), StoreError> {
         let conn = self.lock();
-        let next_seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM view_history",
-            [],
-            |row| row.get(0),
-        )?;
-        conn.execute(
-            "INSERT INTO view_history (illust_id, title, author, thumb_url, viewed_at, seq)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(illust_id) DO UPDATE SET
-                 title     = excluded.title,
-                 author    = excluded.author,
-                 thumb_url = excluded.thumb_url,
-                 viewed_at = excluded.viewed_at,
-                 seq       = excluded.seq",
-            params![
-                entry.illust_id,
-                entry.title,
-                entry.author,
-                entry.thumb_url,
-                entry.viewed_at,
-                next_seq,
-            ],
-        )?;
+        let next_seq: i64 = self
+            .cached(&conn, SQL_VIEW_NEXT_SEQ)?
+            .query_row([], |row| row.get(0))?;
+        self.cached(&conn, SQL_RECORD_VIEW)?.execute(params![
+            entry.illust_id,
+            entry.title,
+            entry.author,
+            entry.thumb_url,
+            entry.viewed_at,
+            next_seq,
+        ])?;
         Ok(())
     }
 
     pub fn view_history(&self, limit: usize) -> Result<Vec<HistoryEntry>, StoreError> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT illust_id, title, author, thumb_url, viewed_at
-             FROM view_history
-             ORDER BY viewed_at DESC, seq DESC
-             LIMIT ?1",
-        )?;
+        let mut stmt = self.cached(&conn, SQL_VIEW_HISTORY)?;
         let rows = stmt.query_map(params![limit_to_i64(limit)], |row| {
             Ok(HistoryEntry {
                 illust_id: row.get(0)?,
@@ -451,12 +515,7 @@ impl Store {
 
     pub fn downloads(&self, limit: usize) -> Result<Vec<DownloadRecord>, StoreError> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, illust_id, title, author, page_index, file_path, created_at
-             FROM downloads
-             ORDER BY created_at DESC, id DESC
-             LIMIT ?1",
-        )?;
+        let mut stmt = self.cached(&conn, SQL_DOWNLOADS)?;
         let rows = stmt.query_map(params![limit_to_i64(limit)], |row| {
             Ok(DownloadRecord {
                 id: row.get(0)?,
@@ -532,19 +591,105 @@ mod tests {
     }
 
     /// The plan SQLite actually uses, as one printable line per row.
-    fn plan_of(conn: &Connection, sql: &str) -> String {
+    ///
+    /// `args` are bound, because a plan for a statement with a parameter cannot be
+    /// obtained without one: SQLite refuses to explain an unbound `LIMIT`.
+    fn plan_of(conn: &Connection, sql: &str, args: &[i64]) -> String {
         let mut stmt = conn
             .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
             .expect("query plan");
         let rows = stmt
-            .query_map([], |row| row.get::<_, String>(3))
+            .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+                row.get::<_, String>(3)
+            })
             .expect("plan rows");
         rows.map(|row| row.expect("plan detail"))
             .collect::<Vec<_>>()
             .join(" | ")
     }
 
-    /// `MAX(seq)` and `ORDER BY seq DESC` must not read the whole table. Before
+    /// O9: the second write-then-read of the same shape compiles nothing.
+    ///
+    /// Every query on this path goes through the prepared-statement cache, so the
+    /// three texts are compiled once per store and then reused. The first round
+    /// trip is the control: without it a counter stuck at zero would pass.
+    #[test]
+    fn a_second_history_write_and_read_compiles_no_statement() {
+        let s = store();
+        s.record_view(&view("1", 10)).unwrap();
+        assert_eq!(s.view_history(5).unwrap().len(), 1);
+        let warm = s.compiles();
+        assert_eq!(warm, 3, "MAX(seq), the insert and the read, once each");
+
+        s.record_view(&view("2", 20)).unwrap();
+        assert_eq!(s.view_history(5).unwrap().len(), 2);
+        assert_eq!(
+            s.compiles(),
+            warm,
+            "the second round trip asked for the same three texts"
+        );
+
+        // The counter is not stuck: a text the store has not seen before costs one.
+        s.push_search("alpha").unwrap();
+        assert_eq!(
+            s.compiles(),
+            warm + 2,
+            "MAX(seq) and the insert, again once"
+        );
+        s.push_search("beta").unwrap();
+        assert_eq!(
+            s.compiles(),
+            warm + 2,
+            "the same two texts, already compiled"
+        );
+    }
+
+    /// G34: the three hot queries read an index, not a table.
+    ///
+    /// Each is a `LIMIT` list ordered by a column the schema indexes, so a bare
+    /// `SCAN <table>` here means the index is gone and the list is a full read plus
+    /// a sort. Measured at this commit: `search_history` walks
+    /// `idx_search_history_seq`, and both `view_history` and `downloads` walk their
+    /// `created_at`/`viewed_at` index and then sort the *last* ORDER BY term with a
+    /// temp b-tree (`seq DESC`, `id DESC`) - the tie-break is not covered by a
+    /// composite index. That is a sort of one page of rows, not a scan of the table,
+    /// and G34 asks for the scan; a step-4 migration adding
+    /// `(viewed_at DESC, seq DESC)` and `(created_at DESC, id DESC)` would remove
+    /// the sort as well, and it is deliberately not in this commit because it moves
+    /// the schema version, which another track's test pins.
+    ///
+    /// The negative experiment is dropping `idx_downloads_created_at` (or its
+    /// `view_history` twin): the plan names the scan and this fails.
+    #[test]
+    fn the_three_hot_queries_never_scan_a_table() {
+        let s = store();
+        for index in 0..64 {
+            s.push_search(&format!("word-{index}")).unwrap();
+            s.record_view(&view(&index.to_string(), index)).unwrap();
+            s.insert_download(&download(&index.to_string(), 0, index))
+                .unwrap();
+        }
+        let conn = s.lock();
+        for (name, sql) in [
+            ("search_history", SQL_SEARCH_HISTORY),
+            ("view_history", SQL_VIEW_HISTORY),
+            ("downloads", SQL_DOWNLOADS),
+        ] {
+            let plan = plan_of(&conn, sql, &[20]);
+            // SQLite calls an ordered walk of an index a SCAN too, and for a
+            // `LIMIT` list that is exactly the plan wanted: it stops after the
+            // limit. What must not appear is the same line without a `USING`,
+            // which is a full read of the table.
+            let full_scan = plan
+                .split(" | ")
+                .any(|part| part.trim_start().starts_with("SCAN ") && !part.contains("USING"));
+            assert!(!full_scan, "{name} reads the whole table: {plan}");
+            assert!(
+                !plan.contains("USE TEMP B-TREE FOR ORDER BY"),
+                "{name} sorts the table: {plan}"
+            );
+        }
+    }
     /// migration step 2 both said `SCAN search_history`: the next sequence was
     /// found by walking every row on each search and each view.
     #[test]
@@ -559,6 +704,7 @@ mod tests {
         let search_seq = plan_of(
             &conn,
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM search_history",
+            &[],
         );
         assert!(
             search_seq
@@ -567,7 +713,11 @@ mod tests {
         );
         assert!(!search_seq.contains("SCAN"), "{search_seq}");
 
-        let view_seq = plan_of(&conn, "SELECT COALESCE(MAX(seq), 0) + 1 FROM view_history");
+        let view_seq = plan_of(
+            &conn,
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM view_history",
+            &[],
+        );
         assert!(
             view_seq.contains("SEARCH view_history USING COVERING INDEX idx_view_history_seq"),
             "{view_seq}"
@@ -578,6 +728,7 @@ mod tests {
         let recent = plan_of(
             &conn,
             "SELECT word FROM search_history ORDER BY seq DESC LIMIT 5",
+            &[],
         );
         assert!(
             recent.contains("USING INDEX idx_search_history_seq"),
