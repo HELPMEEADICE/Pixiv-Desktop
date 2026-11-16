@@ -155,9 +155,13 @@ export component HomePage inherits Rectangle {
             (page.body-width + Theme.card-gap)
                 / Math.max(1px, root.card-width + Theme.card-gap)));
 
-    /// Width of one placeholder in the 最新作品 strip. Stated once because the count
-    /// below and the skeleton that draws them must agree.
-    property <length> latest-placeholder-width: 130px;
+    /// Width of one card in the 最新作品 strip, placeholder *and* real.
+    ///
+    /// A11: the skeleton said 130 px and `IllustCard` was handed 140 px, so the strip
+    /// jumped 10 px sideways when the first payload landed — and 44 px down, because the
+    /// placeholder was 150 px tall against a card that is cover plus caption band. One
+    /// property for the width, one height expression for the two states.
+    property <length> latest-card-width: 140px;
 
     /// How many placeholders each strip draws (U26).
     ///
@@ -168,7 +172,7 @@ export component HomePage inherits Rectangle {
     /// at least one.
     property <float> latest-placeholders: Math.max(1.0, Math.floor(
         (page.body-width + Theme.card-gap)
-            / Math.max(1px, root.latest-placeholder-width + Theme.card-gap)));
+            / Math.max(1px, root.latest-card-width + Theme.card-gap)));
     property <float> artist-placeholders: Math.max(1.0, Math.floor(
         (page.body-width + Theme.card-gap)
             / Math.max(1px, Theme.artist-card-width + Theme.card-gap)));
@@ -387,8 +391,11 @@ export component HomePage inherits Rectangle {
                 alignment: start;
                 height: root.latest-cover + Theme.card-caption-height + Theme.scrollbar-gutter;
                 for n in root.latest-placeholders : Skeleton {
-                    width: root.latest-placeholder-width;
-                    height: 150px;
+                    // The whole card, caption band included: the band is part of the box
+                    // that resolves, so a skeleton without it pulls everything below up
+                    // when the payload lands.
+                    width: root.latest-card-width;
+                    height: root.latest-cover + Theme.card-caption-height;
                     // G27: the strip's cards are top-aligned on purpose; say so.
                     y: 0px;
                     border-radius: Theme.radius-md;
@@ -415,7 +422,7 @@ export component HomePage inherits Rectangle {
                         alignment: start;
                         for it in root.latest : IllustCard {
                             item: it;
-                            column-width: 140px;
+                            column-width: root.latest-card-width;
                             cover-height-override: root.latest-cover;
                             show-author: true;
                             open => { root.open-illust(it.id); }
