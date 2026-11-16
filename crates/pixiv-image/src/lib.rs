@@ -352,6 +352,51 @@ impl BodyCeiling {
     }
 }
 
+/// How much of an image buffer is reserved before the first byte, and the step it
+/// grows by (C6).
+///
+/// A declared length is a claim about the total, not permission to allocate the
+/// total up front: six concurrent permits against a declared 32 MiB each reserved
+/// 32 MiB to hold a body that may never arrive.
+const BODY_RESERVE_CHUNK: usize = 1024 * 1024;
+
+/// The buffer one image body is read into.
+///
+/// The API's reader has the same shape for the same reason (C6):
+/// [`BodyBuffer::new`] is the only place a capacity is chosen and
+/// [`BodyBuffer::extend`] the only way bytes get in, so the reader cannot reserve
+/// a declaration it has not received.
+struct BodyBuffer {
+    body: Vec<u8>,
+}
+
+impl BodyBuffer {
+    /// Start a body: the declaration, admitted by the ceiling, clamped to a chunk.
+    fn new(declared: Option<u64>) -> Self {
+        let admitted = declared.unwrap_or(0).min(MAX_ENCODED_BYTES);
+        let capacity = usize::try_from(admitted.min(BODY_RESERVE_CHUNK as u64)).unwrap_or(0);
+        Self {
+            body: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Take one chunk, making room for it a chunk at a time.
+    fn extend(&mut self, chunk: &[u8]) {
+        if self.body.capacity() < self.body.len().saturating_add(chunk.len()) {
+            self.body.reserve(chunk.len().max(BODY_RESERVE_CHUNK));
+        }
+        self.body.extend_from_slice(chunk);
+    }
+
+    fn len(&self) -> usize {
+        self.body.len()
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.body
+    }
+}
+
 /// Buffer one image body under [`MAX_ENCODED_BYTES`].
 ///
 /// `reqwest`'s `bytes()` collects the whole body and only then hands it over, so
@@ -363,15 +408,14 @@ async fn read_image_body(response: reqwest::Response) -> Result<Vec<u8>, PixivEr
     let mut ceiling = BodyCeiling::new(MAX_ENCODED_BYTES);
     let declared = response.content_length();
     ceiling.check_declared(declared)?;
-    // Reserve only what was declared and admitted: the declaration is the one
-    // trustworthy hint about allocation, and it is already bounded by the limit.
-    let capacity = usize::try_from(declared.unwrap_or(0).min(MAX_ENCODED_BYTES)).unwrap_or(0);
-    let mut body: Vec<u8> = Vec::with_capacity(capacity);
+    // One chunk up front whatever the header claimed; the rest is earned by the
+    // bytes that arrive (C6).
+    let mut body = BodyBuffer::new(declared);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
             Ok(chunk) => chunk,
-            Err(error) if body.is_empty() => {
+            Err(error) if body.len() == 0 => {
                 return Err(PixivError::Network(error.to_string()));
             }
             Err(error) => {
@@ -382,9 +426,9 @@ async fn read_image_body(response: reqwest::Response) -> Result<Vec<u8>, PixivEr
             }
         };
         ceiling.take(chunk.len())?;
-        body.extend_from_slice(&chunk);
+        body.extend(&chunk);
     }
-    Ok(body)
+    Ok(body.into_vec())
 }
 
 struct Inner {
@@ -853,8 +897,9 @@ mod ua_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        BodyCeiling, BytesFetcher, CacheConfig, DecodedImage, FetchError, ImageCache, PixivError,
-        Priority, cache_key, decode_bytes, decode_bytes_with, fit_to_width,
+        BODY_RESERVE_CHUNK, BodyBuffer, BodyCeiling, BytesFetcher, CacheConfig, DecodedImage,
+        FetchError, ImageCache, MAX_ENCODED_BYTES, PixivError, Priority, cache_key, decode_bytes,
+        decode_bytes_with, fit_to_width,
     };
     use futures::FutureExt;
     use futures::future::BoxFuture;
@@ -1565,6 +1610,44 @@ mod tests {
         assert_eq!(running.taken, 1024, "exactly at the ceiling is allowed");
         assert!(running.take(1).is_err());
         assert_eq!(running.taken, 1024, "a refused chunk is not counted");
+    }
+
+    /// C6: an image body reserves one chunk, not the length it declared.
+    ///
+    /// The same shape as the API's reader, because both were the same defect: the
+    /// declared length was reserved before the first byte, times six permits.
+    /// Restored inside `BodyBuffer::new`, the first assertion reads 33554432
+    /// against 1048576.
+    #[test]
+    fn a_declared_image_reserves_one_chunk_not_the_declaration() {
+        assert_eq!(BODY_RESERVE_CHUNK, 1024 * 1024);
+        let fresh = BodyBuffer::new(Some(MAX_ENCODED_BYTES));
+        assert_eq!(fresh.len(), 0);
+        assert_eq!(fresh.body.capacity(), BODY_RESERVE_CHUNK);
+        assert_eq!(BodyBuffer::new(Some(4096)).body.capacity(), 4096);
+        assert_eq!(BodyBuffer::new(None).body.capacity(), 0);
+        // A declaration over the ceiling is clamped to the ceiling, not to zero.
+        assert_eq!(
+            BodyBuffer::new(Some(MAX_ENCODED_BYTES * 4)).body.capacity(),
+            BODY_RESERVE_CHUNK
+        );
+    }
+
+    /// ...and it grows by the chunk, so a lie costs nothing up front.
+    #[test]
+    fn an_image_that_lies_about_its_length_never_pays_for_the_lie() {
+        let mut buffer = BodyBuffer::new(Some(MAX_ENCODED_BYTES));
+        for _ in 0..16 {
+            buffer.extend(&[7u8; 16 * 1024]);
+        }
+        let body = buffer.into_vec();
+        assert_eq!(body.len(), 256 * 1024);
+        assert!(
+            body.capacity() <= 2 * (body.len() + BODY_RESERVE_CHUNK),
+            "capacity {} for {} bytes received",
+            body.capacity(),
+            body.len()
+        );
     }
 
     /// A decode is bounded by the edge caps and by the pixel-byte budget, and an

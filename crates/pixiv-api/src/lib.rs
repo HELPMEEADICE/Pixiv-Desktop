@@ -433,6 +433,50 @@ fn declared_length(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
+/// How much of a body buffer is reserved before the first byte, and the step it
+/// grows by.
+///
+/// A declared `Content-Length` is a claim about the total, not permission to
+/// allocate that total up front (C6): at the old shape a declared 64 MiB body was
+/// 64 MiB reserved before the first chunk arrived, and the image path holds six
+/// of those at once.
+const BODY_RESERVE_CHUNK: usize = 1024 * 1024;
+
+/// The buffer one response body is read into.
+///
+/// The reservation rule has one home (C6): [`BodyBuffer::new`] is the only place a
+/// capacity is chosen and [`BodyBuffer::extend`] is the only way bytes get in, so
+/// the reader cannot reserve a declaration it has not received. `Vec::reserve`
+/// takes the *additional* capacity, which is why the step is a chunk and not the
+/// chunk's own length: a large body grows in a handful of allocations, and a body
+/// that lied about its size pays for what arrived.
+struct BodyBuffer {
+    body: Vec<u8>,
+}
+
+impl BodyBuffer {
+    /// Start a body: the declaration, admitted by the limit, clamped to a chunk.
+    fn new(declared: Option<u64>, limit: u64) -> Self {
+        let admitted = declared.unwrap_or(0).min(limit);
+        let capacity = usize::try_from(admitted.min(BODY_RESERVE_CHUNK as u64)).unwrap_or(0);
+        Self {
+            body: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Take one chunk, making room for it a chunk at a time.
+    fn extend(&mut self, chunk: &[u8]) {
+        if self.body.capacity() < self.body.len().saturating_add(chunk.len()) {
+            self.body.reserve(chunk.len().max(BODY_RESERVE_CHUNK));
+        }
+        self.body.extend_from_slice(chunk);
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.body
+    }
+}
+
 /// Buffer one response body under `limit` bytes.
 ///
 /// The declaration is checked first and every chunk after it, so an oversized
@@ -448,10 +492,9 @@ async fn read_body(
     budget
         .check_declared(declared)
         .map_err(|error| Failure::with_hint(error, hint))?;
-    // Reserve only what was declared and admitted: a declared length is the one
-    // trustworthy hint about allocation, and it is already bounded by `limit`.
-    let capacity = usize::try_from(declared.unwrap_or(0).min(limit)).unwrap_or(0);
-    let mut body = Vec::with_capacity(capacity);
+    // One chunk is reserved up front whatever the header claimed; the rest is
+    // earned by the bytes that actually arrive (C6).
+    let mut body = BodyBuffer::new(declared, limit);
     while let Some(chunk) = response
         .chunk()
         .await
@@ -460,9 +503,9 @@ async fn read_body(
         budget
             .take(chunk.len())
             .map_err(|error| Failure::with_hint(error, hint))?;
-        body.extend_from_slice(&chunk);
+        body.extend(&chunk);
     }
-    Ok(body)
+    Ok(body.into_vec())
 }
 
 /// Turn a buffered text response into the caller's answer.
@@ -1975,6 +2018,52 @@ mod tests {
         );
         // A refused chunk is not counted: the budget never claims what it refused.
         assert_eq!(budget.taken, 1024 * 1024);
+    }
+
+    /// C6: the reservation is one chunk, not the declaration.
+    ///
+    /// The buffer the reader uses is the buffer this measures, so the assertion is
+    /// about the reader and not about an arithmetic helper beside it: the old line
+    /// reserved `min(declared, limit)` before the first byte, so an answer that
+    /// declared 64 MiB was 64 MiB of heap whatever it then sent - and the image
+    /// path holds six such permits at once.
+    ///
+    /// The negative experiment is that line restored inside [`BodyBuffer::new`]:
+    /// the first assertion then reads 67108864 against 1048576.
+    #[test]
+    fn a_declared_length_reserves_one_chunk_not_the_declaration() {
+        const LIMIT: u64 = 64 * 1024 * 1024;
+        assert_eq!(BODY_RESERVE_CHUNK, 1024 * 1024, "a megabyte, not a document");
+        // A large declaration is clamped to the chunk: the body reserves a chunk
+        // before it has received a single byte.
+        let fresh = BodyBuffer::new(Some(LIMIT), LIMIT);
+        assert_eq!(fresh.body.len(), 0);
+        assert_eq!(fresh.body.capacity(), BODY_RESERVE_CHUNK);
+        // A small one is reserved as declared: no megabyte for a 4 KiB answer.
+        assert_eq!(BodyBuffer::new(Some(4096), LIMIT).body.capacity(), 4096);
+        // No declaration reserves nothing, and the ceiling still binds the total.
+        assert_eq!(BodyBuffer::new(None, LIMIT).body.capacity(), 0);
+        // The limit wins when it is the smaller of the two.
+        assert_eq!(BodyBuffer::new(Some(LIMIT), 1024).body.capacity(), 1024);
+    }
+
+    /// ...and growth is chunked, so bytes that never arrive are never paid for.
+    #[test]
+    fn a_body_that_lies_about_its_length_never_pays_for_the_lie() {
+        const LIMIT: u64 = 64 * 1024 * 1024;
+        let mut buffer = BodyBuffer::new(Some(LIMIT), LIMIT);
+        // Sixteen 16 KiB chunks: a quarter of a megabyte announcing sixty-four.
+        for _ in 0..16 {
+            buffer.extend(&[7u8; 16 * 1024]);
+        }
+        let body = buffer.into_vec();
+        assert_eq!(body.len(), 256 * 1024);
+        assert!(
+            body.capacity() <= 2 * (body.len() + BODY_RESERVE_CHUNK),
+            "capacity {} for {} bytes received",
+            body.capacity(),
+            body.len()
+        );
     }
 
     #[test]
