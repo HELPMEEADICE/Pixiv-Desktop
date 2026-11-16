@@ -154,3 +154,80 @@ fn envelope_with_error_flag_parses() {
     assert_eq!(env.message, "不正确的请求。");
     assert!(env.body.is_empty());
 }
+
+/// G54: user-visible text carries no markup.
+///
+/// The fixture is half of this gate: `description` has the shape the live
+/// `/ajax/illust/{id}` sends - a `<br />` between paragraphs and an `<a href>`
+/// around the work it cites - so the two assertions that matter cannot pass by
+/// accident on a caption with no markup in it. The other half is C1: before it,
+/// `from_detail` copied the string verbatim and both `contains` lines below were
+/// red; a detail page then drew `<br />` and `<a href="...">` at the user.
+#[test]
+fn a_detail_caption_reaches_the_domain_without_markup() {
+    let raw = fixture("illust_detail_html.json");
+    let env: Envelope<IllustDetailWire> = serde_json::from_str(&raw).expect("detail envelope");
+    assert!(
+        env.body.description.contains("<br"),
+        "the fixture must carry a break, or this gate cannot see the defect"
+    );
+    assert!(
+        env.body.description.contains("<a "),
+        "and a link, for the same reason"
+    );
+
+    let illust = Illust::from_detail(env.body);
+    assert!(
+        !illust.description.contains("<br"),
+        "markup reached the domain: {}",
+        illust.description
+    );
+    assert!(
+        !illust.description.contains("<a "),
+        "markup reached the domain: {}",
+        illust.description
+    );
+    // Cleaned the way the novel path already cleans its caption: the break is a
+    // newline, and a cited work keeps its target.
+    assert!(
+        illust.description.contains('\n'),
+        "the break is a line break: {}",
+        illust.description
+    );
+    assert!(
+        illust.description
+            .contains("https://www.pixiv.net/novel/show.php?id=27815393"),
+        "the link target survives: {}",
+        illust.description
+    );
+    assert!(illust.description.starts_with("新作を投稿しました。"));
+}
+
+/// The detail document has two caption fields, and the fallback is the one that
+/// reaches the page when `description` is empty - so it is cleaned too.
+#[test]
+fn a_comment_only_caption_is_cleaned_too() {
+    let raw = fixture("illust_detail_html.json");
+    let mut env: Envelope<IllustDetailWire> = serde_json::from_str(&raw).expect("detail envelope");
+    assert!(env.body.illust_comment.contains("<br"), "the fixture carries it");
+    env.body.description = String::new();
+
+    let illust = Illust::from_detail(env.body);
+    assert!(!illust.description.contains("<br"), "{}", illust.description);
+    assert!(!illust.description.contains("<a "), "{}", illust.description);
+    assert!(illust.description.contains('\n'));
+}
+
+/// A search row's `description` is the same HTML-ish text, so the same rule
+/// applies to the other constructor that copies it.
+#[test]
+fn a_search_caption_is_cleaned_the_same_way() {
+    let row: SearchItemWire = serde_json::from_str(
+        r#"{"id":"151939482","description":"一行目<br />二行目<br /><a href=\"https://x.test/p\">出典</a>","tags":["t"]}"#,
+    )
+    .expect("search row");
+    assert!(row.description.contains("<br"));
+
+    let illust = Illust::from_search(row);
+    assert_eq!(illust.description, "一行目\n二行目\n出典 (https://x.test/p)");
+}

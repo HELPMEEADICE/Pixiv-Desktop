@@ -280,6 +280,7 @@ pub struct Illust {
     pub urls: IllustUrls,
     pub author: Author,
     pub tags: Vec<Tag>,
+    /// The caption, reduced to plain text by [`clean_caption`].
     pub description: String,
     pub create_date: Option<String>,
     pub bookmark: Bookmark,
@@ -380,11 +381,17 @@ impl Illust {
             w.height,
             tags,
         );
-        out.description = if w.description.is_empty() {
+        // The caption is the same HTML-ish text the novel path already reduces:
+        // "<br />" breaks and "<a href>" links, bound straight into a Slint
+        // `Text`, where the tags were what the reader saw. `illustComment` is the
+        // fallback for a work whose `description` is empty and carries the same
+        // markup, so both go through the one cleaner.
+        let caption = if w.description.is_empty() {
             w.illust_comment
         } else {
             w.description
         };
+        out.description = clean_caption(&caption);
         out.urls = w.urls.into();
         out.author = Author {
             id: w.user_id,
@@ -429,7 +436,7 @@ impl Illust {
             regular: w.url,
             original: String::new(),
         };
-        out.description = w.description;
+        out.description = clean_caption(&w.description);
         out.author = Author {
             id: w.user_id,
             name: w.user_name,
