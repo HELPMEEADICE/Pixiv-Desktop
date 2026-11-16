@@ -128,11 +128,18 @@ export component ProfilePage inherits Rectangle {
         // needs a layout therefore gets its own sub-rectangle whose single child
         // is that layout.
         Rectangle {
-            // Two heights, one structure. The wide header keeps the Win11 two-
-            // column shape; below 720px of content the 88px portrait and the
-            // 250px action reserve left the name column ~78px wide, so the header
-            // stacks instead of squeezing a name into an ellipsis.
-            height: root.wide ? 208px : 254px;
+            // U10: the card is as tall as the lowest band it draws, plus one step
+            // of air, and never shorter than the two-column shape needs. It used to
+            // be a fixed 208/254 px box, so a fifth stat row or a longer comment
+            // was cut without a trace; the comment that used to sit here explained
+            // why the numbers were two, not why they were constants.
+            //
+            // `clip` stays: the cover's own corners have to follow the card's
+            // radius. It can no longer hide anything, because the height follows
+            // the content instead of the content being fitted into a height.
+            height: max(
+                root.wide ? 208px : 254px,
+                stat-block.y + stat-block.height + Theme.space-2);
             border-radius: Theme.radius-lg;
             background: Theme.layer;
             border-width: 1px;
@@ -199,6 +206,13 @@ export component ProfilePage inherits Rectangle {
                             emphasis: Emphasis.Semibold;
                             text: root.user-name;
                             color: Theme.text;
+                            // U10: the fallback is stated here rather than inherited
+                            // silently. `Label` elides by default, and the bound it
+                            // needs is this block's width - which is
+                            // `parent.width - self.x - 250px` in the wide header - so
+                            // a long display name now ends in an ellipsis instead of
+                            // being cut by the card's clip.
+                            overflow: elide;
                         }
                         if root.premium : Rectangle {
                             width: premium-label.width + 12px;
@@ -290,9 +304,12 @@ export component ProfilePage inherits Rectangle {
                 x: root.wide ? Theme.space-4 + 88px + Theme.space-4 : Theme.space-4;
                 y: root.wide ? 158px : 200px;
                 width: max(0px, parent.width - self.x - Theme.space-4);
-                height: root.wide ? 40px : 44px;
+                // A floor, not a ceiling: the two rows it draws fit in 40 px, and
+                // a third one grows the card instead of being cut by the card's
+                // own clip (U10).
+                height: max(root.wide ? 40px : 44px, stat-layout.preferred-height);
 
-                VerticalLayout {
+                stat-layout := VerticalLayout {
                     spacing: 4px;
 
                     HorizontalLayout {
