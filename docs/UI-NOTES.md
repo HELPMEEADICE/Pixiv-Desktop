@@ -1283,28 +1283,9 @@ which this round deliberately does not implement.
 
 ---
 
-## Appendix: round-one limits (kept for the record)
+## 17. Round ten — typography as a system, and four Slint geometry traps
 
-### Not verified in round one
-
-**Pointer-driven interaction** (click, hover, wheel, drag, keyboard focus order)
-was exercised by code path and unit test only: this environment has no input
-automation. Pages were reached through `PIXIV_DESKTOP_START_PAGE` and
-`PIXIV_DESKTOP_START_ILLUST`.
-
-**The DPI ladder.** Only 150% is available on this host. Layout maths is
-scale-independent (Slint reports logical px) and the image pipeline's
-`target_width()` is unit tested at 1.0/1.5/2.0, but 100%, 125% and 200% were not
-exercised on a real display.
-
-**Bookmark / follow against a live session** - unchanged from round one: no
-credential was available.
-
----
-
-## 14. Round ten — typography as a system, and four Slint geometry traps
-
-### 14.1 The typography layer
+### 17a. The typography layer
 
 Every text step now has a name: `TextRole` (Caption 11 · Small 12 · Body 14 · Subhead 14 ·
 Title 16 · Page 20 · Display 24) and `Emphasis` (Regular/Medium/Semibold/Bold).
@@ -1336,7 +1317,7 @@ Writing that second gate found a bug in itself worth recording: reading "the fir
 number on the declaration line" of `pub const MIN_FONT_SIZE: f32 = 14.0;` returns 32,
 from the `f32`. It reads the last number now.
 
-### 14.2 Four Slint geometry traps this round paid for
+### 17b. Four Slint geometry traps this round paid for
 
 All four were found by measuring, and all four look correct in review:
 
@@ -1359,10 +1340,47 @@ All four were found by measuring, and all four look correct in review:
    for a few frames, so an offset that "sticks" on the first tick lands at the wrong
    fraction (measured: 18% after asking for 55%).
 
-### 14.3 What the reader shares with the rest of the app
+### 17c. What the reader shares with the rest of the app
 
 Same `Theme` colours, same `Label`/`BodyText` primitives, same `PageScroll` idiom for the
 novels list, same `StateView` for loading/error, same `InfoBar` for a failed chapter list,
 same segmented control and toggle switches in the settings panel. The reading surface
 is the one place with its own palette (`ReaderTheme`), because a sepia page is not "the
 app in light mode".
+
+### 17d. What is still not verified here
+
+The typography layer is held by two gates that read declarations: a `Text` in a row says
+where its line goes, and the reader's slider bounds agree with the constants that clamp the
+stored value. Neither photographs a converted label, and the reader is in no pixel baseline
+at all - `tools/verify-visual.ps1` captures fifteen states and none of them is a reader
+state, which is G33 of `docs/OPTIMIZATION-PLAN-R11.md`. All four geometry traps were
+measured at 150 % on this host; the reader's scroll range is
+`column.height - sv.visible-height` in physical pixels, and the ladder above 150 % has
+been on this record as unmeasured since §10. The reader's keys are confirmed by pressing
+them, not measured by a gate: `PageDown`, `PageUp`, `Home`, `End` and a bare `A`
+are handled by the shell's shortcut scope while `Destination.NovelReader` is on screen
+(`ui/main.slint:723-735`), and `tools/verify-focus.ps1` walks home, detail and settings,
+so no gate has ever measured a stop on the reader. The three novel destinations have no
+measured accessibility floor yet either: they join `tools/verify-a11y.ps1`'s list with the
+one page set (`tools/page-set.ps1`, G32) in round eleven, and the floors are pinned by
+that round's first measured run.
+
+---
+
+## Appendix: round-one limits (kept for the record)
+
+### Not verified in round one
+
+**Pointer-driven interaction** (click, hover, wheel, drag, keyboard focus order)
+was exercised by code path and unit test only: this environment has no input
+automation. Pages were reached through `PIXIV_DESKTOP_START_PAGE` and
+`PIXIV_DESKTOP_START_ILLUST`.
+
+**The DPI ladder.** Only 150% is available on this host. Layout maths is
+scale-independent (Slint reports logical px) and the image pipeline's
+`target_width()` is unit tested at 1.0/1.5/2.0, but 100%, 125% and 200% were not
+exercised on a real display.
+
+**Bookmark / follow against a live session** - unchanged from round one: no
+credential was available.

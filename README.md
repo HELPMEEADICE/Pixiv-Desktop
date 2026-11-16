@@ -34,8 +34,13 @@ chips, and the detail page's image-dominant layout with a compact metadata colum
 | --- |
 | ![reader settings](docs/screenshots/readme/novel-reader-settings.png) |
 
-Novel captures are taken with `PIXIV_DESKTOP_NOVEL_FIXTURE` pointing at a trimmed live
-capture (`fixtures/novel_detail.json`), so they are deterministic and contain no session.
+The three novel captures above were taken by hand with `PIXIV_DESKTOP_NOVEL_FIXTURE`
+pointing at a trimmed live capture (`fixtures/novel_detail.json`), so they are
+deterministic and contain no session. No `tools/*.ps1` sets that variable: the gates open
+the novel pages from Demo Mode instead - `PIXIV_DESKTOP_START_PAGE=novels` for the
+novels list, `PIXIV_DESKTOP_START_NOVEL` for one work, plus
+`PIXIV_DESKTOP_START_READER=1` for the reader - and those recipes live in one table,
+`tools/page-set.ps1`.
 
 Screenshots are captured by `tools/shot.ps1` at 1280×800 logical on a 150% DPI
 display, cropped to the client area so a pixel can be mapped to a logical
@@ -45,9 +50,10 @@ coordinate. The curated set above is tracked; everything else stays local (see
 Icon alignment, colour contrast, the pixels themselves and what assistive
 technology can reach are **measured, not reviewed**:
 `tools/verify-icons.ps1` finds glyph ink centres in a real capture and fails if any
-of them drifts from its row; `tools/verify-visual.ps1` diffs 20 forced-demo
-captures against tracked baselines; `tools/verify-a11y.ps1` reads the UI
-Automation tree (roles, names, invokable patterns) and walks Tab until focus cycles with
+of them drifts from its row; `tools/verify-visual.ps1` diffs the forced-demo
+captures against tracked baselines and prints how many it compared;
+`tools/verify-a11y.ps1` reads the UI Automation tree (roles, names, invokable
+patterns) and walks Tab until focus cycles with
 real keystrokes; `tools/verify-focus.ps1` captures what those keystrokes produce and
 measures the 2px focus ring at each stop, reading the colour out of `ui/theme.slint`
 rather than restating it; `tools/verify-dpi.ps1` runs the scale ladder at 100/125/150/200%
@@ -80,7 +86,7 @@ not be verified here — is in [`docs/UI-NOTES.md`](docs/UI-NOTES.md).
 | Download queue: bounded concurrency, filename templates, cancel / retry, duplicate detection, atomic writes | **Implemented** |
 | Ugoira decode + timing + **in-app playback** + GIF export | **Implemented** — the viewer plays the film from a monotonic clock under a 64 MB budget, and GIF export still exists |
 | Multi-select on every grid page, with batch download and batch bookmark | **Implemented** — Ctrl/Shift-click or the page's own toggle, a 50-work cap, and a summary that names what was skipped |
-| Command palette (`Ctrl+P`): pages, actions, recent views, and a pasted artwork or user URL | **Implemented** — one parser for `/artworks/1234`, `/en/artworks/1234`, `id=`, a bare id, `/users/5678` and `@name` |
+| Command palette (`Ctrl+P`): pages, actions, recent views, and a pasted artwork, novel or user URL | **Implemented** — one parser for `/artworks/1234`, `/en/artworks/1234`, `id=`, a bare id, `/users/5678`, `@name`, `/novel/1234` and `novel/show.php?id=1234` |
 | Bookmark visibility (public / private) with a split button and re-tagging | **Implemented** — the state is always the server's reply |
 | Download queue: pause / resume per row or all, throughput and a per-row ETA | **Implemented** — a resumed row restarts its body (see limits) |
 | Session login via system browser + `PHPSESSID` | **Implemented** |
@@ -151,8 +157,8 @@ worse than one that says what it does not know.
    no second source of truth for the window width. The shell's three rows are pinned by
    measurement, not by stretch: see `docs/UI-NOTES.md` § 3 for the constraint-propagation
    bug that used to leave the bottom half of a maximised window unpainted, and § 6 for the
-   harness that now proves it is gone (`tools/verify-layout.ps1`: 8 pages × 3 sizes, all
-   with `gap=0`).
+   harness that now proves it is gone (`tools/verify-layout.ps1`: every page in the set at
+   three sizes, each with `gap=0`, and the run prints how many it checked).
 9. **The system-theme watcher polls, and says so.** Slint 1.18 exposes no colour-scheme
    notification and no reachable window procedure, so while the theme mode is `System` a
    5s timer reads one registry DWORD (`AppsUseLightTheme`). It stops itself the moment a
@@ -162,9 +168,10 @@ worse than one that says what it does not know.
     Round nine added a coverage assertion — every focusable `Button`, `ListItem` and
     `Edit` must be walked by Tab or the page fails — and it promptly found three
     controls per page that were focusable and unreachable (a duplicated search field,
-    the account button, the session field). All eight pages now walk every one of them
-    (`reached == required` on each). What is still wrong: focus does not scroll the
-    page, so past the fold a keyboard user tabs into artwork that is not on screen.
+    the account button, the session field). Every page it could measure now walks every
+    one of them (`reached == required` on each), and the three novel pages joined that
+    set in round eleven. What is still wrong: focus does not scroll the page, so past
+    the fold a keyboard user tabs into artwork that is not on screen.
     The seam exists (`IllustCard.gained-focus` → `card-focused(id)`) and the offset
     needs the card's content-space position, which only the page can compute; that
     component is next round's first item. Chips are real stops now — roving focus is
@@ -218,8 +225,11 @@ $env:PIXIV_DESKTOP_START_USER="104439010"; pwsh -File tools/shot.ps1 -Page profi
 $env:PIXIV_DESKTOP_TIP="1"; pwsh -File tools/shot.ps1 -Page home ...
 pwsh -File tools/shot.ps1 -Page detail -Illust 700000003 -Dark -Out .../detail.png
 
-# every page x every size, asserting the shell invariant from the app's own trace
-pwsh -File tools/verify-layout.ps1        # 24 checks: 8 pages x 3 sizes
+# every page x every size, asserting the shell invariant from the app's own trace.
+# "Every page" is one list: tools/page-set.ps1 holds the thirteen destinations
+# ui/main.slint declares, every verifier and the accessibility budget read it, and
+# tools/selftest-gates.ps1 case page-set fails if any of the five disagrees.
+pwsh -File tools/verify-layout.ps1        # one row per page x size, and the run prints the count
 
 # icon alignment, measured from pixels rather than from the Slint source
 pwsh -File tools/verify-icons.ps1         # add -Size 800x600 / -Dark
@@ -233,6 +243,11 @@ pwsh -File tools/verify-icons.ps1         # add -Size 800x600 / -Dark
 # capture must clear both a 0.02 % and a 96-pixel ceiling, and a capture that was
 # skipped because the host scale differs is not a pass (the run exits 77).
 pwsh -File tools/verify-visual.ps1
+
+# ...and before re-baselining, or before trusting a diff: capture every state twice in
+# one run and require 0 px between the two captures of one state. The diff above is
+# deliberately forgiving; this asks the question it cannot, and writes no baseline.
+pwsh -File tools/verify-visual.ps1 -Twice
 
 # accessibility: reads the UI Automation tree the way a screen reader does
 # (roles, names, invokable patterns) and then walks Tab until focus cycles - one full
@@ -423,11 +438,14 @@ API observations: [`docs/API-NOTES.md`](docs/API-NOTES.md)
 | `Alt+←` / `Alt+→` | Back / forward through page history |
 | `Ctrl+1` … `Ctrl+7` | Home, Discover, Ranking, Bookmarks, History, Downloads, Settings (`Ctrl+,` also works for Settings) |
 | `Ctrl+R` | Refresh the page in front of you: the feed on a feed page, the work on the detail page, the queue on downloads |
-| `Ctrl+P` | Command palette: go to a page, run an action, or open a pasted artwork / user id or URL |
+| `Ctrl+P` | Command palette: go to a page, run an action, or open a pasted artwork / novel / user id or URL |
 | `Ctrl+A` | Select every loaded work, while the grid is in selection mode |
 | `Esc` | Close the topmost surface: the suggestion panel, then selection, then the detail page |
 | `←` / `→` | In the viewer: previous / next page (with the thumbnail strip focused as well) |
 | `Space` | On a ugoira work: play / pause the film |
+| `PageDown` / `PageUp` | In the reader: next / previous page of the chapter |
+| `Home` / `End` | In the reader: top / end of the chapter |
+| `A` | In the reader: open or close the reading settings |
 | `Ctrl+click` / `Shift+click` | On a card: toggle it into the selection / select the range from the last one |
 | wheel | Zoom the viewer, anchored at the cursor |
 | double-click | Toggle zoom at the cursor |

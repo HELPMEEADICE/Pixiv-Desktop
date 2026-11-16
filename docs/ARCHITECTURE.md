@@ -209,6 +209,10 @@ It is kept honest by construction:
 
 Recorded honestly rather than papered over — see `README.md` § *Honest limits* for
 the user-facing version. In short: comment and related-work endpoints exposed no
-usable shape and are not modelled; the novel reader is a structured placeholder;
-bookmark/follow mutations are verified against a live account
-(`docs/NETWORK-TEST-REPORT.md` row 8); ugoira export writes GIF only.
+usable shape and are not modelled; the novel surfaces are implemented rather than
+scaffolded — `/ajax/search/novels/`, `/ajax/novel/{id}` and
+`/ajax/novel/series_content/{id}`, Pixiv body markup parsed into rows (ruby, embedded
+images, page breaks, chapter headings), and a native reader with its own typography
+settings, reading position, series chapters and immersive mode
+(`docs/NOVEL-READER.md`); bookmark/follow mutations are verified against a live
+account (`docs/NETWORK-TEST-REPORT.md` row 8); ugoira export writes GIF only.
