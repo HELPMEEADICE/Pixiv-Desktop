@@ -375,6 +375,10 @@ pub struct SearchItemWire {
     pub x_restrict: i32,
     #[serde(default)]
     pub sl: i32,
+    /// `aiType`: 0 not AI, 1 AI-generated, 2 AI-assisted. Every row of
+    /// `fixtures/search_artworks.json` carries it.
+    #[serde(default, rename = "aiType")]
+    pub ai_type: i32,
     /// Square thumbnail (`.../c/250x250_80_a2/...`).
     #[serde(default)]
     pub url: String,
@@ -401,6 +405,9 @@ pub struct SearchItemWire {
     pub create_date: String,
     #[serde(default)]
     pub is_masked: bool,
+    /// Alt text, the same field the detail document carries.
+    #[serde(default)]
+    pub alt: String,
     #[serde(default)]
     pub profile_image_url: String,
 }

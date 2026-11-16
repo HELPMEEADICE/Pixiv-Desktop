@@ -295,6 +295,9 @@ fn build_illust(index: usize, artist: &ArtistSeed, rng: &mut Rng) -> Illust {
             comments: u64::from(rng.range(0, 420)),
         },
         x_restrict: 0,
+        // Nothing here is machine-made: the demo catalogue is hand-written text.
+        ai_type: 0,
+        alt: format!("{} - {}", title_for(index), artist.name),
         sl: 0,
         is_masked: false,
         is_bookmarkable: true,

@@ -287,3 +287,56 @@ fn a_novel_row_without_genre_or_count_reports_neither() {
     assert_eq!(summary.language, "");
     assert_eq!(summary.bookmarks, 0);
 }
+/// C2: the AI flag reaches the domain from every route that carries it.
+///
+/// The wire decoded `aiType` on the detail document and nowhere else, so the one
+/// field that tells a reader which works are generated stopped at the wire.
+/// Every row of `fixtures/search_artworks.json` is `"aiType":1`.
+#[test]
+fn an_ai_flag_reaches_the_domain_from_every_route() {
+    let raw = fixture("search_artworks.json");
+    let env: Envelope<SearchBodyWire> = serde_json::from_str(&raw).expect("search envelope");
+    let result = SearchResult::from_wire(env.body);
+    let first = &result.items[0];
+    assert_eq!(first.ai_type, 1, "search rows carry aiType");
+    // Pixiv's alt text is "#tag title - author", and every captured row has one.
+    assert!(first.alt.starts_with('#'), "alt: {}", first.alt);
+
+    let raw = fixture("illust_detail_html.json");
+    let env: Envelope<IllustDetailWire> = serde_json::from_str(&raw).expect("detail envelope");
+    let illust = Illust::from_detail(env.body);
+    assert_eq!(illust.ai_type, 2, "the capture is AI-assisted");
+    assert!(illust.alt.contains("灯火"), "alt: {}", illust.alt);
+
+    // The home feed spells the same field `aiType` too, and carries no alt text.
+    let row: StreetThumbWire =
+        serde_json::from_str(r#"{"id":"151999999","title":"t","aiType":1,"sl":2}"#)
+            .expect("street row");
+    let card = Illust::from_street(row);
+    assert_eq!(card.ai_type, 1);
+    assert_eq!(card.sl, 2);
+    assert!(card.alt.is_empty(), "no alt text on this route");
+}
+
+/// C3: the mask flag is filled on the route that has one, under the name that
+/// route gives it.
+///
+/// The street payload calls it `isSensitiveForMasking` and `from_street` never
+/// read it, so a work Pixiv marks sensitive was drawn unmasked on the home page.
+#[test]
+fn a_street_card_keeps_the_mask_flag() {
+    let masked: StreetThumbWire = serde_json::from_str(
+        r#"{"id":"1","title":"t","isSensitiveForMasking":true,"sl":2}"#,
+    )
+    .expect("street row");
+    let card = Illust::from_street(masked);
+    assert!(card.is_masked);
+    assert_eq!(card.sl, 2);
+
+    // Absent means not masked; the flag is not inferred from the sensitivity level.
+    let plain: StreetThumbWire =
+        serde_json::from_str(r#"{"id":"2","title":"t"}"#).expect("street row");
+    let card = Illust::from_street(plain);
+    assert!(!card.is_masked);
+    assert_eq!(card.sl, 0);
+}

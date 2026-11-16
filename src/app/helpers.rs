@@ -35,6 +35,11 @@ pub(crate) fn history_illust(entry: &HistoryEntry) -> Illust {
         bookmark: Bookmark::default(),
         stats: IllustStats::default(),
         x_restrict: 0,
+        // A stored history row carries neither field: this is the one place the
+        // binary builds an `Illust` from nothing, so the defaults are stated here
+        // rather than derived.
+        ai_type: 0,
+        alt: String::new(),
         sl: 0,
         is_masked: false,
         is_bookmarkable: true,

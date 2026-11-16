@@ -287,6 +287,10 @@ pub struct Illust {
     pub stats: IllustStats,
     /// `0` all-ages, `1` R-18, `2` R-18G.
     pub x_restrict: u8,
+    /// `aiType`: 0 not AI, 1 AI-generated, 2 AI-assisted.
+    pub ai_type: u8,
+    /// Alt text for the work, as Pixiv wrote it; empty when the row omits it.
+    pub alt: String,
     /// Pixiv's sensitivity level (`sl`).
     pub sl: u8,
     pub is_masked: bool,
@@ -348,6 +352,8 @@ impl Illust {
             bookmark: Bookmark::default(),
             stats: IllustStats::default(),
             x_restrict: 0,
+            ai_type: 0,
+            alt: String::new(),
             sl: 0,
             is_masked: false,
             is_bookmarkable: true,
@@ -408,6 +414,8 @@ impl Illust {
             comments: u64::try_from(w.comment_count.max(0)).unwrap_or(0),
         };
         out.x_restrict = u8::try_from(w.x_restrict.max(0)).unwrap_or(0);
+        out.ai_type = u8::try_from(w.ai_type.max(0)).unwrap_or(0);
+        out.alt = w.alt;
         out.sl = u8::try_from(w.sl.max(0)).unwrap_or(0);
         out.is_masked = w.is_masked;
         out.is_bookmarkable = w.is_bookmarkable;
@@ -446,6 +454,8 @@ impl Illust {
         out.create_date = non_empty(w.create_date);
         out.bookmark = Self::bookmark_from(w.bookmark_data, 0);
         out.x_restrict = u8::try_from(w.x_restrict.max(0)).unwrap_or(0);
+        out.ai_type = u8::try_from(w.ai_type.max(0)).unwrap_or(0);
+        out.alt = w.alt;
         out.sl = u8::try_from(w.sl.max(0)).unwrap_or(0);
         out.is_masked = w.is_masked;
         out.is_bookmarkable = w.is_bookmarkable;
@@ -565,6 +575,10 @@ impl Illust {
         };
         out.create_date = non_empty(w.create_date);
         out.x_restrict = u8::try_from(w.x_restrict.max(0)).unwrap_or(0);
+        out.ai_type = u8::try_from(w.ai_type.max(0)).unwrap_or(0);
+        // The street payload spells "masked" as `isSensitiveForMasking`; `alt` is
+        // not on this route at all, so it stays empty rather than being guessed.
+        out.is_masked = w.is_sensitive_for_masking;
         out.sl = u8::try_from(w.sl.max(0)).unwrap_or(0);
         out.is_bookmarkable = w.bookmarkable;
         out
