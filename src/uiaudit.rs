@@ -2804,4 +2804,101 @@ last in its component:\n{}",
         );
     }
 
+    /// G49 — a component that declares a default accessible action owns a `FocusScope`.
+    ///
+    /// `accessible-action-default` is the action a screen reader invokes when the user
+    /// activates the element, so the element has to be reachable as one node by the
+    /// keyboard too. Round eleven wired the roles and left the question "and can the
+    /// keyboard get here" to review, which is how a `TagChip` whose `FocusScope` sat inside
+    /// its glyph, and a `MenuRow` that answered an action it could never receive, both
+    /// looked finished. Each exemption below is a *reason*, not a silence: a listbox row is
+    /// reachable through the list's own scope, and the pill is reachable through the card's
+    /// keys.
+    #[test]
+    fn every_default_action_owns_a_focus_scope_or_a_reason() {
+        const EXEMPT: [(&str, &str); 5] = [
+            (
+                "TextField",
+                "the field is the Tab stop; its default action focuses its own input",
+            ),
+            (
+                "MenuRow",
+                "a menu is a listbox: BookmarkMenu owns the scope and moves the selection",
+            ),
+            (
+                "PaletteRowView",
+                "the palette owns the scope; the row is moved by the arrow keys",
+            ),
+            (
+                "SuggestRow",
+                "the suggestion panel owns the scope, for the same reason",
+            ),
+            (
+                "BookmarkPill",
+                "IllustCard's 'b' is the pill's keyboard path (the card is the stop)",
+            ),
+        ];
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            let mut offset = 0usize;
+            for (index, raw) in source.split_inclusive('\n').enumerate() {
+                let code = raw.split("//").next().unwrap_or("");
+                let Some(found) = code.find("accessible-action-default") else {
+                    offset += raw.len();
+                    continue;
+                };
+                // A dismissal backdrop is exempt, by the convention the hit-surface rule
+                // already uses: the surface that exists to be clicked away names itself
+                // `*-scrim`, Escape is its keyboard path, and the action it declares
+                // duplicates the control that opened the panel.
+                let at = offset + found;
+                let backdrop = blocks
+                    .iter()
+                    .filter(|block| block.start < at && block.end > at)
+                    .min_by_key(|block| block.end - block.start)
+                    .map(|block| opener(&source, block))
+                    .unwrap_or_default()
+                    .contains("scrim :=");
+                // The owner is the nearest component declaration above the action: a body
+                // that talks about an action somewhere else is not an answer.
+                let owner = enclosing_component(&source, index);
+                offset += raw.len();
+                checked += 1;
+                if backdrop {
+                    continue;
+                }
+                let declares_scope = source
+                    .lines()
+                    .position(|line| {
+                        let code = line.split("//").next().unwrap_or("");
+                        code.contains(&format!("component {owner} "))
+                    })
+                    .map(|at| component_body(&source, at).contains("FocusScope"))
+                    .unwrap_or(false);
+                if declares_scope || EXEMPT.iter().any(|(exempt, _reason)| *exempt == owner) {
+                    continue;
+                }
+                offenders.push(format!(
+                    "{name}:{}: {owner} answers a default action and cannot be focused",
+                    index + 1
+                ));
+            }
+        }
+        assert!(
+            checked >= 12,
+            "expected every shared control to declare its default action, found {checked}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a default action on an element the keyboard cannot reach is a screen-reader \
+             verb that does nothing. Give it a FocusScope, or add it to EXEMPT with the \
+             scope that serves it instead:\n{}",
+            offenders.join("\n")
+        );
+    }
+
 }

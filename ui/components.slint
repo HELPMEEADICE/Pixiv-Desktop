@@ -1675,6 +1675,19 @@ export component IllustCard inherits Rectangle {
                 root.open-author();
                 return EventResult.accept;
             }
+            // A5: 'b' toggles the bookmark on the focused card.
+            //
+            // The pill's own checkbox is a pointer target with no Tab stop of its own: a
+            // 40-card grid is already 40 stops, and a second stop per card for the pill is
+            // the trade round eight turned down. The card is the stop, so the card carries
+            // the verb — the same shape 'a' uses for the author link, and the reason
+            // `BookmarkPill` may declare `accessible-action-default` with no `FocusScope`
+            // (uiaudit's G49 exemption list says so in one place).
+            if (e.text == "b" && !e.modifiers.control && !e.modifiers.alt
+                && !e.modifiers.shift) {
+                root.toggle-bookmark();
+                return EventResult.accept;
+            }
             EventResult.reject
         }
     }
