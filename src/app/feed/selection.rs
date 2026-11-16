@@ -110,7 +110,7 @@ impl App {
     fn sync_selected_rows(&self) {
         for column in &self.columns {
             for row in 0..column.row_count() {
-                let Some(mut item) = column.row_data(row) else {
+                let Some(item) = column.row_data(row) else {
                     continue;
                 };
                 let Ok(id) = item.id.as_str().parse::<u64>() else {

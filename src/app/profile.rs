@@ -509,7 +509,11 @@ pub(crate) fn adopt_profile_follow(
     let Some(state) = state else {
         return false;
     };
-    if state.user != asked {
+    // The same rule the illustration page uses (B1/B4/B5), keyed by the account.
+    if !reply_lands(
+        ReplySurface::Profile(state.user.get()),
+        ReplySurface::Profile(asked.get()),
+    ) {
         return false;
     }
     state.profile.is_followed = confirmed;
