@@ -289,7 +289,11 @@ function Read-Replay {
                 [pscustomobject]@{ Name = "$($_.name)"; Type = "$($_.type)"; X = [int]$_.x; Y = [int]$_.y; Width = [int]$_.width; Height = [int]$_.height }
             })
         $keys = @($walked | ForEach-Object { Get-StopKey -Name $_.Name -Type $_.Type -X $_.X -Y $_.Y -Width $_.Width -Height $_.Height } | Select-Object -Unique)
-        $walkEnd = if ($p.walkEnd) { "$($p.walkEnd)" } else { "cycle" }
+        # G58 (E4): a replay that does not say the walk cycled has not said it cycled.
+        # This defaulted to "cycle", so every fixture written before walkEnd existed
+        # claimed a complete walk - which is the same defect the assertion below fixes,
+        # one layer down.
+        $walkEnd = if ($p.walkEnd) { "$($p.walkEnd)" } else { "cap" }
         $out += [pscustomobject]@{
             page           = "$($p.page)"
             total          = [int]$p.total
@@ -495,7 +499,23 @@ if ($null -eq $budgetDoc) {
 }
 
 $failures = @()
+
+# G58 (E3): a skip is not a pass. Until round twelve only "nothing was measured at all"
+# left by 77, so ten skipped pages beside one measured one printed the budget sentence
+# and exited 0. The rule is the one tools/walk-lib.ps1 ships, so the selftest can drive
+# it without a window; here it is applied to what this run actually measured.
+# A replay is exempt by construction: the file *is* the page set it was recorded for,
+# and the count in --Pages is the live selection, not a claim about the fixture.
+if (-not $Replay) {
+    $failures += @(Get-UnmeasuredFailure -Pages $Pages -Results $results -Skips $skips)
+}
+
 foreach ($r in $results) {
+    # G58 (E4): walkEnd was printed and asserted by nobody, while
+    # tools/verify-focus.ps1:458 fails on the same condition. A walk that ended at "cap"
+    # did not come back round, so it proves the stops it visited were reachable and
+    # nothing about the rest of the ring.
+    $failures += @(Get-WalkEndFailure -Page $r.page -WalkEnd $r.walkEnd)
     $need = Get-Need -Page $r.page
     if ($null -eq $need) {
         # G4: a page absent from the budget is a failure that names the page, not a

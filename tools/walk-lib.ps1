@@ -204,6 +204,60 @@ function Compare-StopCoverage {
     }
 }
 
+<#
+  G58 (E3): a page this run asked for and did not measure is a failure, not a gap.
+
+  Round twelve measured the hole: tools/verify-a11y.ps1 exited 77 only when *nothing*
+  was measured, so a run in which ten pages were skipped and one was measured printed
+  the budget sentence and exited 0. Ten pages had no accessibility floor asserted
+  against them and the gate called it a pass.
+
+  The rule is stated as a difference rather than as a count, because the count is what
+  the gate has to report: every requested page either has a row in -Results or is named
+  with the reason it does not. -Skips carries the reasons Measure-Page already records,
+  so the failure names the host condition instead of just the page.
+#>
+function Get-UnmeasuredFailure {
+    param(
+        [string[]]$Pages = @(),
+        [object[]]$Results = @(),
+        [string[]]$Skips = @()
+    )
+    $failures = New-Object System.Collections.Generic.List[string]
+    $measured = @($Results | Where-Object { $null -ne $_ } | ForEach-Object { "$($_.page)" })
+    foreach ($page in $Pages) {
+        if ($measured -contains $page) { continue }
+        $reason = @($Skips | Where-Object { $_ -like ($page + ":*") })
+        $why = if ($reason.Count) { $reason[0] } else { "no measurement and no recorded reason" }
+        $failures.Add(("{0}: in the requested page set and not measured ({1}) - a page that was skipped did not pass, so {2} of {3} pages met the budget at most" -f $page, $why, $measured.Count, $Pages.Count))
+    }
+    return $failures.ToArray()
+}
+
+<#
+  G58 (E4): a walk that did not come back round has not proved anything about the ring.
+
+  walkEnd is printed by tools/verify-a11y.ps1 and was asserted by nobody, while
+  tools/verify-focus.ps1 fails on the same condition (:458) - two gates reading one fact
+  and only one of them acting on it. A walk that ends at "cap" visited MaxSteps stops and
+  never returned to its first, so "reached == required" says the controls it happened to
+  visit were reachable and nothing about the order it stopped in.
+
+  "cycle" is the only accepted value. The message says what ended the walk, because
+  "cap" (a budget) and "no-focus" (focus left the ring) are different defects.
+#>
+function Get-WalkEndFailure {
+    param([string]$Page, [string]$WalkEnd)
+    if ($WalkEnd -eq "cycle") { return @() }
+    $what = switch ($WalkEnd) {
+        "cap" { "the walk hit its step cap without returning to its first stop, so the ring after that point was never measured" }
+        "no-focus" { "focus left the page's ring (nothing focusable was found several times in a row)" }
+        "skipped" { "the Tab walk was skipped, so no cycle was measured at all" }
+        default { "the walk ended without reporting a cycle" }
+    }
+    return @(("{0}: the Tab walk ended at '{1}', not 'cycle' - {2}" -f $Page, $WalkEnd, $what))
+}
+
 # One stop, in the words a failure message needs.
 function Format-StopLabel {
     param($Stop)

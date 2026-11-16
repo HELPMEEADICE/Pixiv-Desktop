@@ -375,7 +375,9 @@ Add-Case -Name "child-exit" -Wanted "no child pipe dropped; layout and icons say
   which is also what lets the CI job (G25) run this file at all.
 #>
 function New-A11yFixture {
-    param([string]$Name, [int]$WalkedCount)
+    # -WalkEnd "" omits the field, which is the shape every fixture written before
+    # round twelve has - and G58 (E4) is about what the reader does with that shape.
+    param([string]$Name, [int]$WalkedCount, [string]$WalkEnd = "cycle")
     $dir = Join-Path $WorkDir "a11y"
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $needStops = @()
@@ -398,10 +400,10 @@ function New-A11yFixture {
         focusable = 31
         invokable = 20
         named     = 90
-        walkEnd   = "cycle"
         required  = $needStops
         walked    = @($needStops | Select-Object -First $WalkedCount)
     }
+    if ($WalkEnd) { $page["walkEnd"] = $WalkEnd }
     $path = Join-Path $dir "$Name.json"
     (@($page) | ConvertTo-Json -Depth 6) | Set-Content -Path $path -Encoding utf8
     # Floors of 1: the only question a replay here asks is coverage, so a budget failure
@@ -476,6 +478,28 @@ $green = New-A11yFixture -Name "walk-green" -WalkedCount 31
 $runGreen = Invoke-A11yReplay -Case $green
 $rowGreen = @($runGreen.Output -split "\r?\n" | Where-Object { $_ -match "reached=" }) -join " / "
 Add-Case -Name "a11y-green" -Wanted "exit 0 and 1 page meets the budget" -Ok ($runGreen.Code -eq 0 -and $runGreen.Output -match "reached=31/31" -and $runGreen.Output -match "1 pages meet") -Evidence ("exit={0} {1}" -f $runGreen.Code, $rowGreen.Trim())
+
+# ---- case a11y-skip: G58 - a skip is not a pass, and neither is a walk that never cycled ----
+# Both halves are shipped code. The predicates are tools/walk-lib.ps1's, which is what
+# tools/verify-a11y.ps1 applies to what it measured, so the experiment drives the rule
+# itself rather than a copy of it: two pages asked for, one measured, one with a recorded
+# reason - the exact shape that printed the budget sentence and exited 0 before.
+# The replay half is the other direction: a recorded measurement whose walk did not come
+# back round (and a fixture that predates the field, which must not be read as a cycle)
+# has to fail and name what ended the walk.
+$partialPages = @(Get-UnmeasuredFailure -Pages @("home", "settings") -Results @([pscustomobject]@{ page = "home" }) -Skips @("settings: no binary at target\debug\pixiv-desktop.exe"))
+$wholePages = @(Get-UnmeasuredFailure -Pages @("home") -Results @([pscustomobject]@{ page = "home" }) -Skips @())
+$cappedWalk = @(Get-WalkEndFailure -Page "home" -WalkEnd "cap")
+$cyclicWalk = @(Get-WalkEndFailure -Page "home" -WalkEnd "cycle")
+$noCycle = New-A11yFixture -Name "walk-nocycle" -WalkedCount 31 -WalkEnd ""
+$runNoCycle = Invoke-A11yReplay -Case $noCycle
+$rowNoCycle = @($runNoCycle.Output -split "\r?\n" | Where-Object { $_ -match "reached=|ended at" }) -join " / "
+# The wiring, read rather than assumed: the rules above are only worth their text if the
+# gate applies them. Reading the script is the same shape case focus-full uses, because
+# the live half - a page that could not be measured beside one that could - needs a
+# window, and that experiment is the Lead's Phase 3 run.
+$a11yWired = ((Get-Content $A11yScript -Raw) -match 'Get-UnmeasuredFailure') -and ((Get-Content $A11yScript -Raw) -match 'Get-WalkEndFailure')
+Add-Case -Name "a11y-skip" -Wanted "one of two pages measured is a failure naming settings; a walk with no cycle fails and names cap" -Ok ($partialPages.Count -eq 1 -and $partialPages[0] -match "settings" -and $partialPages[0] -match "no binary" -and $wholePages.Count -eq 0 -and $cappedWalk.Count -eq 1 -and $cyclicWalk.Count -eq 0 -and $runNoCycle.Code -eq 1 -and $runNoCycle.Output -match "ended at 'cap'" -and $a11yWired) -Evidence ("2 asked/1 measured -> [{0}]; both measured -> {1}; cap -> {2}; cycle -> {3}; replay without walkEnd: exit={4} {5}; wired={6}" -f ($partialPages -join " / "), $wholePages.Count, $cappedWalk.Count, $cyclicWalk.Count, $runNoCycle.Code, $rowNoCycle.Trim(), $a11yWired)
 
 # ---- case focus-full: G22 - one page walks every stop; a ringless stop is invisible ----
 # The old behaviour is the same function with -FullPages @(), checked beside the new one:
