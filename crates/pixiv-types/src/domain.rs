@@ -720,9 +720,43 @@ impl RankingKind {
         }
     }
 
+    /// The header a ranking page prints: the board's own date when the answer
+    /// carried one, and the board's name alone when it did not (F5).
+    ///
+    /// `ranking.php` names the board it answered (`"date": "20261116"`) and the
+    /// mapping has always dropped it, so the page printed nothing where the date
+    /// belonged and 日榜 was left implying "today". An empty date draws **no
+    /// separator**: a header that ends in a dangling " · " is a worse lie than one
+    /// that says only which board it is.
+    #[must_use]
+    pub fn header(self, date: &str) -> String {
+        let date = iso_date(date);
+        if date.is_empty() {
+            self.label().to_string()
+        } else {
+            format!("{} · {date}", self.label())
+        }
+    }
+
     #[must_use]
     pub fn from_mode(mode: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.mode() == mode)
+    }
+}
+
+/// `20261116` -> `2026-11-16`, and anything that is not that shape unchanged.
+///
+/// `ranking.php` sends the date as eight digits with no separators; the same field
+/// on some boards is already dashed or empty, and a formatter that guessed would
+/// be reformatting an answer it did not understand. Only the one shape it knows is
+/// rewritten (F5).
+#[must_use]
+pub fn iso_date(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.len() == 8 && raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        format!("{}-{}-{}", &raw[..4], &raw[4..6], &raw[6..8])
+    } else {
+        raw.to_string()
     }
 }
 
@@ -743,6 +777,26 @@ pub enum SortOrder {
 }
 
 impl SortOrder {
+    /// Every order the search control offers, in the order its labels are drawn.
+    ///
+    /// The list lives beside `label()` because the two are one contract (F2): the
+    /// index the segmented control reports is an index into *this* array, and a
+    /// page that listed the words itself could offer a fourth one the client
+    /// cannot send.
+    pub const ALL: [Self; 3] = [Self::DateDesc, Self::DateAsc, Self::PopularDesc];
+
+    /// The order at a control's index; `None` past the end.
+    #[must_use]
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
+    /// The words the control draws, in its own order.
+    #[must_use]
+    pub fn labels() -> Vec<&'static str> {
+        Self::ALL.iter().map(|order| order.label()).collect()
+    }
+
     #[must_use]
     pub const fn as_param(self) -> &'static str {
         match self {
@@ -775,6 +829,21 @@ pub enum SearchTarget {
 }
 
 impl SearchTarget {
+    /// Every match mode the control offers, in the order its labels are drawn.
+    pub const ALL: [Self; 3] = [Self::TagFull, Self::TagPartial, Self::TitleCaption];
+
+    /// The mode at a control's index; `None` past the end.
+    #[must_use]
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+
+    /// The words the control draws, in its own order.
+    #[must_use]
+    pub fn labels() -> Vec<&'static str> {
+        Self::ALL.iter().map(|mode| mode.label()).collect()
+    }
+
     #[must_use]
     pub const fn as_param(self) -> &'static str {
         match self {
@@ -1926,6 +1995,54 @@ mod tests {
         assert_eq!(IllustKind::from_wire(1), IllustKind::Manga);
         assert_eq!(IllustKind::from_wire(2), IllustKind::Ugoira);
         assert_eq!(IllustKind::Ugoira.code(), 2);
+    }
+
+    /// F2: the two controls' labels and their indices are one list, and every
+    /// index the control can report is a value the URL can carry.
+    #[test]
+    fn the_search_controls_offer_exactly_the_values_the_url_can_carry() {
+        assert_eq!(SortOrder::labels(), vec!["最新", "最早", "热门"]);
+        assert_eq!(SortOrder::ALL.len(), 3);
+        for (index, order) in SortOrder::ALL.into_iter().enumerate() {
+            assert_eq!(SortOrder::from_index(index), Some(order));
+            assert!(matches!(
+                order.as_param(),
+                "date_d" | "date_a" | "popular_d"
+            ));
+        }
+        assert_eq!(SortOrder::from_index(3), None, "no fourth order exists");
+
+        assert_eq!(
+            SearchTarget::labels(),
+            vec!["标签精确", "标签部分", "标题/简介"]
+        );
+        for (index, mode) in SearchTarget::ALL.into_iter().enumerate() {
+            assert_eq!(SearchTarget::from_index(index), Some(mode));
+            assert!(matches!(mode.as_param(), "s_tag_full" | "s_tag" | "s_tc"));
+        }
+        assert_eq!(SearchTarget::from_index(3), None);
+    }
+
+    /// F5: the ranking header names the board's date, and an empty date draws no
+    /// separator.
+    #[test]
+    fn a_ranking_header_names_its_date_and_draws_no_separator_without_one() {
+        assert_eq!(iso_date("20261116"), "2026-11-16");
+        // Shapes it does not understand are passed through, not guessed at.
+        assert_eq!(iso_date("2026-11-16"), "2026-11-16");
+        assert_eq!(iso_date("2026/11/16"), "2026/11/16");
+        assert_eq!(iso_date(""), "");
+        assert_eq!(iso_date("   "), "");
+
+        assert_eq!(RankingKind::Daily.header("20261116"), "日榜 · 2026-11-16");
+        assert_eq!(RankingKind::Weekly.header("20261109"), "周榜 · 2026-11-09");
+        // An empty date is the board's name and nothing else.
+        assert_eq!(RankingKind::Daily.header(""), "日榜");
+        assert_eq!(RankingKind::Monthly.header("   "), "月榜");
+        assert!(
+            !RankingKind::Daily.header("").contains('·'),
+            "no dangling separator"
+        );
     }
 
     #[test]
