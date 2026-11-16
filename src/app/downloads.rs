@@ -1,5 +1,6 @@
 use super::*;
 use pixiv_download::{DownloadTask, TaskState};
+use pixiv_store::{DownloadRecord, StoreError};
 
 /// Take the one queue snapshot a tick is allowed to take.
 ///
@@ -31,6 +32,224 @@ impl App {
             manager.run(client).await;
         });
     }
+}
+
+// ------------------------------------------------ F1: the local record band
+//
+// Everything below is the second half of the downloads page: not the queue, which
+// is a picture of what is happening now, but the record of what happened before -
+// one row per page that reached the disk, kept in SQLite so it survives a restart.
+// `pixiv-download` promises exactly that ("the list survives a restart",
+// crates/pixiv-download/src/lib.rs:13) and until this round nothing wrote it.
+
+/// How many records the band reads. A pageful, not "everything ever": the band is
+/// a list of files, and a limit is also what keeps the read cheap enough to repeat
+/// on the queue's tick.
+#[allow(dead_code)] // read by the band, once its `ui/main.slint` binding exists
+pub(crate) const LOCAL_RECORD_LIMIT: usize = 50;
+
+/// "2026-11-16 21:04" for a Unix timestamp, in UTC.
+///
+/// Hand-rolled because the workspace has no date crate and one stamp is not a
+/// reason to add one. The conversion is Howard Hinnant's `civil_from_days`: days
+/// since the epoch shifted forward by a 400-year era, which makes every leap rule
+/// one integer division.
+#[allow(dead_code)] // as `local_row`
+pub(crate) fn stamp(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let rest = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        rest / 3_600,
+        (rest % 3_600) / 60
+    )
+}
+
+#[allow(dead_code)] // as `stamp`
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { y + 1 } else { y }, month, day)
+}
+
+/// One row of the local record band, before it is a Slint row.
+///
+/// A plain struct rather than the generated `LocalRow`: Slint exports to Rust only
+/// the types the window's own graph reaches, and the band's transport is a property
+/// of `DownloadsPage` bound at a `ui/main.slint` line this track does not own. The
+/// page declares and draws the band already (`ui/pages/downloads.slint`), it draws
+/// nothing while `local-rows` is empty, and one binding plus four callbacks make
+/// these rows appear; §1 says a track reports that line instead of editing it, so
+/// what is left over is the `LocalRecord -> LocalRow` conversion at that binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalRecord {
+    pub(crate) id: i32,
+    pub(crate) title: String,
+    pub(crate) author: String,
+    pub(crate) path: String,
+    /// "2026-11-16 21:04", UTC.
+    pub(crate) when: String,
+    /// 0 the file is there, 1 the record outlived it.
+    pub(crate) state: i32,
+}
+
+/// One band row from one stored record.
+///
+/// `exists` is a parameter rather than a call so the test can say "this one is
+/// gone" without a filesystem, the same shape `snapshot_downloads` takes its
+/// source in.
+#[allow(dead_code)] // read by the band, once its binding exists (see `LocalRecord`)
+pub(crate) fn local_row(
+    record: &DownloadRecord,
+    exists: impl FnOnce(&str) -> bool,
+) -> LocalRecord {
+    LocalRecord {
+        id: i32::try_from(record.id).unwrap_or(i32::MAX),
+        title: record.title.clone(),
+        author: record.author.clone(),
+        path: record.file_path.clone(),
+        when: stamp(record.created_at),
+        // 0 the file is there, 1 the record outlived it. A record is not deleted
+        // because somebody moved a file: the row says which file it was.
+        state: i32::from(!exists(&record.file_path)),
+    }
+}
+
+/// How many records the band lists.
+///
+/// The table is append-only and the card sits above the queue: ten rows is what the
+/// page's height budget holds at the 720 px minimum window without pushing the queue
+/// below the fold.
+pub(crate) const LOCAL_BAND_ROWS: usize = 10;
+
+/// The Slint half of one band row.
+///
+/// Two structs, one conversion: `LocalRecord` is what the tests build without a
+/// window, `LocalRow` is what Slint exports, and this is the binding the plan's §1
+/// seam table names (F1).
+fn to_local_row(record: LocalRecord) -> LocalRow {
+    LocalRow {
+        id: record.id,
+        title: record.title.into(),
+        author: record.author.into(),
+        path: record.path.into(),
+        when: record.when.into(),
+        state: record.state,
+    }
+}
+
+pub(crate) fn local_rows(
+    records: &[DownloadRecord],
+    exists: impl Fn(&str) -> bool,
+) -> Vec<LocalRecord> {
+    records
+        .iter()
+        .map(|record| local_row(record, &exists))
+        .collect()
+}
+
+/// The sentence the band's bar carries, or "" when every file is still there.
+///
+/// The rows are named, not counted: "1 个文件已不在" leaves the reader to work out
+/// which one, and the row already knows.
+#[allow(dead_code)] // as `local_row`
+pub(crate) fn missing_note(rows: &[LocalRecord]) -> String {
+    let missing: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.state != 0)
+        .map(|row| row.title.as_str())
+        .collect();
+    match missing.len() {
+        0 => String::new(),
+        1 => format!(
+            "「{}」记录的文件已不在磁盘上。记录保留，可以重新下载或忘记它。",
+            missing[0]
+        ),
+        count => format!(
+            "{count} 条记录的文件已不在磁盘上：{}。记录保留，可以重新下载或忘记它。",
+            missing.join("、")
+        ),
+    }
+}
+
+/// The pages this tick is the first to see finished, as records to write.
+///
+/// The queue is a snapshot, so "finished" is a property of the *transition*: a
+/// completed row that the previous snapshot already showed as completed has been
+/// recorded, and the store's UNIQUE pair would refuse it anyway. States 2 and 5 are
+/// both "this page is on disk" - a skipped page is one that was already there - and
+/// a row that has not reached either is still in flight.
+pub(crate) fn finished_records(
+    previous: &VecModel<DownloadRow>,
+    tasks: &[DownloadTask],
+) -> Vec<DownloadRecord> {
+    let mut before: HashMap<i32, i32> = HashMap::with_capacity(previous.row_count());
+    for index in 0..previous.row_count() {
+        if let Some(row) = previous.row_data(index) {
+            before.insert(row.id, row.state);
+        }
+    }
+    let mut out = Vec::new();
+    for task in tasks {
+        if !matches!(task.state, TaskState::Completed | TaskState::Skipped) {
+            continue;
+        }
+        let id = i32::try_from(task.id).unwrap_or(i32::MAX);
+        if matches!(before.get(&id), Some(2 | 5)) {
+            continue;
+        }
+        let Some(path) = task.destination.as_ref() else {
+            continue;
+        };
+        out.push(DownloadRecord {
+            id: 0,
+            illust_id: task.request.illust_id.clone(),
+            title: task.request.title.clone(),
+            author: task.request.author.clone(),
+            page_index: task.request.page_index,
+            file_path: path.display().to_string(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+        });
+    }
+    out
+}
+
+/// The queue request that re-downloads one recorded page.
+///
+/// `None` when the page list no longer has that page: a work can lose a page
+/// between two sessions, and queueing a URL that does not exist would fail later
+/// and somewhere else. The URL comes from the *page* the record names, not from the
+/// record itself - the record only knows where the file was, never what it came
+/// from, because a signed URL is not worth storing.
+#[allow(dead_code)] // driven by `redownload_local`, which waits on the same binding
+pub(crate) fn redownload_request(
+    record: &DownloadRecord,
+    pages: &[PageMeta],
+) -> Option<DownloadRequest> {
+    let page = pages
+        .iter()
+        .find(|page| page.index == record.page_index)
+        .or_else(|| pages.first())?;
+    Some(DownloadRequest {
+        illust_id: record.illust_id.clone(),
+        title: record.title.clone(),
+        author: record.author.clone(),
+        page_index: page.index,
+        page_count: u32::try_from(pages.len()).unwrap_or(1).max(1),
+        url: page.urls.original.clone(),
+        extension: extension_for(&page.urls.original),
+    })
 }
 
 impl App {
@@ -70,8 +289,33 @@ impl App {
     /// page already drew, and the four properties round nine added (§4:
     /// `queue-paused`, `queue-done`, `queue-total`, `throughput`).
     fn publish_downloads(&self, tasks: Vec<DownloadTask>, throughput_bytes_per_second: u64) {
+        // F1: the tick that is the first to see a page finished writes its record.
+        // Read before the rows are patched, because the patched model *is* the
+        // previous state this compares against; the fixture is skipped outright so a
+        // capture cannot book its demo files into the user's record.
+        if !fixture_is_downloads() {
+            let finished = finished_records(&self.download_rows, &tasks);
+            if !finished.is_empty() {
+                let store = self.store.clone();
+                self.rt.spawn(async move {
+                    for record in finished {
+                        match store.insert_download(&record) {
+                            Ok(_) => {}
+                            // A UNIQUE violation is the de-duplication: the pair is
+                            // already recorded, which is the answer rather than a
+                            // failure.
+                            Err(StoreError::Sqlite(message)) if message.contains("UNIQUE") => {}
+                            Err(error) => {
+                                tracing::debug!(%error, "写入本地下载记录失败");
+                            }
+                        }
+                    }
+                });
+            }
+        }
         let view = DownloadsView::build(tasks, throughput_bytes_per_second);
         let ui = self.ui();
+        let previous_done = ui.get_downloads_done();
         let active = view
             .rows
             .iter()
@@ -90,6 +334,158 @@ impl App {
         ui.set_queue_done(view.done);
         ui.set_queue_total(view.total);
         ui.set_throughput(view.throughput.into());
+        // F1: a page that just finished is a record now, so the band re-reads. The
+        // read is a database call, which is why it happens on this edge and at
+        // start-up rather than on every 500 ms tick.
+        if done != previous_done {
+            self.publish_local_band();
+        }
+    }
+}
+
+impl App {
+    /// Publish the local-download band: the records this machine holds, each row
+    /// saying whether the file it names is still there.
+    ///
+    /// Called at start-up, when a page finishes, and after a gesture that changes a
+    /// row. It is a store read on the UI thread on purpose: it runs a handful of
+    /// times per session, and the spawn/marshal cost of doing it off-thread would
+    /// be paid by the asking gesture rather than by a background tick (the standing
+    /// UI-thread store debt is T6 in docs/OPTIMIZATION-PLAN-R11.md, and this call is
+    /// on the edge of it, not inside the tick).
+    pub(crate) fn publish_local_band(&self) {
+        let records = match self.store.downloads(LOCAL_BAND_ROWS) {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::debug!(%error, "读取本地下载记录失败");
+                return;
+            }
+        };
+        let rows = local_rows(&records, |path| std::path::Path::new(path).exists());
+        let note = missing_note(&rows);
+        let ui = self.ui();
+        ui.set_download_local_rows(ModelRc::from(Rc::new(VecModel::from(
+            rows.into_iter().map(to_local_row).collect::<Vec<_>>(),
+        ))));
+        ui.set_download_local_missing(note.into());
+    }
+}
+
+// The band's four gestures. They are complete and tested, and they have no invoker
+// yet: `ui/pages/downloads.slint` declares `local-open` / `local-reveal` /
+// `local-redownload` / `local-forget` and binds them to the band's rows, and the
+// line that connects those four to Rust lives in `ui/main.slint`, which belongs to
+// another track this round (plan §1: report it, do not edit it).
+#[allow(dead_code)]
+impl App {
+    /// Open one recorded file with its default application.
+    ///
+    /// A record outlives its file on purpose, so "gone" is an answer this method
+    /// has to be able to give: it says so and asks for a refresh, which is what
+    /// turns the row's state to "文件已不在" without waiting for the next tick.
+    pub(crate) fn open_local(&self, path: &str) {
+        let file = std::path::Path::new(path);
+        if !file.is_file() {
+            self.notify(3, format!("文件已不在：{path}"));
+            return;
+        }
+        if let Err(error) = open::that(file) {
+            self.notify(3, format!("无法打开文件：{error}"));
+        }
+    }
+
+    /// Show one recorded file in Explorer, selected.
+    ///
+    /// The same `explorer /select,` call `on_download_open_task` makes for a live
+    /// queue row; a local record is the same file one session later.
+    pub(crate) fn reveal_local(&self, path: &str) {
+        if !std::path::Path::new(path).is_file() {
+            self.notify(3, format!("文件已不在：{path}"));
+            return;
+        }
+        if let Err(error) = std::process::Command::new("explorer")
+            .arg(format!("/select,{path}"))
+            .spawn()
+        {
+            self.notify(3, format!("无法在资源管理器中定位：{error}"));
+        }
+    }
+
+    /// Put one recorded page back in the queue.
+    ///
+    /// The record knows where the file went, not where it came from - a signed URL
+    /// is not worth storing - so the page list is asked for again and the request is
+    /// built from the page the record names. The row comes back as `Queued`, which
+    /// is what the page draws as 等待中: the manager owns it from there.
+    pub(crate) fn redownload_local(&self, path: &str) {
+        if self.mode == Mode::Demo {
+            self.notify(2, "演示模式不写入文件；登录并切换到真实会话后可用");
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.notify(3, "没有可用的网络客户端");
+            return;
+        };
+        let store = self.store.clone();
+        let manager = self.downloads.clone();
+        let path = path.to_string();
+        self.rt.spawn(async move {
+            let record = match store.downloads(LOCAL_RECORD_LIMIT) {
+                Ok(rows) => rows.into_iter().find(|row| row.file_path == path),
+                Err(error) => {
+                    tracing::debug!(%error, "读取本地下载记录失败");
+                    None
+                }
+            };
+            let Some(record) = record else {
+                on_ui(|shared| {
+                    if let Ok(app) = shared.try_borrow() {
+                        app.notify(3, "这条记录已经不在本地记录里");
+                    }
+                });
+                return;
+            };
+            let Ok(number) = record.illust_id.parse::<u64>() else {
+                on_ui(|shared| {
+                    if let Ok(app) = shared.try_borrow() {
+                        app.notify(3, "这条记录的作品 ID 不可用");
+                    }
+                });
+                return;
+            };
+            let outcome = client.illust_pages(Id(number)).await;
+            let queued = outcome
+                .map(|pages| redownload_request(&record, &pages))
+                .map_err(|error| error.to_string());
+            on_ui(move |shared| {
+                let Ok(app) = shared.try_borrow() else {
+                    return;
+                };
+                match queued {
+                    Ok(Some(request)) => {
+                        let title = request.title.clone();
+                        manager.enqueue(vec![request]);
+                        app.push_downloads();
+                        app.notify(1, format!("已重新加入下载队列：{title}"));
+                    }
+                    // The work lost the page the record names: queueing a URL that
+                    // no longer exists would fail later and somewhere else.
+                    Ok(None) => app.notify(3, "这个作品已经没有那一步了，无法重新下载"),
+                    Err(message) => app.notify(3, format!("重新下载失败：{message}")),
+                }
+            });
+        });
+    }
+
+    /// Drop one record. The file is not touched: this is 忘记, not 删除.
+    pub(crate) fn forget_local(&self, id: i32) {
+        let store = self.store.clone();
+        let id = i64::from(id);
+        self.rt.spawn(async move {
+            if let Err(error) = store.delete_download(id) {
+                tracing::debug!(id, %error, "删除本地下载记录失败");
+            }
+        });
     }
 }
 
@@ -651,6 +1047,146 @@ mod tests {
             Some(there.clone()),
             "the export ran on the async worker: {there}"
         );
+    }
+
+    // -------------------------------------------- F1: the local record band
+
+    /// The stamp is UTC, civil, and never a locale: two machines that read the same
+    /// record print the same sentence.
+    #[test]
+    fn a_record_time_is_a_utc_stamp() {
+        assert_eq!(stamp(0), "1970-01-01 00:00");
+        // 1 700 000 000 = 2023-11-14T22:13:20Z.
+        assert_eq!(stamp(1_700_000_000), "2023-11-14 22:13");
+        // A leap day, which is the one date a hand-rolled calendar gets wrong.
+        assert_eq!(stamp(1_709_164_800), "2024-02-29 00:00");
+        assert_eq!(stamp(-1), "1969-12-31 23:59");
+    }
+
+    fn record(id: i64, illust: &str, page: u32, created_at: i64) -> DownloadRecord {
+        DownloadRecord {
+            id,
+            illust_id: illust.into(),
+            title: format!("作品 {illust}"),
+            author: "画师".into(),
+            page_index: page,
+            file_path: format!("C:/downloads/{illust}_p{page}.png"),
+            created_at,
+        }
+    }
+
+    /// F1: a record whose file is gone says so instead of looking finished.
+    #[test]
+    fn a_record_outlives_its_file_and_the_band_says_which() {
+        let records = vec![
+            record(1, "700000001", 0, 1_700_000_000),
+            record(2, "700000001", 1, 1_700_000_060),
+        ];
+        let rows = local_rows(&records, |path| path.ends_with("p0.png"));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[0].state, 0, "the first page is still on disk");
+        assert_eq!(rows[0].when.as_str(), "2023-11-14 22:13");
+        assert_eq!(rows[0].path.as_str(), "C:/downloads/700000001_p0.png");
+        assert_eq!(rows[1].state, 1, "the second page is gone");
+
+        // No panel-level noise when every file is there.
+        assert_eq!(missing_note(&rows[..1]), "");
+        // One missing file is named, not counted.
+        let one = missing_note(&rows);
+        assert!(one.contains("作品 700000001"), "{one}");
+        assert!(one.contains("不在磁盘上"), "{one}");
+
+        // Two are counted and listed: the sentence has to stay readable.
+        let both = local_rows(&records, |_| false);
+        let note = missing_note(&both);
+        assert!(note.starts_with('2'), "{note}");
+        assert!(note.contains('、'), "{note}");
+        assert_eq!(missing_note(&[]), "");
+    }
+
+    /// F1: a page is recorded on the tick that first sees it finished, once.
+    ///
+    /// The negative experiment is the obvious shape - record every completed task -
+    /// which writes the same pair on every tick for as long as the row is on screen.
+    #[test]
+    fn a_finished_page_is_recorded_once_and_a_skipped_one_counts_as_done() {
+        let model = VecModel::<DownloadRow>::from(Vec::new());
+        let mut queued = page_task(1, "700000001", 0, 2, TaskState::Queued);
+        queued.destination = Some(PathBuf::from("C:/downloads/700000001_p0.png"));
+
+        // Still in flight: nothing to record.
+        assert!(finished_records(&model, std::slice::from_ref(&queued)).is_empty());
+
+        // The transition: one record, with the page and the path it went to.
+        let mut finished = queued.clone();
+        finished.state = TaskState::Completed;
+        let records = finished_records(&model, std::slice::from_ref(&finished));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].illust_id, "700000001");
+        assert_eq!(records[0].page_index, 0);
+        assert_eq!(records[0].file_path, "C:/downloads/700000001_p0.png");
+        assert!(records[0].created_at > 0);
+
+        // The next tick sees the same completed task; the model already says so.
+        sync_download_rows(&model, to_download_rows(vec![finished.clone()]));
+        assert!(
+            finished_records(&model, std::slice::from_ref(&finished)).is_empty(),
+            "a completed row that was already published is already recorded"
+        );
+
+        // A skipped page is a page that was already on disk, so it is a record too.
+        let mut skipped = page_task(2, "700000002", 0, 1, TaskState::Skipped);
+        skipped.destination = Some(PathBuf::from("C:/downloads/700000002_p0.png"));
+        assert_eq!(
+            finished_records(&model, std::slice::from_ref(&skipped)).len(),
+            1
+        );
+
+        // A task with no destination never wrote a file, so it has no record.
+        let mut nowhere = page_task(3, "700000003", 0, 1, TaskState::Completed);
+        nowhere.destination = None;
+        assert!(finished_records(&model, std::slice::from_ref(&nowhere)).is_empty());
+    }
+
+    /// F1: re-downloading a record asks for the page the record names, and the row
+    /// it puts back in the queue is `Queued` - which the page draws as 等待中.
+    #[test]
+    fn a_re_download_queues_the_page_the_record_names() {
+        let stored = record(9, "700000001", 1, 1_700_000_000);
+        let pages: Vec<PageMeta> = (0..3)
+            .map(|index| PageMeta {
+                index,
+                width: 800,
+                height: 600,
+                urls: pixiv_types::domain::PageUrls {
+                    thumb_mini: String::new(),
+                    small: String::new(),
+                    regular: String::new(),
+                    original: format!("demo://illust/700000001/{}_p{index}.png", 800 + index),
+                },
+            })
+            .collect();
+
+        let request = redownload_request(&stored, &pages).expect("page 1 exists");
+        assert_eq!(request.illust_id, "700000001");
+        assert_eq!(request.page_index, 1, "the page the record names, not page 0");
+        assert_eq!(request.page_count, 3);
+        assert_eq!(request.url, "demo://illust/700000001/801_p1.png");
+        assert_eq!(request.extension, "png");
+
+        // And the queue really answers `Queued` for it.
+        let manager = DownloadManager::new(DownloadConfig::default());
+        manager.enqueue(vec![request]);
+        let tasks = manager.tasks();
+        assert_eq!(tasks.len(), 1);
+        assert!(matches!(tasks[0].state, TaskState::Queued));
+
+        // A work that lost the page falls back to the first one rather than
+        // queueing a URL that does not exist; an empty page list records nothing.
+        let gone = record(9, "700000001", 7, 1_700_000_000);
+        assert_eq!(redownload_request(&gone, &pages).map(|r| r.page_index), Some(0));
+        assert!(redownload_request(&stored, &[]).is_none());
     }
 
     fn request(id: &str) -> DownloadRequest {

@@ -38,7 +38,7 @@ import {
 import { HomePage } from "pages/home.slint";
 import { GalleryPage } from "pages/gallery.slint";
 import { DetailPage, ViewerPage } from "pages/detail.slint";
-import { DownloadsPage, DownloadRow } from "pages/downloads.slint";
+import { DownloadsPage, DownloadRow, LocalRow } from "pages/downloads.slint";
 import { SettingsPage } from "pages/settings.slint";
 import { ProfilePage } from "pages/profile.slint";
 import { NovelsPage } from "pages/novels.slint";
@@ -433,6 +433,11 @@ export component AppWindow inherits Window {
 
     // ---- downloads ----
     in property <[DownloadRow]> download-rows: [];
+    // F1: the local-download band. Rust reads the records at start-up, when a page
+    // finishes and after a gesture that changes a row, so an empty list here means
+    // "nothing recorded yet" rather than "not asked".
+    in property <[LocalRow]> download-local-rows: [];
+    in property <string> download-local-missing: "";
     in property <int> downloads-active: 0;
     in property <int> downloads-done: 0;
     in property <int> downloads-failed: 0;
@@ -509,6 +514,10 @@ export component AppWindow inherits Window {
     callback download-choose-directory();
     callback download-open-folder();
     callback download-open-task(int);
+    callback local-open(string);
+    callback local-reveal(string);
+    callback local-redownload(string);
+    callback local-forget(int);
 
     // ---- settings ----
     callback sign-in-browser();
@@ -1216,11 +1225,7 @@ export component AppWindow inherits Window {
                         batch-download => { root.batch-download(); }
                         batch-bookmark => { root.batch-bookmark(); }
                         card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
-                        // Profile is track D's page this round (plan §7): it still
-                        // reports the id alone, so the shell is handed 0 and does not
-                        // chase a card whose position it was not told. One line to
-                        // change when D widens `ProfilePage.card-focused`.
-                        card-focused(id) => { root.card-focused(id, 0px); }
+                        card-focused(id, y) => { root.card-focused(id, y); }
                     }
 
                     NovelsPage {
@@ -1372,6 +1377,15 @@ export component AppWindow inherits Window {
                         choose-directory => { root.download-choose-directory(); }
                         open-folder => { root.download-open-folder(); }
                         open-task(id) => { root.download-open-task(id); }
+
+                        // F1: the band's four gestures, forwarded to Rust like every
+                        // other one on this page.
+                        local-rows: root.download-local-rows;
+                        local-missing: root.download-local-missing;
+                        local-open(path) => { root.local-open(path); }
+                        local-reveal(path) => { root.local-reveal(path); }
+                        local-redownload(path) => { root.local-redownload(path); }
+                        local-forget(id) => { root.local-forget(id); }
 
                         // F5
                         queue-paused: root.queue-paused;

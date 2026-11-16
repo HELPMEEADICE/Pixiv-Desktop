@@ -66,7 +66,8 @@ use crate::images::{COVER_CONCURRENCY, CoverLoader};
 use crate::layout::{self, GridGeometry};
 use crate::route::{History, Route, RouteHistory, RouteParam};
 use crate::{
-    AppWindow, Destination, DownloadRow, IllustItem, NovelBlock, NovelChapter, NovelRow, NovelView,
+    AppWindow, Destination, DownloadRow, IllustItem, LocalRow, NovelBlock, NovelChapter, NovelRow,
+    NovelView,
     ProfileStatItem, ReaderView, RecommendTagItem, RecommendUserItem, SuggestionItem, Theme,
     ThemeMode, Tip, ViewerPage,
 };

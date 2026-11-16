@@ -2,6 +2,42 @@ use super::*;
 
 pub(crate) fn install(app: &Shared) {
     let ui = app.borrow().ui();
+    // F1: the band is read once here rather than on the first tick, because the
+    // records outlive the session and a reader who opens Downloads before
+    // downloading anything must still see what is already on disk.
+    app.borrow().publish_local_band();
+    {
+        let shared = app.clone();
+        ui.on_local_open(move |path| {
+            if let Ok(app) = shared.try_borrow() {
+                app.open_local(path.as_str());
+            }
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_local_reveal(move |path| {
+            if let Ok(app) = shared.try_borrow() {
+                app.reveal_local(path.as_str());
+            }
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_local_redownload(move |path| {
+            if let Ok(app) = shared.try_borrow() {
+                app.redownload_local(path.as_str());
+            }
+        });
+    }
+    {
+        let shared = app.clone();
+        ui.on_local_forget(move |id| {
+            if let Ok(app) = shared.try_borrow() {
+                app.forget_local(id);
+            }
+        });
+    }
     {
         let shared = app.clone();
         ui.on_download_choose_directory(move || {

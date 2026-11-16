@@ -11,7 +11,7 @@
 // cell, so the badge, the buttons and the state glyph all share one centre line.
 
 import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
-import { AppButton, IconButton, ButtonKind, Divider, StateView, StateKind, Badge, InfoBar, InfoKind, PageScroll, ProgressBar, SettingsCard, IconPresenter, IconSlot, Label, BodyText } from "../components.slint";
+import { AppButton, IconButton, ButtonKind, Divider, StateView, StateKind, Badge, InfoBar, InfoKind, PageScroll, ProgressBar, SettingsCard, SectionHeader, IconPresenter, IconSlot, Label, BodyText } from "../components.slint";
 
 export struct DownloadRow {
     id: int,
@@ -28,6 +28,123 @@ export struct DownloadRow {
     state: int,
     message: string,
     path: string,
+}
+
+/// One row of the local record band (F1): a file this app already wrote, read
+/// back from SQLite rather than from the live queue.
+///
+/// `id` is the store's own row id, which is what 忘记 addresses; the three
+/// string actions carry `path`, because the file is the one thing a re-open,
+/// a reveal and a re-queue all have to resolve and it is the field the record
+/// was written with. `state` is 0 while the file is still on disk and 1 once the
+/// record outlives it - a record is not deleted because somebody moved a file,
+/// and a row that lied about that would be the silent failure the band exists to
+/// prevent.
+export struct LocalRow {
+    id: int,
+    title: string,
+    author: string,
+    path: string,
+    /// "2026-11-16 21:04" - formatted once by Rust.
+    when: string,
+    /// 0 the file is there, 1 the file is gone.
+    state: int,
+}
+
+/// One local record. Same row grammar as `TaskRow` above - a fixed-height row,
+/// one caption line, icon actions on the right - because these rows sit on the
+/// same page and a second row style would be a second thing to keep aligned.
+component LocalRecordRow inherits Rectangle {
+    in property <LocalRow> entry;
+
+    callback open(string);
+    callback reveal(string);
+    callback redownload(string);
+    callback forget(int);
+
+    out property <bool> present: root.entry.state == 0;
+
+    height: Theme.nav-item-height * 2;
+    border-radius: Theme.radius-md;
+    background: ta.has-hover ? Theme.layer-alt : transparent;
+
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: root.entry.title + " · " + root.entry.when;
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-3;
+
+        Rectangle {
+            width: Theme.control-height;
+            height: 100%;
+
+            IconPresenter {
+                name: root.present ? "folder" : "warning";
+                glyph-size: Theme.icon-size;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                tint: root.present ? Theme.accent-ink : Theme.warning;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+
+            Label {
+                text: root.entry.title;
+                color: Theme.text;
+            }
+            Label {
+                role: TextRole.Caption;
+                text: root.entry.author + " · " + root.entry.when;
+                color: Theme.text-secondary;
+            }
+            Label {
+                role: TextRole.Caption;
+                text: root.present ? root.entry.path : root.entry.path + "（文件已不在）";
+                color: root.present ? Theme.text-tertiary : Theme.warning;
+            }
+        }
+
+        // A file that is gone cannot be opened or revealed, so the two controls
+        // say so by being disabled rather than by doing nothing when pressed.
+        IconButton {
+            icon: "open";
+            tip: root.present ? "打开文件" : "文件已不在，无法打开";
+            size: Theme.control-height-sm;
+            row-height: Theme.nav-item-height * 2;
+            enabled: root.present;
+            clicked => { root.open(root.entry.path); }
+        }
+        IconButton {
+            icon: "folder";
+            tip: root.present ? "在资源管理器中显示" : "文件已不在，无法定位";
+            size: Theme.control-height-sm;
+            row-height: Theme.nav-item-height * 2;
+            enabled: root.present;
+            clicked => { root.reveal(root.entry.path); }
+        }
+        IconButton {
+            icon: "refresh";
+            tip: "重新下载这个作品";
+            size: Theme.control-height-sm;
+            row-height: Theme.nav-item-height * 2;
+            clicked => { root.redownload(root.entry.path); }
+        }
+        IconButton {
+            icon: "dismiss";
+            tip: "忘记这条记录（文件保留）";
+            size: Theme.control-height-sm;
+            row-height: Theme.nav-item-height * 2;
+            clicked => { root.forget(root.entry.id); }
+        }
+    }
+
+    ta := TouchArea { }
 }
 
 /// Row metric, mirrored by the state-colour logic below.
@@ -234,6 +351,24 @@ export component DownloadsPage inherits Rectangle {
     callback resume-task(int);
     callback toggle-pause-all();
 
+    // ---- round eleven (F1): the local record ----
+    // The frozen seam (§1). `local-rows` is empty until an owner fills it, and an
+    // empty band draws nothing: the page is exactly what it was before this round
+    // for anybody who never downloaded anything.
+    in property <[LocalRow]> local-rows: [];
+    /// The sentence under the band's heading, empty when every recorded file is
+    /// still on disk. Produced by Rust: the rows know which file is missing, and a
+    /// second opinion here would be free to disagree with them.
+    in property <string> local-missing: "";
+    /// Open the recorded file.
+    callback local-open(string);
+    /// Show it in Explorer.
+    callback local-reveal(string);
+    /// Put the work back in the download queue.
+    callback local-redownload(string);
+    /// Drop the record; the file is not touched.
+    callback local-forget(int);
+
     /// `done` out of `total`, clamped: a total of 0 is "nothing queued", not a divide
     /// by zero and not a full bar.
     out property <float> queue-progress: root.queue-total > 0
@@ -433,6 +568,48 @@ export component DownloadsPage inherits Rectangle {
                 reveal => { root.open-task(row.id); }
                 pause => { root.pause-task(row.id); }
                 resume => { root.resume-task(row.id); }
+            }
+        }
+
+        // ---- F1: 已完成（本地记录） ----
+        // What the queue did in previous sessions, read back from SQLite. It sits
+        // under the queue on purpose: the queue is what is happening, this is what
+        // happened, and a reader scanning the page wants them in that order.
+        if root.local-rows.length > 0 : Rectangle {
+            height: local-card.preferred-height;
+            border-radius: Theme.radius-lg;
+            background: Theme.layer;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            local-card := VerticalLayout {
+                padding-top: Theme.space-2;
+                padding-bottom: Theme.space-2;
+                padding-left: Theme.space-3;
+                padding-right: Theme.space-3;
+                spacing: Theme.space-1;
+
+                SectionHeader {
+                    title: "已完成（本地记录）";
+                    subtitle: root.local-rows.length + " 个文件已写入磁盘，记录保存在本机";
+                }
+
+                // A record that outlived its file says so in a bar rather than
+                // failing silently when a row is pressed: the row is still the place
+                // to re-download or forget from, so the bar explains, it does not block.
+                if root.local-missing != "" : InfoBar {
+                    kind: InfoKind.Warning;
+                    title: "有记录找不到文件";
+                    message: root.local-missing;
+                }
+
+                for row[i] in root.local-rows : LocalRecordRow {
+                    entry: row;
+                    open(path) => { root.local-open(path); }
+                    reveal(path) => { root.local-reveal(path); }
+                    redownload(path) => { root.local-redownload(path); }
+                    forget(id) => { root.local-forget(id); }
+                }
             }
         }
     }
