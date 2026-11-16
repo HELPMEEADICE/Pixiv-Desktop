@@ -1,5 +1,5 @@
 {
-  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. Written by tools/verify-a11y.ps1 -Update, which ratchets: each floor is max(previous, measured), so a re-pin on a degraded build cannot lower one. invokable = elements with an InvokePattern, distinctTab = distinct stops the Tab walk reached before its (Name, Type, rectangle) identity repeated - G21, round nine: the pair alone ended the walk at the second control sharing a name and read as a cycle. One floor was lowered once, by hand and on purpose: settings minFocusable 20 -> 19, because round nine removed the duplicate Edit node TextField used to publish (one focusable node was reported twice, and the second copy was never reachable) - a floor above what the tree can produce is unsatisfiable, which is not the same thing as a guard. The new coverage assertion is what now stops that class from coming back. Round eleven keys the pages from tools/page-set.ps1 and adds the three novel destinations the shell has carried since round ten; no desktop run has measured them yet, so their floors are seeded at 0 - a seeded zero bounds nothing, and the first measured -Update ratchets it up like every other floor (G15).",
+  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. Written by tools/verify-a11y.ps1 -Update, which ratchets: each floor is max(previous, measured), so a re-pin on a degraded build cannot lower one. invokable = elements with an InvokePattern, distinctTab = distinct stops the Tab walk reached before its (Name, Type, rectangle) identity repeated - G21, round nine: the pair alone ended the walk at the second control sharing a name and read as a cycle.",
   "default": {
     "minInvokable": 1,
     "minFocusable": 2,
@@ -10,59 +10,59 @@
   },
   "pages": {
     "home": {
-      "minInvokable": 34,
-      "minFocusable": 44,
-      "minTabStops": 51
+      "minInvokable": 42,
+      "minFocusable": 51,
+      "minTabStops": 54
     },
     "discovery": {
-      "minInvokable": 24,
-      "minFocusable": 35,
-      "minTabStops": 38
+      "minInvokable": 36,
+      "minFocusable": 46,
+      "minTabStops": 41
     },
     "ranking": {
-      "minInvokable": 31,
-      "minFocusable": 43,
-      "minTabStops": 71
+      "minInvokable": 42,
+      "minFocusable": 53,
+      "minTabStops": 74
     },
     "search": {
-      "minInvokable": 19,
-      "minFocusable": 21,
-      "minTabStops": 21
-    },
-    "bookmarks": {
-      "minInvokable": 20,
-      "minFocusable": 30,
+      "minInvokable": 22,
+      "minFocusable": 23,
       "minTabStops": 24
     },
+    "bookmarks": {
+      "minInvokable": 31,
+      "minFocusable": 40,
+      "minTabStops": 27
+    },
     "history": {
-      "minInvokable": 12,
-      "minFocusable": 14,
-      "minTabStops": 14
+      "minInvokable": 15,
+      "minFocusable": 16,
+      "minTabStops": 17
     },
     "downloads": {
-      "minInvokable": 16,
-      "minFocusable": 18,
-      "minTabStops": 18
+      "minInvokable": 19,
+      "minFocusable": 20,
+      "minTabStops": 21
     },
     "settings": {
-      "minInvokable": 16,
-      "minFocusable": 19,
-      "minTabStops": 23
+      "minInvokable": 18,
+      "minFocusable": 20,
+      "minTabStops": 27
     },
     "novels": {
-      "minInvokable": 0,
-      "minFocusable": 0,
-      "minTabStops": 0
+      "minInvokable": 17,
+      "minFocusable": 19,
+      "minTabStops": 20
     },
     "novel": {
-      "minInvokable": 0,
-      "minFocusable": 0,
-      "minTabStops": 0
+      "minInvokable": 15,
+      "minFocusable": 16,
+      "minTabStops": 17
     },
     "novel-reader": {
-      "minInvokable": 0,
-      "minFocusable": 0,
-      "minTabStops": 0
+      "minInvokable": 15,
+      "minFocusable": 16,
+      "minTabStops": 17
     }
   }
 }
