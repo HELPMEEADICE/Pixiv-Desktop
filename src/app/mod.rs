@@ -617,6 +617,9 @@ mod tests {
     use super::downloads::{sync_download_rows, to_download_rows};
     use super::helpers::{history_illust, retry_url};
     use super::settings::describe_session_error;
+    // Track B (docs/OPTIMIZATION-PLAN-R11.md §2.2) · the failure-honesty tests.
+    use super::detail::{detail_note, read_detail, toggle_allowed, viewer_page_count, FollowState};
+    use super::feed::{append_feed_page, rank_in, rank_table};
     use crate::DownloadRow;
     use pixiv_download::{DownloadRequest, DownloadTask, TaskState};
     use pixiv_types::domain::PageMeta;
@@ -930,5 +933,449 @@ mod tests {
         let mut no_path = task(TaskState::Cancelled, 0, None);
         no_path.destination = None;
         assert_eq!(to_download_rows(vec![no_path])[0].path.as_str(), "");
+    }
+
+    // =====================================================================
+    // Track B - failure honesty (docs/OPTIMIZATION-PLAN-R11.md §2.2 and §6)
+    // =====================================================================
+
+    /// One feed row, the way a loader hands it over.
+    fn feed_row(id: u64, title: &str) -> super::Illust {
+        let mut illust = history_illust(&pixiv_store::HistoryEntry {
+            illust_id: id.to_string(),
+            title: title.to_string(),
+            author: "author".into(),
+            thumb_url: "https://i.pximg.net/cover.jpg".into(),
+            viewed_at: 0,
+        });
+        illust.page_count = 1;
+        illust
+    }
+
+    /// T1 - a failed page list must not turn a 30-page work into a one-page one,
+    /// and a failed profile read must not be drawn as 「未关注」.
+    ///
+    /// Both reads used to be collapsed at the source: unwrap_or_else(|_| Vec::new())
+    /// and .unwrap_or(false). The assertion that fails on the old code is the one
+    /// about 「unknown」: there was no state a failure could travel in.
+    #[test]
+    fn t1_a_failed_side_read_stays_a_failure() {
+        use pixiv_types::PixivError;
+        let mut illust = feed_row(9_001, "三十页");
+        illust.page_count = 30;
+
+        let payload = read_detail(
+            illust.clone(),
+            Err(PixivError::Network("timeout".into())),
+            Ok(true),
+        );
+        assert!(payload.pages_failed, "the page-list failure is kept");
+        assert_eq!(
+            viewer_page_count(payload.illust.page_count, payload.pages.len()),
+            30,
+            "a failed page list still draws the page count the payload reported"
+        );
+        assert_eq!(
+            payload.following,
+            FollowState::Following,
+            "one read failing says nothing about the other"
+        );
+
+        let payload = read_detail(illust, Ok(Vec::new()), Err(PixivError::Unauthorized));
+        assert!(!payload.pages_failed, "an empty page list is not a failure");
+        assert_eq!(
+            payload.following,
+            FollowState::Unknown,
+            "an unread profile is unknown, never 未关注"
+        );
+        assert_eq!(payload.following.known(), None);
+        let note = detail_note(false, payload.following).unwrap_or_default();
+        assert!(note.contains("关注状态未知"), "{note}");
+        assert_eq!(
+            detail_note(false, FollowState::NotFollowing),
+            None,
+            "a healthy read says nothing at all"
+        );
+    }
+
+    /// T2 - one sentence for a dead cookie, on every page that can show one.
+    #[test]
+    fn t2_an_expired_cookie_asks_for_a_new_login_on_every_page() {
+        use pixiv_types::PixivError;
+        let session = describe_session_error(&PixivError::Unauthorized);
+        assert!(session.contains("重新登录"), "{session}");
+        assert!(session.contains("PHPSESSID"), "{session}");
+        // The novel page reads the app-wide sentence now, not one of its own.
+        assert_eq!(
+            super::novel::novel_error_text(&PixivError::Unauthorized),
+            session,
+            "the novel page and the grids say the same thing"
+        );
+    }
+
+    /// C6 ripple - a flagged non-auth 4xx keeps Pixiv's own sentence.
+    #[test]
+    fn c6_a_flagged_4xx_keeps_pixivs_own_sentence() {
+        use pixiv_types::PixivError;
+        let flagged = PixivError::Http {
+            status: 400,
+            message: "这本书里含有非公开的标签".into(),
+        };
+        assert_eq!(
+            super::novel::novel_error_text(&flagged),
+            "这本书里含有非公开的标签",
+            "the Http arm strips the status prefix and nothing else"
+        );
+        let missing = PixivError::Http {
+            status: 404,
+            message: String::new(),
+        };
+        assert!(
+            super::novel::novel_error_text(&missing).contains("这本小说不存在"),
+            "a 404 still reads like a novel page"
+        );
+    }
+
+    /// T3 - a page that repeats a row adds no card and no count.
+    ///
+    /// The second copy used to be appended, which also re-pointed the id's cell at
+    /// the new row: the card that was already on screen kept its placeholder cover
+    /// for good.
+    #[test]
+    fn t3_a_repeated_page_adds_no_card_and_no_count() {
+        let mut feed = vec![feed_row(1, "一"), feed_row(2, "二")];
+        let added = append_feed_page(&mut feed, vec![feed_row(2, "二·重复"), feed_row(3, "三")]);
+        assert_eq!(added, 1, "only the new id is added");
+        assert_eq!(feed.len(), 3, "the count does not double");
+        assert_eq!(feed[1].title, "二", "the row that was there keeps its cell");
+        assert_eq!(feed[2].title, "三");
+    }
+
+    /// T5 - one rank table per render says exactly what a scan per card said.
+    #[test]
+    fn t5_the_rank_table_says_what_a_scan_per_card_said() {
+        let items: Vec<super::Illust> = (1..=40).map(|id| feed_row(id, "x")).collect();
+        let table = rank_table(super::Destination::Ranking, &items);
+        for (index, illust) in items.iter().enumerate() {
+            let scanned = items
+                .iter()
+                .position(|candidate| candidate.id == illust.id)
+                .map(|position| position as i32 + 1)
+                .unwrap_or(0);
+            assert_eq!(
+                rank_in(&table, illust),
+                scanned,
+                "the table and the per-card scan must agree"
+            );
+            assert_eq!(rank_in(&table, illust), index as i32 + 1);
+        }
+        // A page that does not rank has no numbers at all, and says 0.
+        let home = rank_table(super::Destination::Home, &items);
+        assert!(home.is_empty(), "no rank on a page that does not rank");
+        assert_eq!(rank_in(&home, &items[0]), 0);
+    }
+
+    // =====================================================================
+    // T8 and T13
+    // =====================================================================
+
+    /// T8 - a window that is gone yields no handle.
+    ///
+    /// It used to be upgrade().expect("window alive"), and every landing of a
+    /// background result went through it, so a result arriving after the window was
+    /// dropped panicked the event loop. The panic is what this test names on the old
+    /// tree; on this one it is a None that on_ui turns into one dropped result.
+    #[test]
+    fn t8_a_window_that_is_gone_yields_no_handle() {
+        use slint::ComponentHandle;
+        use super::helpers::live_window;
+        let live = crate::AppWindow::new().expect("a component, before it is shown");
+        let weak = live.as_weak();
+        assert!(live_window(&weak).is_some(), "a window that exists is handed out");
+        drop(live);
+        assert!(
+            live_window(&weak).is_none(),
+            "a window that is gone must be None, not a panic"
+        );
+    }
+
+    /// T13 - the second click of a double click is dropped, not sent.
+    ///
+    /// Two POSTs computed from one stale state used to disagree: the second undid
+    /// the first, and the page kept whichever reply landed last.
+    #[test]
+    fn t13_a_second_click_is_dropped_while_the_first_is_in_flight() {
+        let mut busy = false;
+        assert!(toggle_allowed(busy), "the first click goes through");
+        busy = true;
+        assert!(
+            !toggle_allowed(busy),
+            "a click that arrives while one is in flight is dropped"
+        );
+        busy = false;
+        assert!(toggle_allowed(busy), "the slot is free once the reply lands");
+    }
+
+    // =====================================================================
+    // G41 - every failed load reaches a page state or a log
+    // =====================================================================
+
+    /// The shapes in which a Result stops travelling.
+    ///
+    /// unwrap_or_else(|_ never looks at the error, .ok() throws it away, and
+    /// let _ = discards the answer of a call that may have one.
+    fn g41_shape(line: &str) -> Option<&'static str> {
+        if line.contains("unwrap_or_else(|_") {
+            return Some("unwrap_or_else(|_");
+        }
+        if line.contains(".ok()") {
+            return Some(".ok()");
+        }
+        if line.contains("let _ = ") {
+            return Some("let _ =");
+        }
+        None
+    }
+
+    /// Every .rs file under a directory, depth first.
+    fn g41_sources(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                g41_sources(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// G41's allowlist: (path fragment, line fragment, why a failure here needs
+    /// neither a page state nor a log).
+    ///
+    /// Every entry is a judgement about one line, not about a file: a new
+    /// unwrap_or_else(|_ anywhere still fails the scan until somebody writes down
+    /// why it is fine. An entry that stops matching anything also fails the test, so
+    /// the table cannot rot into a blanket permission.
+    const G41_ALLOWED: &[(&str, &str, &str)] = &[
+        (
+            "app/",
+            "store.push_search(",
+            "persisting one search word: the result line is the search that just ran, and nothing on the page depends on the write",
+        ),
+        (
+            "app/callbacks/",
+            "open::that(",
+            "opening the browser or a folder: the OS answer is the whole result and there is no page to put it on",
+        ),
+        (
+            "app/callbacks/downloads.rs",
+            "Command::new(\"explorer\")",
+            "starting Explorer: the answer is the window it opens",
+        ),
+        (
+            "app/callbacks/",
+            "let _ = app",
+            "persisting a preference that is already applied in memory and drawn on the page, so a failed write only affects the next launch",
+        ),
+        (
+            "app/callbacks/settings.rs",
+            "let _ = page",
+            "an unused binding in the settings fixture arm, not a dropped Result",
+        ),
+        (
+            "app/callbacks/detail.rs",
+            "std::env::var(",
+            "reading the capture-fixture switch: an absent variable is the normal case",
+        ),
+        (
+            "app/callbacks/feed.rs",
+            ".ok()",
+            "a continuation of the usize::try_from(index) conversion above it: an out-of-range Slint index is not a failed load",
+        ),
+        (
+            "app/palette.rs",
+            ".ok()",
+            "index and id conversions of what Slint handed over: a value that does not convert is not a failed load",
+        ),
+        (
+            "app/feed/batch.rs",
+            "get_setting(",
+            "reading the persisted bookmark-visibility preference: absent means the default",
+        ),
+        (
+            "app/feed/fixture.rs",
+            "std::env::var(",
+            "reading the capture-fixture switch: an absent variable is the normal case",
+        ),
+        (
+            "app/feed/home.rs",
+            "let _ = reached_end",
+            "an unused binding kept beside its comment, not a dropped Result",
+        ),
+        (
+            "app/helpers.rs",
+            "let _ = invoke_from_event_loop(",
+            "the only failure is 'no event loop', which is the window-is-gone case on_ui answers",
+        ),
+        (
+            "app/helpers.rs",
+            ".ok()?",
+            "an Option-returning decode: None is the caller's miss, and the caller draws the card's own failure state",
+        ),
+        (
+            "app/ugoira.rs",
+            ".ok()?",
+            "a demo-frame decode: None means the film is not ready, which the page already draws",
+        ),
+        (
+            "app/lifecycle.rs",
+            "std::env::var(",
+            "reading a capture switch or the explicit theme override: an absent variable is the normal case",
+        ),
+        (
+            "app/lifecycle.rs",
+            "novel_setting(",
+            "reading the reader's saved preferences: absent or unreadable means the defaults, and the sliders clamp what they read",
+        ),
+        (
+            "app/mod.rs",
+            "parse::<u64>()",
+            "parsing a route id typed by the user: an Option, not a Result from a loader",
+        ),
+        (
+            "app/mod.rs",
+            "let _ = offset",
+            "an unused binding in the novel route arm, not a dropped Result",
+        ),
+        (
+            "app/novel.rs",
+            "std::env::var(",
+            "the novel fixture switch: an absent variable is the normal case",
+        ),
+        (
+            "app/novel.rs",
+            "std::fs::read_to_string(",
+            "the fixture file: unreadable means there is no fixture, and the caller asks Pixiv instead",
+        ),
+        (
+            "app/novel.rs",
+            "serde_json::from_str(",
+            "the fixture JSON: unparsable means there is no fixture, and the caller asks Pixiv instead",
+        ),
+        (
+            "app/novel.rs",
+            "serde_json::from_value(",
+            "the fixture body: a shape that does not parse means there is no fixture, which the caller already prices in",
+        ),
+        (
+            "app/novel.rs",
+            "from_str_radix(",
+            "parsing a hex colour pair: an unparsable byte keeps the caller's default colour",
+        ),
+        (
+            "app/novel.rs",
+            "record_novel_read(",
+            "a write, not a load: one row in the reading history",
+        ),
+        (
+            "app/novel.rs",
+            "save_novel_progress(",
+            "a write, not a load: the position is already live in memory and on the page",
+        ),
+        (
+            "app/novel.rs",
+            "set_novel_setting(",
+            "a write, not a load: the preference is already live in memory",
+        ),
+        (
+            "app/settings.rs",
+            "let _ = app",
+            "persisting the theme choice, which is already applied to the window and to its watcher",
+        ),
+    ];
+
+    /// G41 - every failed load either reaches a page state or a log.
+    ///
+    /// The scan walks src/app/**/*.rs, which is this track's whole contract: a
+    /// Result dropped in a loader is a failure the user reads as a fact. Test
+    /// modules are not scanned - they are not loaders - and a comment is not code.
+    #[test]
+    fn g41_a_failed_load_reaches_a_page_state_or_a_log() {
+        for (scope, needle, reason) in G41_ALLOWED {
+            assert!(
+                !reason.trim().is_empty(),
+                "the allowlist entry for {scope} {needle} carries no reason"
+            );
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<PathBuf> = Vec::new();
+        g41_sources(&root.join("src").join("app"), &mut files);
+        assert!(
+            files.len() > 20,
+            "the scan found {} files, which cannot be the application layer",
+            files.len()
+        );
+
+        let mut unlisted: Vec<String> = Vec::new();
+        let mut used = vec![false; G41_ALLOWED.len()];
+        for file in &files {
+            let Ok(text) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            let relative = file.to_string_lossy().replace('\\', "/");
+            let lines: Vec<&str> = text.lines().collect();
+            // The tests module is the tail of a file, and the attribute alone is not
+            // enough: downloads.rs gates a static with it halfway through its real
+            // code, and a scan that stopped at the first attribute would hand out a
+            // free pass over the 150 lines after it (G41).
+            let tests_from = lines
+                .iter()
+                .enumerate()
+                .find_map(|(index, line)| {
+                    if !line.trim_start().starts_with("#[cfg(test)]") {
+                        return None;
+                    }
+                    let next = lines.get(index + 1)?.trim();
+                    next.starts_with("mod tests").then_some(index)
+                })
+                .unwrap_or(usize::MAX);
+            for (index, line) in lines.iter().enumerate() {
+                if index >= tests_from {
+                    continue;
+                }
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") || trimmed.is_empty() {
+                    continue;
+                }
+                let Some(shape) = g41_shape(line) else {
+                    continue;
+                };
+                match G41_ALLOWED
+                    .iter()
+                    .position(|(scope, needle, _)| relative.contains(scope) && line.contains(needle))
+                {
+                    Some(slot) => used[slot] = true,
+                    None => unlisted.push(format!("{relative}:{}: {trimmed}  [{shape}]", index + 1)),
+                }
+            }
+        }
+        assert!(
+            unlisted.is_empty(),
+            "these lines drop a Result without a page state and without a log:\n  {}\neither fix the line or name it in G41_ALLOWED with the reason it needs neither",
+            unlisted.join("\n  ")
+        );
+        let stale: Vec<&str> = G41_ALLOWED
+            .iter()
+            .zip(used)
+            .filter(|(_, matched)| !matched)
+            .map(|((_, needle, _), _)| *needle)
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "these allowlist entries match nothing any more, so they are permissions nobody uses: {stale:?}"
+        );
     }
 }
