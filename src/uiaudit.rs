@@ -941,10 +941,14 @@ mod tests {
             // block that draws no text.
             let lines: Vec<&str> = source.lines().collect();
             let block_of = |start: usize| -> (usize, usize) {
+                // Walk outwards from the fill line to the `{` that opened its enclosing
+                // block, then forwards to that block's matching `}`. Iterating the lines
+                // rather than a range keeps clippy's `needless_range_loop` satisfied and
+                // says what the loop is for.
                 let mut depth = 0isize;
                 let mut open = start;
-                for at in (0..=start).rev() {
-                    let code = lines[at].split("//").next().unwrap_or("");
+                for (at, line) in lines.iter().enumerate().take(start + 1).rev() {
+                    let code = line.split("//").next().unwrap_or("");
                     depth += code.matches('}').count() as isize;
                     depth -= code.matches('{').count() as isize;
                     if depth < 0 {
@@ -954,8 +958,8 @@ mod tests {
                 }
                 let mut depth = 0isize;
                 let mut close = start;
-                for at in open..lines.len() {
-                    let code = lines[at].split("//").next().unwrap_or("");
+                for (at, line) in lines.iter().enumerate().skip(open) {
+                    let code = line.split("//").next().unwrap_or("");
                     depth += code.matches('{').count() as isize;
                     depth -= code.matches('}').count() as isize;
                     if depth <= 0 && at > open {
