@@ -14,13 +14,6 @@ target/
 # forced-demo captures (PIXIV_DESKTOP_DEMO=1), so they hold no personal data, and
 # their sidecars are written by the gate itself (no timestamp).
 !/docs/screenshots/baseline/
-# ...except the focus captures, which are not baselines at all.
-# tools/verify-focus.ps1 writes one per Tab stop and never reads it back: the capture
-# it measures is the fresh one in target/focus/current. Thirty-four of them had
-# accumulated as tracked files - 12 890 992 B, 52 % of every tracked byte in this
-# repository - and a normal run rewrites the ones it reaches, so the gate dirtied the
-# worktree and nothing ever compared one.
-/docs/screenshots/baseline/focus-*
 target-rel/
 # Harness scratch output.
 /docs/*.log*
