@@ -131,14 +131,16 @@ pub(crate) fn install(app: &Shared) {
         let shared = app.clone();
         ui.on_download_open_task(move |id| {
             let app = shared.borrow();
-            let task = app
-                .downloads
-                .tasks()
-                .into_iter()
-                .find(|task| task.id == id.max(0) as u64);
+            // One entry, not the queue (B12): DownloadManager::tasks deep-clones
+            // every queued task, and this gesture only ever needed the path of one
+            // row. The index is mirrored from the snapshot the tick already takes.
+            let task = super::super::downloads::task_destination(
+                &app.task_paths.borrow(),
+                id.max(0) as u64,
+            );
             // Reveal the actual file when it exists; otherwise fall back to the
             // directory rather than opening nothing at all.
-            match task.and_then(|task| task.destination) {
+            match task {
                 Some(path) if path.exists() => {
                     let _ = std::process::Command::new("explorer")
                         .arg(format!("/select,{}", path.display()))

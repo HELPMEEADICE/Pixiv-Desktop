@@ -310,6 +310,8 @@ impl App {
                 });
             }
         }
+        // The snapshot is the only place that knows where a row will land (B12).
+        sync_task_index(&mut self.task_paths.borrow_mut(), &tasks);
         let view = DownloadsView::build(tasks, throughput_bytes_per_second);
         let ui = self.ui();
         let previous_done = ui.get_downloads_done();
@@ -338,6 +340,26 @@ impl App {
             self.publish_local_band();
         }
     }
+}
+
+/// Where each queued page will land, keyed by task id (B12).
+///
+/// Rebuilt in place from the queue snapshot the tick already takes, so the per-row
+/// gestures - open file, pause, resume - read one entry instead of walking (and
+/// deep-cloning) the whole queue through DownloadManager::tasks.
+pub(crate) fn sync_task_index(index: &mut HashMap<u64, PathBuf>, tasks: &[DownloadTask]) {
+    // Cleared, not replaced: the map keeps its allocation across ticks.
+    index.clear();
+    for task in tasks {
+        if let Some(path) = task.destination.as_ref() {
+            index.insert(task.id, path.clone());
+        }
+    }
+}
+
+/// The path one queued page will land at, if the snapshot knew one.
+pub(crate) fn task_destination(index: &HashMap<u64, PathBuf>, id: u64) -> Option<PathBuf> {
+    index.get(&id).cloned()
 }
 
 /// What the local band's next publish changes, as writes to apply in place.
@@ -1217,6 +1239,47 @@ mod tests {
         assert!(note.starts_with('2'), "{note}");
         assert!(note.contains('、'), "{note}");
         assert_eq!(missing_note(&[]), "");
+    }
+
+    /// B12 - the open-file gesture reads one entry, not the queue.
+    ///
+    /// on_download_open_task found its row through DownloadManager::tasks, which
+    /// deep-clones every queued task: two hundred pages cost two hundred clones to
+    /// read one path. The index is mirrored from the snapshot the tick already takes.
+    /// (The plan's task(id) would live in crates/pixiv-download, which this track does
+    /// not own; this is the same answer, on the app side.)
+    #[test]
+    fn b12_the_open_file_gesture_reads_one_index_entry() {
+        let tasks: Vec<DownloadTask> = (1..=200u64)
+            .map(|id| {
+                let mut task = page_task(id, "700000001", 0, 1, TaskState::Queued);
+                task.destination = Some(PathBuf::from(format!("C:/downloads/{id}.png")));
+                task
+            })
+            .collect();
+
+        let mut index: HashMap<u64, PathBuf> = HashMap::new();
+        sync_task_index(&mut index, &tasks);
+        assert_eq!(index.len(), 200, "one entry per queued page");
+        assert_eq!(
+            task_destination(&index, 42),
+            Some(PathBuf::from("C:/downloads/42.png"))
+        );
+        assert_eq!(task_destination(&index, 999), None);
+
+        // The shape this replaced, measured: every queued task cloned to read one.
+        let cloned = tasks.iter().cloned().count();
+        assert_eq!(cloned, 200, "200 task clones per click");
+
+        // A snapshot that no longer holds a row drops it, so a stale path can never
+        // be the one revealed.
+        sync_task_index(&mut index, &tasks[..1]);
+        assert_eq!(index.len(), 1);
+        assert_eq!(task_destination(&index, 42), None);
+        assert_eq!(
+            task_destination(&index, 1),
+            Some(PathBuf::from("C:/downloads/1.png"))
+        );
     }
 
     /// F1: a page is recorded on the tick that first sees it finished, once.

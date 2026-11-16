@@ -190,6 +190,14 @@ pub(crate) struct App {
     /// The records that model was built from, so a publish can compute what changed
     /// without reading the model back (B7).
     download_local_drawn: RefCell<Vec<downloads::LocalRecord>>,
+    /// Where each queued page will land, keyed by task id, mirrored from the last
+    /// queue snapshot (B12).
+    ///
+    /// The "open file" gesture used to find its row through `DownloadManager::tasks`,
+    /// which deep-clones every queued task: two hundred pages cost two hundred
+    /// `DownloadTask` clones to read one path. The snapshot the tick already takes is
+    /// the only place that has the paths, so it is where the index comes from.
+    task_paths: RefCell<HashMap<u64, PathBuf>>,
     detail: Option<Illust>,
     /// Avatar URL the metadata panel is waiting for. Stored rather than recomputed:
     /// a resolved lookup lands in `author_avatars`, not in `illust.author.avatar`,

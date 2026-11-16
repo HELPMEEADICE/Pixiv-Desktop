@@ -339,6 +339,7 @@ impl App {
             download_rows,
             download_local_rows,
             download_local_drawn: RefCell::new(Vec::new()),
+            task_paths: RefCell::new(HashMap::new()),
             data_dir,
             download_dir,
             page: Destination::Home,
