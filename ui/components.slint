@@ -1827,9 +1827,14 @@ export component IllustCard inherits Rectangle {
             // it reads on any artwork; the checked form is `accent-fill` with the
             // `on-accent` glyph pair, which is the only ink that is legible on it
             // (white on the light-mode fill is 5.07:1, on-accent is the token).
+            // A4: bottom-left, and stated as such. The check shared (space-2, space-2)
+            // with the rank badge above it and is declared later, so in selection mode the
+            // ranking page hid #1…#N behind a chip — three of the four corners are already
+            // taken (rank top-left, type badge top-right, bookmark pill bottom-right), and
+            // the check is the one WinUI draws with the item, so it takes the one left.
             if root.item.selectable : Rectangle {
-                x: Theme.space-2;
-                y: Theme.space-2;
+                x: Theme.card-check-inset;
+                y: parent.height - self.height - Theme.card-check-inset;
                 width: Theme.select-check;
                 height: Theme.select-check;
                 border-radius: Theme.radius-sm;

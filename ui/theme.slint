@@ -302,6 +302,10 @@ export global Theme {
     /// written at the anchor; naming it is what lets the bar keep its distance from the
     /// batch bar without a second literal.
     out property <length> notice-gap: 16px;
+    /// Inset of the selection check inside a card's cover: bottom-left, because the rank
+    /// badge owns the top-left, the type badge the top-right and the bookmark pill the
+    /// bottom-right.
+    out property <length> card-check-inset: 8px;
 
     // ---- motion --------------------------------------------------------
     // Short and linear-ish: a desktop tool should never feel animated. Every

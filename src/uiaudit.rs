@@ -2728,4 +2728,80 @@ last in its component:\n{}",
         );
     }
 
+    /// G48 — two overlays in one component may not share an `(x, y)` anchor.
+    ///
+    /// An overlay in a card or a page states its own corner: the rank badge the top-left,
+    /// the type badge the top-right, the bookmark pill the bottom-right, the selection
+    /// check wherever it was last moved. Two of them on the same pair therefore means one
+    /// is drawn on top of the other, and because the later declaration wins the loser is
+    /// not misplaced — it is invisible. That is how selection mode hid `#1…#N` on the
+    /// ranking page: the check and the rank badge were both at `(space-2, space-2)`.
+    ///
+    /// Only a *conditional* box that states all four of its sides counts as an overlay:
+    /// a centred glyph, an icon slot and a layout cell have geometry too, and none of
+    /// them competes for a corner.
+    #[test]
+    fn two_overlays_in_one_component_do_not_share_an_anchor() {
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            let mut seen: std::collections::BTreeMap<(String, String, String), Vec<usize>> =
+                std::collections::BTreeMap::new();
+            for block in &blocks {
+                if !opener(&source, block).contains("if ") {
+                    continue;
+                }
+                let own = own_lines(&block.body);
+                let has = |key: &str| {
+                    own.lines()
+                        .any(|line| line.trim_start().starts_with(&format!("{key}:")))
+                };
+                if !(has("x") && has("y") && has("width") && has("height")) {
+                    continue;
+                }
+                let (Some(x), Some(y)) = (
+                    geometry_binding(&block.body, "x"),
+                    geometry_binding(&block.body, "y"),
+                ) else {
+                    continue;
+                };
+                // Two full-surface parts at the origin are not competing for a
+                // corner: the palette's click-catcher and the suggestion panel's are
+                // whole-window boxes, they are never on screen together, and the pair
+                // says nothing about where anything inside them sits.
+                if x.trim() == "x: 0px;" && y.trim() == "y: 0px;" {
+                    continue;
+                }
+                checked += 1;
+                let owner =
+                    enclosing_component(&source, source[..block.start].matches('\n').count());
+                let line = source[..block.start].matches('\n').count() + 1;
+                seen.entry((owner, x.trim().to_string(), y.trim().to_string()))
+                    .or_default()
+                    .push(line);
+            }
+            for ((owner, x, y), lines) in seen {
+                if lines.len() < 2 {
+                    continue;
+                }
+                offenders.push(format!(
+                    "{name}:{owner}: lines {lines:?} share the anchor {x} / {y}"
+                ));
+            }
+        }
+        assert!(
+            checked >= 8,
+            "expected the cards and the shell to anchor several overlays, found {checked}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "two overlays on one anchor: the later declaration hides the earlier one. Give \
+             each its own corner:\n{}",
+            offenders.join("\n")
+        );
+    }
+
 }
