@@ -293,7 +293,14 @@ component ReaderSettings inherits Rectangle {
 
             PrefSlider {
                 label: "字号";
-                value: Math.round(14 + root.font-size * 18) + " px";
+                // A6: the bounds are the theme's and are read here, not copied: the four
+                // `reader-*` tokens are what `prefs.rs` clamps to and what
+                // `reader_bounds_match_the_preference_model` pins, so a caption written as
+                // `14 + ratio * 18` was a third source that no test could see. uiaudit's G50
+                // fails if a reader token loses its only reader.
+                value: Math.round(Theme.reader-font-min / 1px
+                    + root.font-size * ((Theme.reader-font-max - Theme.reader-font-min) / 1px))
+                    + " px";
                 ratio: root.font-size;
                 step: 0.0333;
                 changed(r) => { root.edit(4, r, ""); }
@@ -335,7 +342,9 @@ component ReaderSettings inherits Rectangle {
             }
             PrefSlider {
                 label: "正文最大宽度";
-                value: Math.round(420 + root.measure * 980) + " px";
+                value: Math.round(Theme.reader-measure-min / 1px
+                    + root.measure * ((Theme.reader-measure-max - Theme.reader-measure-min) / 1px))
+                    + " px";
                 ratio: root.measure;
                 step: 0.05;
                 changed(r) => { root.edit(10, r, ""); }

@@ -2901,4 +2901,59 @@ last in its component:\n{}",
         );
     }
 
+    /// G50 — every `out property <length>` of `Theme` is read from the UI.
+    ///
+    /// The motion-token rule (`every_declared_motion_token_is_referenced_…`) asks this of
+    /// `<duration>` because a token nothing reads is a rule that quietly stopped applying.
+    /// A *length* is the same fact one lane over, and this round found the sharpest version
+    /// of it: `reader-font-min`/`max` and `reader-measure-min`/`max` were declared, mirrored
+    /// against `prefs.rs` by a test, and read by nobody — the reader's sliders computed
+    /// `14 + ratio * 18` and `420 + ratio * 980` from their own literals, so the bounds had
+    /// two sources, one of them the theme, and the one a user saw was the other. Each token
+    /// is now interpolated from the theme; putting a literal back reds this rule.
+    ///
+    /// `color accent` is excluded by construction: `accent_is_decoration_only` forbids a
+    /// reader on purpose, so it can never pass this rule and must not be asked.
+    #[test]
+    fn every_theme_length_token_is_read_by_the_ui() {
+        let theme = read(&ui_dir().join("theme.slint"));
+        // Only the `Theme` global: `Type` below it is an int ramp read as `Type.semibold`.
+        let theme = theme.split("export global Type").next().unwrap_or("").to_string();
+        let readers: Vec<String> = page_files()
+            .into_iter()
+            .filter(|path| path.file_name().and_then(|n| n.to_str()) != Some("theme.slint"))
+            .map(|path| read(&path))
+            .collect();
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for (index, line) in theme.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            let Some(rest) = code.trim_start().strip_prefix("out property <length> ") else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            checked += 1;
+            if readers.iter().any(|source| reads_token(source, &name)) {
+                continue;
+            }
+            offenders.push(format!("theme.slint:{}: {name} has no reader in ui/", index + 1));
+        }
+        assert!(
+            checked >= 30,
+            "expected the theme's length table, found {checked} tokens"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a length token no page reads is a design decision that stopped applying. Read \
+             it, or delete it:\n{}",
+            offenders.join("\n")
+        );
+    }
+
 }
