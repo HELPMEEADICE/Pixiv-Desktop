@@ -261,25 +261,24 @@ export component GalleryPage inherits Rectangle {
                         color: Theme.text-tertiary;
                     }
 
-                    // A zero-height cell, so the 26 px pill cannot dictate the height of
-                    // a row whose height is the 20 px title\'s (23.3 px): measured, a
-                    // 32 px control in this row moved every pixel below it down by 10
-                    // logical px — discovery 20.87 % over, rows 107..1112, a shifted page
-                    // rather than a new control. The cell is `height: 0px` and the button
-                    // is lifted by one 4 px step onto the title\'s centre line; it overflows
-                    // its cell, which is legal because nothing here clips.
-                    Rectangle {
-                        width: select-toggle.width;
-                        height: 0px;
-
-                        select-toggle := AppButton {
-                            label: root.selection-mode ? "退出多选" : "多选";
-                            icon: root.selection-mode ? "close" : "check";
-                            kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
-                            compact: true;
-                            y: -Theme.space-1;
-                            clicked => { root.toggle-selection-mode(); }
-                        }
+                    // A12: the button states its own 26 px height and sits in the row like
+                    // any other child.
+                    //
+                    // It used to be wrapped in a `height: 0px` cell and lifted with
+                    // `y: -one step`, on the theory that a 32 px control in a 27 px row moved
+                    // the masonry down (measured then: discovery 20.87 % over, rows 107..1112).
+                    // The wrapper did hold the row at 23.3 px, and it also made the button's
+                    // hit area overflow the header: 4 px up over the subtitle and the rest of
+                    // its box below the row, so the end of the subtitle pressed 多选.
+                    // `compact` is 26 px — under the 27 px of the title row — so the row does
+                    // not grow and nothing overflows.
+                    select-toggle := AppButton {
+                        label: root.selection-mode ? "退出多选" : "多选";
+                        icon: root.selection-mode ? "close" : "check";
+                        kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
+                        compact: true;
+                        height: Theme.control-height-sm;
+                        clicked => { root.toggle-selection-mode(); }
                     }
                 }
             }
