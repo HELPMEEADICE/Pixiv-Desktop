@@ -193,8 +193,14 @@ the documentation to `target/focus/baseline`. E8 adds `points?/sizes?` to the pr
 it to `ARCHITECTURE.md` and `NOVEL-READER.md` (the R7–R11 archive stays exempt). E10 gives
 `fetch_icons.ps1` a `-Check` mode that compares without writing, and runs it from `gates.ps1`. E11
 routes `shot.ps1` through `page-set.ps1`'s full key sweep. E12 exits 0 for `-NumericOnly` with no
-failure. Also: UI-NOTES gains a back-filled round eleven and a round twelve; the zero-reference
-`_*.ps1` scripts under `tools/` are deleted in one commit after a `Select-String` proof.
+failure. Also: UI-NOTES gains a back-filled round eleven and a round twelve. The 88 zero-reference
+`tools/_*` scratch scripts went too, but as a working-tree cleanup rather than a commit: `.gitignore:25`
+(`tools/_*`) means git has never held one of them (`git log --all -- tools/_probe1.ps1` is empty), so
+there is no deletion a commit could describe. They were proved unreferenced by a word-boundary sweep
+over 362 text files (88 candidates, 88 zero-reference, 0 kept, with a positive control that hits and a
+negative control that does not), then moved to `target/r12/removed-probes/` — reversible, and out of
+the way of `tools/`'s eighteen tracked scripts. Restore with
+`Move-Item target\r12\removed-probes\* tools\`.
 
 ## 9 · Gates this round owes (a gate lands with its fix in the same commit)
 
