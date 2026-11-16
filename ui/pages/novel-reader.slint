@@ -170,6 +170,28 @@ component ReaderSettings inherits Rectangle {
     /// 10 measure, 11 weight, 12 italic, 13 align, 14 rule, 15 ruby, 16 paged,
     /// 17 progress, 18 hide chrome, 19 reset.
     callback edit(int, float, string);
+    /// U23: the page says the panel is open and the panel takes the keyboard. A
+    /// property, not a call: the page cannot reach an id inside this component — the
+    /// same reason the reader drives itself with `command`/`command-seq`.
+    in property <bool> active: false;
+    /// Escape pressed inside the panel: the page's own toggle closes it.
+    callback dismiss();
+
+    changed active => {
+        if (self.active) { settings-focus.focus(); }
+    }
+
+    /// One scope for the whole panel, declared before the panel's own controls so the
+    /// hit-test still reaches them first (the ordering rule in components.slint).
+    settings-focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\u{001b}") {
+                root.dismiss();
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+    }
 
     background: Theme.flyout;
 
@@ -412,9 +434,11 @@ component ReaderSettings inherits Rectangle {
 /// the block kinds to type.
 component NovelBlockView inherits Rectangle {
     in property <NovelBlock> block;
+    /// False while the settings panel owns the keyboard (U23).
+    in property <bool> focusable: true;
     in property <color> ink: Theme.text;
     in property <string> font-family: "";
-    in property <length> font-size: 19px;
+    in property <length> font-size: Theme.reader-font-default;
     in property <int> font-weight: 400;
     in property <bool> italic: false;
     in property <float> line-height: 1.8;
@@ -545,7 +569,12 @@ component NovelBlockView inherits Rectangle {
             accessible-label: root.block.text;
             accessible-action-default => { root.open-work(root.block.id); }
 
+            // U23: the body's only Tab stop leaves the walk while the settings panel
+            // is open. `FocusScope.enabled: false` is the documented "not reachable by
+            // tab traversal, not even programmatically" switch, so the trap closes
+            // without a key handler guessing at Tab.
             link_focus := FocusScope {
+                enabled: root.focusable;
                 key-pressed(e) => {
                     if (e.text == "\n" || e.text == " ") {
                         root.open-work(root.block.id);
@@ -573,6 +602,7 @@ component NovelBlockView inherits Rectangle {
             }
 
             link-row := TouchArea {
+                enabled: root.focusable;
                 mouse-cursor: pointer;
                 clicked => { root.open-work(root.block.id); }
             }
@@ -587,6 +617,9 @@ component NovelBlockView inherits Rectangle {
 /// scroll view's own numbers, so the percentage can never disagree with the pixels
 /// on screen.
 component ReaderBody inherits Rectangle {
+    /// False while the settings panel owns the keyboard (U23): the body's link rows
+    /// leave the Tab walk with it.
+    in property <bool> focusable: true;
     in-out property <length> scroll-y: 0px;
     in property <color> ink: Theme.text;
     in property <color> paper: Theme.canvas;
@@ -594,7 +627,7 @@ component ReaderBody inherits Rectangle {
     in property <string> message: "";
     in property <[NovelBlock]> blocks: [];
     in property <string> font-family: "";
-    in property <length> font-size: 19px;
+    in property <length> font-size: Theme.reader-font-default;
     in property <int> font-weight: 400;
     in property <bool> italic: false;
     in property <float> line-height: 1.8;
@@ -780,7 +813,11 @@ export component NovelReaderPage inherits Rectangle {
     }
 
     // ---- toolbar ----
-    Rectangle {
+    // `enabled` is the Tab trap's other half (U23): while the settings panel is open
+    // the page behind it is not interactive, so the walk cannot leave the panel — and
+    // the panel is the only thing that can be clicked. The A11y gate reads the same
+    // property, so a walk that still reached these controls would fail there too.
+    toolbar := Rectangle {
         x: 0px;
         y: 0px;
         width: root.width;
@@ -798,20 +835,21 @@ export component NovelReaderPage inherits Rectangle {
             IconButton {
                 icon: "back";
                 tip: "返回小说详情";
+                enabled: !root.view.settings-open;
                 row-height: Theme.reader-bar-height;
                 clicked => { root.back(); }
             }
             IconButton {
                 icon: "chevron-left";
                 tip: "上一章";
-                enabled: root.view.has-prev;
+                enabled: root.view.has-prev && !root.view.settings-open;
                 row-height: Theme.reader-bar-height;
                 clicked => { root.prev-chapter(); }
             }
             IconButton {
                 icon: "chevron-right";
                 tip: "下一章";
-                enabled: root.view.has-next;
+                enabled: root.view.has-next && !root.view.settings-open;
                 row-height: Theme.reader-bar-height;
                 clicked => { root.next-chapter(); }
             }
@@ -876,6 +914,7 @@ export component NovelReaderPage inherits Rectangle {
                 kind: ButtonKind.Subtle;
                 label: "Aa";
                 compact: true;
+                enabled: !root.view.settings-open;
                 row-height: Theme.reader-bar-height;
                 clicked => { root.toggle-settings(); }
             }
@@ -883,6 +922,7 @@ export component NovelReaderPage inherits Rectangle {
                 icon: "fullscreen";
                 tip: "沉浸模式 (F11)";
                 active: root.fullscreen;
+                enabled: !root.view.settings-open;
                 row-height: Theme.reader-bar-height;
                 clicked => { root.toggle-fullscreen(); }
             }
@@ -891,6 +931,7 @@ export component NovelReaderPage inherits Rectangle {
 
     // ---- body ----
     reader-body := ReaderBody {
+        focusable: !root.view.settings-open;
         x: 0px;
         width: root.width;
         y: root.view.chrome-visible && root.view.state == 0 ? Theme.reader-bar-height : 0px;
@@ -969,6 +1010,14 @@ export component NovelReaderPage inherits Rectangle {
         drop-shadow-offset-x: -6px;
 
         ReaderSettings {
+            // U23: opening the panel takes the keyboard with it, and Escape closes it
+            // through the page's own toggle. Nothing focused it before, so Escape
+            // reached the shell (which has nothing of its own to close here) and Tab
+            // walked the text behind the open panel. The scope lives in the panel's own
+            // component: a scope declared here would sit under the scrim's TouchArea and
+            // swallow its first click (`focus_scopes_sit_under_the_touch_area`).
+            active: root.view.settings-open;
+            dismiss => { root.toggle-settings(); }
             width: 100%;
             height: 100%;
             theme-mode: root.view.theme-index;

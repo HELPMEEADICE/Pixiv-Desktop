@@ -48,11 +48,15 @@ component BandHeader inherits Rectangle {
             color: Theme.text-tertiary;
             horizontal-stretch: 1;
         }
+        // U34: a 32 px pill in a 26 px row painted 3 px outside the band on each
+        // side. `compact` is what makes the button 26 px tall — the same pair
+        // `gallery.slint` already uses on its own band retry (plan §2.1 U34).
         if root.show-retry : AppButton {
             label: "重试";
             icon: "refresh";
             kind: ButtonKind.Secondary;
-            row-height: 26px;
+            compact: true;
+            row-height: Theme.control-height-sm;
             clicked => { root.retry(); }
         }
     }
@@ -127,8 +131,9 @@ export component HomePage inherits Rectangle {
     /// like every other gesture.
     public function request-select-all() { root.select-all(); }
     callback card-clicked(string, bool, bool);
-    /// U3: which card the Tab walk arrived on, by work id (see `ArtworkGrid`).
-    callback card-focused(string);
+    /// U3/U-f: which card the Tab walk arrived on, by work id, and where it sits in
+    /// the scroll body (see `ArtworkGrid`).
+    callback card-focused(string, length);
     /// Roving focus cursor for the recommended-tag strip (U7).
     in-out property <int> tag-cursor: 0;
 
@@ -149,6 +154,24 @@ export component HomePage inherits Rectangle {
         : Math.max(1.0, Math.floor(
             (page.body-width + Theme.card-gap)
                 / Math.max(1px, root.card-width + Theme.card-gap)));
+
+    /// Width of one placeholder in the 最新作品 strip. Stated once because the count
+    /// below and the skeleton that draws them must agree.
+    property <length> latest-placeholder-width: 130px;
+
+    /// How many placeholders each strip draws (U26).
+    ///
+    /// Both bands used to write a literal count — five in 最新作品 and four in 推荐画师 —
+    /// which is 714 px and 888 px of skeleton inside a 618 px body at the 720 px
+    /// minimum window: the same clip-not-scroll the grid skeleton above was fixed for,
+    /// one row over. The arithmetic is `layout::column_count`'s: what fits, floored,
+    /// at least one.
+    property <float> latest-placeholders: Math.max(1.0, Math.floor(
+        (page.body-width + Theme.card-gap)
+            / Math.max(1px, root.latest-placeholder-width + Theme.card-gap)));
+    property <float> artist-placeholders: Math.max(1.0, Math.floor(
+        (page.body-width + Theme.card-gap)
+            / Math.max(1px, Theme.artist-card-width + Theme.card-gap)));
 
     background: Theme.canvas;
 
@@ -249,6 +272,8 @@ export component HomePage inherits Rectangle {
                 for n in [0, 1, 2, 3, 4, 5] : Skeleton {
                     width: 72px;
                     height: 30px;
+                    // G27: 30 in a 32 row, centred — it used to sit 2px high.
+                    y: (parent.height - self.height) / 2;
                     border-radius: Theme.radius-pill;
                 }
             }
@@ -306,7 +331,7 @@ export component HomePage inherits Rectangle {
             open-author(id) => { root.open-author(id); }
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
             card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
-            card-focused(id) => { root.card-focused(id); }
+            card-focused(id, y) => { root.card-focused(id, y); }
         }
 
         if root.feed-state == 1 : HorizontalLayout {
@@ -361,9 +386,11 @@ export component HomePage inherits Rectangle {
                 spacing: Theme.card-gap;
                 alignment: start;
                 height: root.latest-cover + Theme.card-caption-height + Theme.scrollbar-gutter;
-                for n in [0, 1, 2, 3, 4] : Skeleton {
-                    width: 130px;
+                for n in root.latest-placeholders : Skeleton {
+                    width: root.latest-placeholder-width;
                     height: 150px;
+                    // G27: the strip's cards are top-aligned on purpose; say so.
+                    y: 0px;
                     border-radius: Theme.radius-md;
                 }
             }
@@ -453,7 +480,7 @@ export component HomePage inherits Rectangle {
                 spacing: Theme.card-gap;
                 alignment: start;
                 height: Theme.artist-strip-height;
-                for n in [0, 1, 2, 3] : Skeleton {
+                for n in root.artist-placeholders : Skeleton {
                     width: Theme.artist-card-width;
                     height: Theme.artist-strip-height;
                     border-radius: Theme.radius-lg;
@@ -477,7 +504,6 @@ export component HomePage inherits Rectangle {
                             item: u;
                             card-width: Theme.artist-card-width;
                             open => { root.open-recommend-user(u.id); }
-                            toggle-follow => { }
                         }
                     }
                 }

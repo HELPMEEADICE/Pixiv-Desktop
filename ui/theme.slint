@@ -41,11 +41,8 @@ export global Theme {
     // the doc comment of `accent-fill` below, because using this one as a fill
     // behind text is what made primary buttons unreadable.
     out property <color> accent: dark ? #4cb0f5 : #0096fa;
-    out property <color> accent-hover: dark ? #63bcf7 : #12a2ff;
-    out property <color> accent-pressed: dark ? #3d96d0 : #0081db;
     // ~10% accent wash for selection, chips and informational banners.
     out property <color> accent-subtle: dark ? #1d3b4f : #e6f4ff;
-    out property <color> accent-subtle-hover: dark ? #24475f : #d6ecff;
 
     // Filled surfaces (primary button, checked toggle) and the ink on them.
     //
@@ -72,13 +69,11 @@ export global Theme {
     out property <color> layer-sunken: dark ? #1a1a1a : #ececee;
     out property <color> chrome: dark ? #272727 : #f3f3f3;
     out property <color> flyout: dark ? #2f2f2f : #fbfbfb;
-    out property <color> scrim: dark ? #050505b3 : #00000066;
 
     // ---- strokes -------------------------------------------------------
     // Fluent leans on 1px strokes instead of heavy borders or drop shadows.
     out property <color> border: dark ? #3d3d3d : #e3e3e3;
     out property <color> border-strong: dark ? #4f4f4f : #cfcfcf;
-    out property <color> border-subtle: dark ? #303030 : #ededed;
 
     // ---- text ----------------------------------------------------------
     out property <color> text: dark ? #ffffff : #1a1a1a;
@@ -143,7 +138,6 @@ export global Theme {
     /// themes, and `bookmark_pill_keeps_its_glyph_visible` pins it.
     out property <color> pill-ink-marked: #0071c2;
 
-    out property <color> shadow-1: dark ? #0000004d : #0000000f;
     out property <color> shadow-2: dark ? #00000073 : #00000024;
 
     // ---- fixed geometry ------------------------------------------------
@@ -153,11 +147,12 @@ export global Theme {
     out property <length> statusbar-height: 26px;
     /// Horizontal page inset. The gallery maths in `src/layout.rs` mirrors this.
     out property <length> page-padding: 20px;
-    /// Widest a text column is allowed to get before it becomes unreadable.
-    out property <length> reading-max: 720px;
 
     // ---- artwork grid --------------------------------------------------
     // These four values MUST stay in sync with the constants in `src/layout.rs`.
+    // `grid_widths_match_the_layout_model` (uiaudit) reads both languages and fails
+    // if the pair drifts; `ArtworkGrid.card-width` clamps to the two bounds, so no
+    // page can hand the grid a width outside the band the balancer assumes.
     out property <length> card-min-width: 168px;
     out property <length> card-max-width: 300px;
     out property <length> card-gap: 16px;
@@ -207,8 +202,6 @@ export global Theme {
     // authors, counts) for every paragraph it draws.
     out property <float> line-small: 1.35;
     out property <float> line-body: 1.5;
-    out property <float> line-title: 1.3;
-    out property <float> line-page: 1.25;
 
     // ---- reading (novel reader) -----------------------------------------
     // The reader draws text at a size the *user* chose, so its ramp is separate from
@@ -216,6 +209,8 @@ export global Theme {
     // values the page recomputes from; the preference model in
     // `crates/pixiv-novel/src/prefs.rs` carries the same numbers, and
     // `reader_bounds_match_the_preference_model` (uiaudit) fails if they drift.
+    /// The reading body's own default before the user's choice arrives.
+    out property <length> reader-font-default: 19px;
     out property <length> reader-font-min: 14px;
     out property <length> reader-font-max: 32px;
     out property <length> reader-measure-min: 420px;
@@ -230,7 +225,6 @@ export global Theme {
     out property <length> radius-sm: 4px;
     out property <length> radius-md: 6px;
     out property <length> radius-lg: 8px;
-    out property <length> radius-xl: 12px;
     out property <length> radius-pill: 999px;
 
     // ---- spacing (4px grid) --------------------------------------------
@@ -248,7 +242,6 @@ export global Theme {
     out property <length> control-height-lg: 36px;
     out property <length> icon-size: 16px;
     out property <length> icon-size-lg: 20px;
-    out property <length> row-height: 56px;
     /// NavigationView row metric. WinUI uses 36px for a standard-density pane.
     out property <length> nav-item-height: 36px;
 
@@ -271,6 +264,31 @@ export global Theme {
     /// MenuFlyout metrics (Fluent: 32px rows, 200px minimum width).
     out property <length> menu-row-height: 32px;
     out property <length> menu-width: 200px;
+    /// The menu's check column and the glyph inside it. Both were literals in
+    /// `MenuRow` and both are read twice (the column that reserves the space and
+    /// the slot that draws in it), so the pair lives here rather than in the row.
+    out property <length> menu-metric-check: 14px;
+    out property <length> menu-metric-glyph: 12px;
+
+    // ---- round eleven (docs/OPTIMIZATION-PLAN-R11.md §1, §2.1 U30/U35) ----
+    /// One suggestion row, and the panel body's padding above it. The panel's
+    /// scroll arithmetic (`main.slint`, `became-active`) multiplied the same two
+    /// numbers a second time, which is how a row height drifts: the row and the
+    /// maths that scrolls to it must read one pair of tokens.
+    out property <length> suggest-row-height: 34px;
+    out property <length> suggest-row-pad: 5px;
+    /// One line of the shell's notice bar. The bar is two lines tall
+    /// (`notice-line-height * 2 + space-1 * 2`, i.e. today's 44px) and a long
+    /// notice wraps instead of being elided away.
+    out property <length> notice-line-height: 18px;
+    /// How long a notice stays before the shell dismisses it. A duration, so it
+    /// belongs with the motion tokens and is checked by
+    /// `every_declared_motion_token_is_referenced_and_no_animate_uses_a_literal_duration`.
+    out property <duration> notice-dwell: 6s;
+    /// Height of the 3px rule the novel reader draws under a partly-read row
+    /// (§4 F4). Declared here because track D binds it: the reader may not invent
+    /// the number, and this file is the only place a length may be written.
+    out property <length> progress-rule-height: 3px;
 
     // ---- motion --------------------------------------------------------
     // Short and linear-ish: a desktop tool should never feel animated. Every

@@ -418,6 +418,10 @@ export component IconButton inherits Rectangle {
         animate opacity { duration: Theme.motion-fast; easing: ease-out; }
     }
 
+    /// Focus entry for a caller that opened something and must hand the keyboard
+    /// back to this button (U21: the bookmark menu returns focus to its chevron).
+    public function take-focus() { key_focus.focus(); }
+
     key_focus := FocusScope {
         key-pressed(e) => {
             if (root.enabled && (e.text == "\n" || e.text == " ")) {
@@ -580,6 +584,9 @@ export component TextField inherits Rectangle {
 
     if root.text != "" && root.enabled : IconButton {
         icon: "dismiss";
+        // G31: a control created without its name is one a screen reader cannot
+        // describe — the field's own clear button included.
+        tip: "清除输入";
         tint: Theme.text-secondary;
         size: 22px;
         x: root.width - self.width - Theme.space-1;
@@ -605,10 +612,10 @@ export component ToggleSwitch inherits Rectangle {
     accessible-checkable: true;
     accessible-checked: root.checked;
     accessible-enabled: root.enabled;
-    accessible-action-default => {
-        root.checked = !root.checked;
-        root.toggled(root.checked);
-    }
+    // The switch reports the value the gesture asks for and never assigns itself:
+    // `checked:` at the call site is a one-way binding to the model, and a local
+    // `root.checked =` here destroyed it after the first click (§2.1 U28).
+    accessible-action-default => { root.toggled(!root.checked); }
 
     width: 40px;
     height: 20px;
@@ -649,8 +656,7 @@ export component ToggleSwitch inherits Rectangle {
     key_focus := FocusScope {
         key-pressed(e) => {
             if (root.enabled && (e.text == "\n" || e.text == " ")) {
-                root.checked = !root.checked;
-                root.toggled(root.checked);
+                root.toggled(!root.checked);
                 return EventResult.accept;
             }
             EventResult.reject
@@ -660,10 +666,7 @@ export component ToggleSwitch inherits Rectangle {
     ta := TouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
-        clicked => {
-            root.checked = !root.checked;
-            root.toggled(root.checked);
-        }
+        clicked => { root.toggled(!root.checked); }
     }
 }
 
@@ -706,14 +709,16 @@ export component SegmentedControl inherits Rectangle {
             if (!root.enabled) {
                 return EventResult.reject;
             }
+            // Report the *index the gesture picked* and let the owner write it back:
+            // `root.current = ...` here killed the call site's one-way binding
+            // (`current: Theme.mode == ...` in settings.slint), so after one press the
+            // group stopped following the model it is supposed to mirror (§2.1 U28).
             if (e.text == "\u{F702}" && root.items.length > 0) {
-                root.current = root.current <= 0 ? root.items.length - 1 : root.current - 1;
-                root.selected(root.current);
+                root.selected(root.current <= 0 ? root.items.length - 1 : root.current - 1);
                 return EventResult.accept;
             }
             if (e.text == "\u{F703}" && root.items.length > 0) {
-                root.current = root.current >= root.items.length - 1 ? 0 : root.current + 1;
-                root.selected(root.current);
+                root.selected(root.current >= root.items.length - 1 ? 0 : root.current + 1);
                 return EventResult.accept;
             }
             if (e.text == "\n" || e.text == " ") {
@@ -752,10 +757,7 @@ export component SegmentedControl inherits Rectangle {
             hit := TouchArea {
                 enabled: root.enabled;
                 mouse-cursor: pointer;
-                clicked => {
-                    root.current = i;
-                    root.selected(i);
-                }
+                clicked => { root.selected(i); }
             }
         }
     }
@@ -974,10 +976,6 @@ export component TagChip inherits Rectangle {
     accessible-label: root.label;
     accessible-action-default => { root.clicked(); }
 
-    /// Called by the row when the cursor has already been moved from somewhere that
-    /// is not a chip (the page, a shortcut).
-    public function take-focus() { key_focus.focus(); }
-
     // A cursor moved by an arrow key focuses the chip that owns it; a focus that
     // arrived from the Tab walk moves the cursor. The two are one loop on purpose:
     // the row has no other way to know which of its chips the keyboard is on.
@@ -1114,9 +1112,7 @@ export component InfoBar inherits Rectangle {
     in property <string> title: "";
     in property <string> message: "";
     in property <string> action-label: "";
-    in property <bool> dismissible: false;
     callback action();
-    callback dismissed();
 
     visible: root.title != "" || root.message != "";
     // One padding, not two. `body` already declares padding-top/bottom of
@@ -1186,12 +1182,6 @@ export component InfoBar inherits Rectangle {
             kind: ButtonKind.Subtle;
             compact: true;
             clicked => { root.action(); }
-        }
-        if root.dismissible : IconButton {
-            icon: "dismiss";
-            size: 22px;
-            tint: Theme.text-secondary;
-            clicked => { root.dismissed(); }
         }
     }
 }
@@ -1381,13 +1371,27 @@ export component PageScroll inherits Rectangle {
 
     background: Theme.canvas;
 
+    // `content-y` is written *from* the model and back only on a user scroll.
+    //
+    // It used to be `content-y <=> root.scroll-y`, and a two-way binding on a
+    // clamped property is two owners: when the body shrank (a shorter page, a
+    // narrower window, a grid that lost a column) the view clamped its own offset
+    // and wrote the clamp back into `root.scroll-y`, which is the property Rust
+    // reads as "where the user left this page". The stored offset was then the
+    // clamp, not the reading position, and Back landed somewhere the user had
+    // never been (plan §2.1 U24). One writer now: Rust restores into
+    // `root.scroll-y`, the view follows, and only the user's own scroll event
+    // writes the position back.
     sv := ScrollView {
         width: 100%;
         height: 100%;
-        content-y <=> root.scroll-y;
+        content-y: root.scroll-y;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
         vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
-        scrolled => { root.scrolled(root.scroll-y); }
+        scrolled => {
+            root.scroll-y = sv.content-y;
+            root.scrolled(sv.content-y);
+        }
 
         body := VerticalLayout {
             width: max(0px, sv.visible-width - (root.gutter ? Theme.scrollbar-gutter : 0px));
@@ -1620,7 +1624,13 @@ export component IllustCard inherits Rectangle {
     /// 1.18 has no `scroll-into-view`, so the page reports the event and Rust — the
     /// only owner of the column heights and the viewport — scrolls it into view.
     /// Nothing here scrolls: a card does not know where it sits.
-    callback gained-focus();
+    ///
+    /// Round eleven (U-f) added the argument: `root.y` is this card's offset inside
+    /// its own column, which is the only part of the content-space position a card
+    /// can know. `ArtworkGrid` adds its own `y` and hands the page a number in the
+    /// scroll body's coordinates, so the shell can put the focused card on screen
+    /// instead of only reporting that it was focused.
+    callback gained-focus(length);
 
     // A card is one list item whose name is the caption it already draws, so a
     // screen reader reads "标题 · 作者" and can open it, instead of walking a
@@ -1655,6 +1665,16 @@ export component IllustCard inherits Rectangle {
                 root.open();
                 return EventResult.accept;
             }
+            // U27: the author link is a pointer target, so it needs a keyboard path
+            // too — and it may not cost a second Tab stop per card (a 40-card grid is
+            // already 40 stops). The card is the stop; 'a' opens its author. Guarded
+            // against the modifiers the shell already uses: Ctrl+A is select-all and
+            // must reach the window, not the card.
+            if (e.text == "a" && !e.modifiers.control && !e.modifiers.alt
+                && !e.modifiers.shift && root.show-author) {
+                root.open-author();
+                return EventResult.accept;
+            }
             EventResult.reject
         }
     }
@@ -1663,7 +1683,7 @@ export component IllustCard inherits Rectangle {
     // `has-focus` is the only signal Slint exposes for "the walk arrived here".
     property <bool> held: key_focus.has-focus;
     changed held => {
-        if (root.held) { root.gained-focus(); }
+        if (root.held) { root.gained-focus(root.y); }
     }
 
     // Open-on-click, underneath every interactive child.
@@ -1854,11 +1874,23 @@ export component IllustCard inherits Rectangle {
                 y: 22px;
                 width: parent.width;
                 height: 18px;
+                // U27: the link is a bare `TouchArea` no more. The role and the name
+                // sit on the row — the same shape the account affordance in
+                // `main.slint` uses, and for the same reason: UIA publishes the node
+                // that carries the role, and the row is the cell that holds the avatar,
+                // the handle and the pointer target. Slint 1.18's `AccessibleRole` has
+                // no `link` member (checked against i-slint-common 1.18.1; the enum is
+                // None…RadioGroup plus landmarks), so the role is `Button` — the only
+                // one that means "invokable" — and the name says what it opens.
+                accessible-role: AccessibleRole.button;
+                accessible-label: root.item.author == ""
+                    ? "作者" : "作者：" + root.item.author;
+                accessible-action-default => { root.open-author(); }
 
                 Avatar {
                     x: 0px;
                     y: 0px;
-                    size: 16px;
+                    size: Theme.icon-size;
                     source: root.item.author-avatar;
                     state: root.item.author-avatar-state;
                     fallback: root.item.author;
@@ -2090,7 +2122,6 @@ export component UserCard inherits Rectangle {
     in property <RecommendUserItem> item;
     in property <length> card-width: 220px;
     callback open();
-    callback toggle-follow();
 
     accessible-role: AccessibleRole.list-item;
     accessible-label: root.item.account != ""
@@ -2367,12 +2398,12 @@ component MenuRow inherits Rectangle {
         // disappears would re-align every label depending on which restriction is
         // in force.
         Rectangle {
-            width: 14px;
+            width: Theme.menu-metric-check;
             height: 100%;
             IconSlot {
                 name: "check";
-                slot: 14px;
-                glyph-size: 12px;
+                slot: Theme.menu-metric-check;
+                glyph-size: Theme.menu-metric-glyph;
                 tint: Theme.accent-ink;
                 opacity: root.checked ? 1.0 : 0.0;
             }
@@ -2460,6 +2491,13 @@ export component BookmarkMenu inherits Rectangle {
     // Up/Down/Escape/Enter. Character codes, never key names: U+001B is Escape,
     // U+F700 Up, U+F701 Down. The scope is declared after the rows and there is no
     // TouchArea in this component, so the hit-test order rule does not apply here.
+    // U21: `take-focus` had no caller, so the scope below never held the focus the
+    // Up/Down/Escape/Enter handler it owns was written for — the flyout was
+    // pointer-only and the shell's Escape had nothing of its own to close. The menu
+    // is created when it opens (`if root.restrict-open`), so `init` is the moment
+    // it becomes real: one line, in the component that owns the scope.
+    init => { root.take-focus(); }
+
     menu-focus := FocusScope {
         key-pressed(e) => {
             if (e.text == "\u{F700}") { root.step(-1); return EventResult.accept; }

@@ -156,7 +156,7 @@ component SuggestRow inherits Rectangle {
         : root.item.label + " · " + root.item.count;
     accessible-action-default => { root.choose(); }
 
-    height: 34px;
+    height: Theme.suggest-row-height;
     background: root.item.active ? Theme.accent-subtle
         : (row.has-hover ? Theme.layer-alt : transparent);
 
@@ -322,10 +322,11 @@ export component AppWindow inherits Window {
     callback batch-download();
     callback batch-bookmark();
     callback card-clicked(string, bool, bool);
-    /// U3: a card took the keyboard focus. Forwarded with the work id; Rust turns it
-    /// into a `grid-scroll-y`/`home-scroll-y`/profile offset, because only Rust knows
-    /// the column heights and the viewport.
-    callback card-focused(string);
+    /// U3/U-f: a card took the keyboard focus. The second argument is the card's
+    /// own `y` in the scroll body's coordinate space, measured by `ArtworkGrid` and
+    /// forwarded unchanged by the page; Rust turns the pair into a scroll offset,
+    /// because only Rust knows the viewport and whether the card is still loaded.
+    callback card-focused(string, length);
 
     // ---- round nine: detail playback and bookmark restriction (F1/F4/U29) ----
     in property <bool> film-ready: false;
@@ -403,7 +404,10 @@ export component AppWindow inherits Window {
     // ---- detail state ----
     in property <[ViewerPage]> detail-pages: [];
     in-out property <int> detail-page-index: 0;
-    in property <int> detail-state: 0;
+    /// 0 content, 1 loading, 3 error. Defaults to *loading* (U25): a fresh window
+    /// has an empty page list, and `0` drew a blank canvas for the frame between
+    /// navigation and the first reply.
+    in property <int> detail-state: 1;
     in property <string> detail-message: "";
     in property <string> detail-title: "";
     in property <string> detail-author: "";
@@ -595,8 +599,6 @@ export component AppWindow inherits Window {
     out property <length> body-height: body-row.height;
     out property <length> status-y: status-row.y;
     out property <length> status-height: status-row.height;
-
-    out property <length> measured-width: 0px;
 
     /// Fired when the window size changes. Slint has no resize event, so the
     /// property change *is* the event; Rust then owns the narrow/compact decision
@@ -1110,7 +1112,7 @@ export component AppWindow inherits Window {
                         batch-download => { root.batch-download(); }
                         batch-bookmark => { root.batch-bookmark(); }
                         card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
-                        card-focused(id) => { root.card-focused(id); }
+                        card-focused(id, y) => { root.card-focused(id, y); }
                     }
 
                     gallery := GalleryPage {
@@ -1168,7 +1170,7 @@ export component AppWindow inherits Window {
                         batch-download => { root.batch-download(); }
                         batch-bookmark => { root.batch-bookmark(); }
                         card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
-                        card-focused(id) => { root.card-focused(id); }
+                        card-focused(id, y) => { root.card-focused(id, y); }
                     }
 
                     profile-page := ProfilePage {
@@ -1216,7 +1218,11 @@ export component AppWindow inherits Window {
                         batch-download => { root.batch-download(); }
                         batch-bookmark => { root.batch-bookmark(); }
                         card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
-                        card-focused(id) => { root.card-focused(id); }
+                        // Profile is track D's page this round (plan §7): it still
+                        // reports the id alone, so the shell is handed 0 and does not
+                        // chase a card whose position it was not told. One line to
+                        // change when D widens `ProfilePage.card-focused`.
+                        card-focused(id) => { root.card-focused(id, 0px); }
                     }
 
                     NovelsPage {
@@ -1414,14 +1420,26 @@ export component AppWindow inherits Window {
                     // row in the shell layout: as a row it pushed the status bar out
                     // of a 480px-tall window. As an overlay it is visible on every
                     // page and steals no layout space.
-                    if root.notice != "" : Rectangle {
+                    if root.notice != "" : notice-bar := Rectangle {
                         x: Theme.space-4;
-                        // Literal height rather than `self.height`: a self-referencing
-                        // binding in `y` resolves against height 0 and puts the bar
-                        // outside the clip.
-                        y: parent.height - 44px - Theme.space-4;
+                        // The bar's height is stated once, as a property: a
+                        // self-referencing binding in `y` resolves against height 0 and
+                        // puts the bar outside the clip. Two 18px text lines plus one
+                        // 4px step on each side is today's 44px, so a one-line notice
+                        // paints exactly the pixels it painted before (U30).
+                        property <length> bar-height:
+                            Theme.notice-line-height * 2 + Theme.space-1 * 2;
+                        y: parent.height - self.bar-height - Theme.space-4;
                         width: parent.width - Theme.space-4 * 2;
-                        height: 44px;
+                        height: self.bar-height;
+                        // U30: a sentence the shell says to the user is an alert, not
+                        // decoration. Slint 1.18's `AccessibleRole` has no `alert` member,
+                        // but it has the mechanism an alert is made of: an assertive live
+                        // region, which is announced when its content changes instead of
+                        // waiting to be focused. The name is the sentence itself.
+                        accessible-role: AccessibleRole.region;
+                        accessible-live-region: AccessibleLiveness.assertive;
+                        accessible-label: root.notice;
                         border-radius: Theme.radius-md;
                         background: root.notice-kind == 3 ? Theme.danger-subtle
                             : root.notice-kind == 2 ? Theme.warning-subtle
@@ -1435,6 +1453,15 @@ export component AppWindow inherits Window {
                         drop-shadow-blur: 10px;
                         drop-shadow-color: Theme.shadow-2;
                         drop-shadow-offset-y: 2px;
+
+                        // U30: it used to wait for a click on the ✕. A notice that
+                        // outlives the action that raised it is a notice covering the
+                        // page it is describing; six seconds is `Theme.notice-dwell`.
+                        Timer {
+                            interval: Theme.notice-dwell;
+                            running: root.notice != "";
+                            triggered => { root.dismiss-notice(); }
+                        }
 
                         HorizontalLayout {
                             padding-left: Theme.space-3;
@@ -1458,13 +1485,20 @@ export component AppWindow inherits Window {
                                 text: root.notice;
                                 color: Theme.text;
                                 horizontal-stretch: 1;
+                                // U30: wraps to a second line and is cut there, instead
+                                // of eliding the half of the sentence that said what to
+                                // do about it. `max-height` is two `notice-line-height`s.
+                                wrap: word-wrap;
+                                max-height: Theme.notice-line-height * 2;
+                                overflow: clip;
+                                vertical-alignment: center;
                             }
 
                             IconButton {
                                 icon: "dismiss";
-                                size: 24px;
+                                size: Theme.menu-metric-glyph * 2;
                                 tip: "关闭";
-                                row-height: 44px;
+                                row-height: notice-bar.bar-height;
                                 clicked => { root.dismiss-notice(); }
                             }
                         }
@@ -1598,8 +1632,8 @@ export component AppWindow inherits Window {
                 // `content-width -> panel-body.width -> min-width -> content-width`.
                 // `PageScroll` states its own body width the same way.
                 width: max(0px, panel-scroll.visible-width);
-                padding-top: 5px;
-                padding-bottom: 5px;
+                padding-top: Theme.suggest-row-pad;
+                padding-bottom: Theme.suggest-row-pad;
                 spacing: 0px;
 
                 if root.suggestions.length == 0 : Label {
@@ -1631,11 +1665,15 @@ export component AppWindow inherits Window {
                         // must not scroll at all) and never past the content's own overflow
                         // (a list shorter than the 392 px viewport has no offset to give,
                         // and a negative residue there would scroll a full panel of nothing).
-                        // `34px` is `SuggestRow`'s height and `5px` its body padding above;
-                        // `64px` keeps the cursor two rows clear of the top edge.
+                        // `Theme.suggest-row-height` is `SuggestRow`'s height and
+                        // `Theme.suggest-row-pad` its body padding above; two rows minus
+                        // one 4px step (~64px) keeps the cursor clear of the top edge.
+                        // The pair was written twice — once on the row and once here —
+                        // so a row-height change silently broke the cursor (U35).
                         root.suggest-scroll-y = Math.max(
                             0px - Math.max(0px, panel-body.height - panel-scroll.visible-height),
-                            Math.min(0px, 64px - (index * 34px + 5px)));
+                            Math.min(0px, Theme.suggest-row-height * 2 - Theme.space-1
+                                - (index * Theme.suggest-row-height + Theme.suggest-row-pad)));
                     }
                 }
 
@@ -1695,6 +1733,14 @@ export component AppWindow inherits Window {
 
         palette-body := VerticalLayout {
             spacing: 0px;
+
+            // U20, the round's only P0: the panel opens and its field takes the input.
+            // The panel is created when `palette-open` turns true, so `init` is the
+            // frame in which the field exists and typing, Up/Down and Enter stop being
+            // dropped on the page behind. Every path that opens the palette — Ctrl+P,
+            // the host, a scrim re-open — ends here; the close path returns focus to
+            // the search box above.
+            init => { palette-field.focus-input(); }
 
             // The query row: 40 px, with the accent wash behind the field so the field
             // itself keeps its own borderless surface inside the panel.
@@ -1778,5 +1824,21 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ================= U20: the palette's focus owner =================
+    // The panel is opened from five places — Ctrl+P, Escape, a scrim click, a chosen
+    // row, and the host — and the query field only ever had focus in none of them:
+    // `focus-input()` was called on the two search boxes and never on
+    // `palette-field`, so typing, Up/Down and Enter all landed on the page behind
+    // (plan §2.1 U20, the round's only P0). One handler, declared after the panel so
+    // the ids exist, decides the keyboard's home for every one of those paths.
+    // The opening half lives inside the panel, as `init`: Slint creates a conditional
+    // element when its condition turns true, so that is the moment the field exists —
+    // and an id inside an `if` cannot be reached from here (measured: "Cannot access
+    // id 'palette-field'"). The closing half is below, because `search-field` is
+    // unconditional.
+    changed palette-open => {
+        if (!root.palette-open) { root.focus-search(); }
     }
 }

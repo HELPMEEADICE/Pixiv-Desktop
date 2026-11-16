@@ -288,6 +288,16 @@ component InfoBody inherits VerticalLayout {
     callback open-external();
     callback follow();
     callback restrict-menu-at(length, length);
+    /// U21: the page closed the restriction menu and the keyboard has to go back to
+    /// the chevron that opened it. A counter rather than a function call: the page
+    /// cannot reach an id that lives inside a conditional layout (measured:
+    /// "Cannot access id 'panel'"), so this is the same property channel the reader
+    /// uses for its key commands. Zero means "nothing asked yet", so creating this
+    /// body never steals the focus.
+    in property <int> focus-request: 0;
+    changed focus-request => {
+        if (root.focus-request > 0) { chevron.take-focus(); }
+    }
 
     spacing: Theme.space-3;
 
@@ -391,6 +401,9 @@ component InfoBody inherits VerticalLayout {
             // horizontal layout is aligned to the start of the cross axis.
             width: split.preferred-width;
             height: 32px;
+            // G27: a fixed-height child of a horizontal row states where it goes; the
+            // 26px button beside it is aligned the same way, one step down.
+            y: 0px;
 
             split := HorizontalLayout {
                 spacing: 0px;
@@ -576,6 +589,9 @@ export component InfoPanel inherits Rectangle {
     /// coordinates (the menu itself is painted by the page, because a flyout inside
     /// a clipped column or a scroll view is a flyout that cannot be reached).
     callback restrict-menu-at(length, length);
+    /// U21: see `InfoBody.focus-request` — forwarded unchanged, because the chevron
+    /// lives one component down and the page cannot reach it.
+    in property <int> focus-request: 0;
     /// Roving focus cursor for the tag chips this panel draws (U7).
     in-out property <int> tag-cursor: 0;
 
@@ -595,7 +611,7 @@ export component InfoPanel inherits Rectangle {
         gutter: false;
         spacing: Theme.space-3;
 
-        InfoBody {
+        focus-body := InfoBody {
             title: root.title;
             author: root.author;
             author-id: root.author-id;
@@ -615,6 +631,7 @@ export component InfoPanel inherits Rectangle {
             busy: root.busy;
             ugoira-hint: root.ugoira-hint;
             bookmark-restrict: root.bookmark-restrict;
+            focus-request: root.focus-request;
             tag-cursor <=> root.tag-cursor;
             toggle-bookmark => { root.toggle-bookmark(); }
             open-author => { root.open-author(); }
@@ -627,6 +644,7 @@ export component InfoPanel inherits Rectangle {
             restrict-menu-at(x, y) => { root.restrict-menu-at(x, y); }
         }
     }
+
 }
 
 /// Full page: toolbar + viewer + metadata + thumbnail strip.
@@ -648,8 +666,13 @@ export component DetailPage inherits Rectangle {
     in property <bool> authenticated: false;
     in property <bool> following: false;
     in property <bool> busy: false;
-    /// 0 content, 1 loading, 3 error
-    in property <int> state: 0;
+    /// 0 content, 1 loading, 3 error. Defaults to *loading* (U25).
+    ///
+    /// The page used to default to 0 with an empty page list, and every content branch
+    /// needs `pages.length > 0` — so the first frame after a navigation was a blank
+    /// canvas: no viewer, no message, no spinner. A page whose data has not arrived
+    /// has not got content, and the default has to say so.
+    in property <int> state: 1;
     in property <string> message: "";
     in property <string> ugoira-hint: "";
 
@@ -716,6 +739,11 @@ export component DetailPage inherits Rectangle {
     property <bool> restrict-open: false;
     property <length> restrict-anchor-x: 0px;
     property <length> restrict-anchor-y: 0px;
+    /// U21: bumped every time the menu closes; both InfoBody instances watch it and
+    /// the chevron of the layout that is on screen takes the focus back. A counter,
+    /// because the button is unreachable from here and a repeated close must still be
+    /// an event.
+    in-out property <int> focus-request: 0;
 
     // ---- vertical budget (U5) ----
     /// Height the pinned thumbnail strip consumes: 68 px when there is more than one
@@ -887,36 +915,6 @@ export component DetailPage inherits Rectangle {
                 // the content column out of any dependence on the scrollbar.
                 width: max(0px, body-scroll.visible-width);
 
-                if root.state == 1 : Rectangle {
-                    height: 96px;
-                    LoadingRow {
-                        y: (parent.height - self.height) / 2;
-                        bar-width: 140px;
-                        label: "正在载入作品…";
-                    }
-                }
-
-                // Centred, not stretched. `StateView` starts its 420px description at the
-                // beginning of its content box, so a stretched block centres the heading
-                // over a left-shifted description; the paired stretch spacers centre the
-                // block itself, which keeps heading, description and button on one axis at
-                // the page centre.
-                if root.state == 3 : HorizontalLayout {
-                    width: 100%;
-
-                    Rectangle { horizontal-stretch: 1; }
-
-                    StateView {
-                        kind: StateKind.Error;
-                        title: "无法载入作品";
-                        description: root.message;
-                        action-label: "重试";
-                        retry => { root.retry(); }
-                    }
-
-                    Rectangle { horizontal-stretch: 1; }
-                }
-
                 if root.state == 0 && root.pages.length > 0 && root.wide : HorizontalLayout {
                     spacing: Theme.space-3;
                     padding: Theme.space-3;
@@ -949,7 +947,7 @@ export component DetailPage inherits Rectangle {
                         border-radius: Theme.radius-lg;
                         clip: true;
 
-                        InfoPanel {
+                        panel := InfoPanel {
                             width: parent.width;
                             height: parent.height;
                             title: root.title;
@@ -973,6 +971,7 @@ export component DetailPage inherits Rectangle {
                             busy: root.busy;
                             ugoira-hint: root.ugoira-hint;
                             bookmark-restrict: root.bookmark-restrict;
+                            focus-request: root.focus-request;
                             tag-cursor <=> root.tag-cursor;
                             restrict-menu-at(x, y) => {
                                 root.restrict-anchor-x = x;
@@ -1041,7 +1040,7 @@ export component DetailPage inherits Rectangle {
                             padding: Theme.space-4;
                             spacing: 0px;
 
-                            InfoBody {
+                            inline := InfoBody {
                                 title: root.title;
                                 author: root.author;
                                 author-id: root.author-id;
@@ -1061,6 +1060,7 @@ export component DetailPage inherits Rectangle {
                                 busy: root.busy;
                                 ugoira-hint: root.ugoira-hint;
                                 bookmark-restrict: root.bookmark-restrict;
+                                focus-request: root.focus-request;
                                 tag-cursor <=> root.tag-cursor;
                                 restrict-menu-at(x, y) => {
                                     root.restrict-anchor-x = x;
@@ -1078,6 +1078,62 @@ export component DetailPage inherits Rectangle {
                             }
                         }
                     }
+                }
+
+                // ---- states (U25, G29) ----
+                //
+                // Declared *after* the body they replace, not before it. Slint hit-tests
+                // in reverse declaration order, so a state block that carries a button and
+                // is declared above a live surface loses its own clicks to it; the three
+                // blocks below are mutually exclusive with the content branches above by
+                // construction (state 0 vs 1 vs 3 vs "no pages yet"), so the move costs no
+                // pixel and buys the ordering rule (G29).
+                //
+                // U25 also adds the fourth case. `state == 0` with an empty page list used
+                // to draw nothing at all: the page defaulted to "content" while the reply
+                // was still in flight, and every content branch needs a page. That is a
+                // loading frame, and it now says so with the shared state view instead of a
+                // blank canvas.
+                if root.state == 1 : Rectangle {
+                    height: 96px;
+                    LoadingRow {
+                        y: (parent.height - self.height) / 2;
+                        bar-width: 140px;
+                        label: "正在载入作品…";
+                    }
+                }
+
+                if root.state == 0 && root.pages.length == 0 : Rectangle {
+                    height: 240px;
+                    VerticalLayout {
+                        alignment: center;
+                        StateView {
+                            kind: StateKind.Loading;
+                            title: "正在载入作品…";
+                            description: root.message;
+                        }
+                    }
+                }
+
+                // Centred, not stretched. `StateView` starts its 420px description at the
+                // beginning of its content box, so a stretched block centres the heading
+                // over a left-shifted description; the paired stretch spacers centre the
+                // block itself, which keeps heading, description and button on one axis at
+                // the page centre.
+                if root.state == 3 : HorizontalLayout {
+                    width: 100%;
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    StateView {
+                        kind: StateKind.Error;
+                        title: "无法载入作品";
+                        description: root.message;
+                        action-label: "重试";
+                        retry => { root.retry(); }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
                 }
 
             }
@@ -1196,7 +1252,7 @@ export component DetailPage inherits Rectangle {
         background: transparent;
 
         scrim := TouchArea {
-            clicked => { root.restrict-open = false; }
+            clicked => { root.close-restrict(); }
         }
     }
 
@@ -1212,13 +1268,23 @@ export component DetailPage inherits Rectangle {
         restrict: root.bookmark-restrict;
         bookmarked: root.bookmarked;
         pick(r) => {
-            root.restrict-open = false;
+            root.close-restrict();
             root.pick-restrict(r);
         }
         remove => {
-            root.restrict-open = false;
+            root.close-restrict();
             root.toggle-bookmark();
         }
-        closed => { root.restrict-open = false; }
+        closed => { root.close-restrict(); }
+    }
+
+    /// U21: the menu closed — put the keyboard back where it came from.
+    ///
+    /// The chevron is `InfoBody`'s, two components down and inside a conditional
+    /// layout, so the keyboard is asked back through `focus-request` rather than
+    /// grabbed: both hosts bind the counter, only the one on screen has a chevron.
+    public function close-restrict() {
+        root.restrict-open = false;
+        root.focus-request += 1;
     }
 }

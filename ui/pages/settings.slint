@@ -17,6 +17,64 @@
 import { Theme, Type, ThemeMode, Emphasis, TextRole } from "../theme.slint";
 import { AppButton, ButtonKind, ToggleSwitch, Divider, Badge, TextField, InfoBar, InfoKind, PageScroll, SettingsCard, SettingsRow, SegmentedControl, IconSlot, Label, BodyText } from "../components.slint";
 
+/// The confirmation a destructive row raises (§2.1 U22).
+///
+/// It used to be drawn once, at the top of the scroll body, while the three buttons
+/// that raise it sit 600-900 px lower: the user pressed 「清除…」 near the bottom of
+/// the page and the question appeared above the fold, so the answer to "did it work?"
+/// was invisible and the second click landed on whatever the row had scrolled under
+/// the pointer. The strip now lives in the row that asked — the question and the
+/// button that asks it are never apart — and it is composed from the same parts the
+/// rest of the app uses, with the sentence as its accessible name.
+component ConfirmStrip inherits Rectangle {
+    in property <string> sentence: "";
+    callback confirm();
+    callback cancel();
+
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: root.sentence;
+
+    height: 52px;
+    border-radius: Theme.radius-sm;
+    background: Theme.danger-subtle;
+    border-width: 1px;
+    border-color: Theme.danger;
+
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-2;
+
+        IconSlot {
+            name: "warning";
+            slot: Theme.icon-size;
+            tint: Theme.danger;
+        }
+
+        Text {
+            text: root.sentence;
+            color: Theme.text;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        AppButton {
+            label: "取消";
+            kind: ButtonKind.Subtle;
+            compact: true;
+            clicked => { root.cancel(); }
+        }
+        AppButton {
+            label: "确定清除";
+            kind: ButtonKind.Danger;
+            compact: true;
+            clicked => { root.confirm(); }
+        }
+    }
+}
+
 export component SettingsPage inherits Rectangle {
     // No theme mirror here: the page reads `Theme.mode` / `Theme.dark` straight
     // from the `Theme` global and asks Rust to change them. One copy, one owner.
@@ -88,56 +146,9 @@ export component SettingsPage inherits Rectangle {
             }
         }
 
-        // Notices are rendered by the shell (main.slint) so they are visible on
-        // every page, not just this one.
-        if root.confirm != "" : Rectangle {
-            height: 52px;
-            border-radius: Theme.radius-sm;
-            background: Theme.danger-subtle;
-            border-width: 1px;
-            border-color: Theme.danger;
-
-            HorizontalLayout {
-                padding-left: Theme.space-3;
-                padding-right: Theme.space-2;
-                spacing: Theme.space-2;
-
-                IconSlot {
-                    name: "warning";
-                    slot: Theme.icon-size;
-                    tint: Theme.danger;
-                }
-
-                Text {
-                    text: root.confirm == "cache" ? "确定要清除全部图片缓存吗？已下载的作品文件不受影响。"
-                        : root.confirm == "history" ? "确定要清除浏览历史与搜索历史吗？此操作无法撤销。"
-                        : "确定要清除下载记录吗？磁盘上的文件会保留。";
-                    color: Theme.text;
-                    font-size: Theme.font-small;
-                    wrap: word-wrap;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-
-                AppButton {
-                    label: "取消";
-                    kind: ButtonKind.Subtle;
-                    compact: true;
-                    clicked => { root.confirm = ""; }
-                }
-                AppButton {
-                    label: "确定清除";
-                    kind: ButtonKind.Danger;
-                    compact: true;
-                    clicked => {
-                        if (root.confirm == "cache") { root.clear-cache(); }
-                        if (root.confirm == "history") { root.clear-history(); }
-                        if (root.confirm == "downloads") { root.clear-downloads(); }
-                        root.confirm = "";
-                    }
-                }
-            }
-        }
+        // Notices the *shell* raises are rendered by main.slint so they are visible on
+        // every page. A destructive confirmation is not a notice: it belongs to the row
+        // that raised it (U22) and is drawn there, immediately under it.
 
         // ---- 账户 ----
         SettingsCard {
@@ -246,6 +257,15 @@ export component SettingsPage inherits Rectangle {
                     clicked => { root.confirm = "cache"; }
                 }
             }
+            // U22: the question sits in the row that asked it.
+            if root.confirm == "cache" : ConfirmStrip {
+                sentence: "确定要清除全部图片缓存吗？已下载的作品文件不受影响。";
+                cancel => { root.confirm = ""; }
+                confirm => {
+                    root.clear-cache();
+                    root.confirm = "";
+                }
+            }
             Divider { }
             SettingsRow {
                 label: "内存上限";
@@ -346,6 +366,14 @@ export component SettingsPage inherits Rectangle {
                     clicked => { root.confirm = "history"; }
                 }
             }
+            if root.confirm == "history" : ConfirmStrip {
+                sentence: "确定要清除浏览历史与搜索历史吗？此操作无法撤销。";
+                cancel => { root.confirm = ""; }
+                confirm => {
+                    root.clear-history();
+                    root.confirm = "";
+                }
+            }
             Divider { }
             SettingsRow {
                 label: "下载记录";
@@ -356,6 +384,14 @@ export component SettingsPage inherits Rectangle {
                     icon: "delete";
                     kind: ButtonKind.Subtle;
                     clicked => { root.confirm = "downloads"; }
+                }
+            }
+            if root.confirm == "downloads" : ConfirmStrip {
+                sentence: "确定要清除下载记录吗？磁盘上的文件会保留。";
+                cancel => { root.confirm = ""; }
+                confirm => {
+                    root.clear-downloads();
+                    root.confirm = "";
                 }
             }
             Divider { }

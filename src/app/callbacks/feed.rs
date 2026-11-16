@@ -130,6 +130,48 @@ pub(crate) fn install(app: &Shared) {
         });
     }
 
+    // ---- round eleven (U-f): focus scrolls the page ----
+    //
+    // `IllustCard.gained-focus` fired and nothing followed it: the card reported that
+    // the Tab walk had arrived, and the page stayed where it was, so a keyboard user
+    // was told about a card forty rows below the viewport. The card now reports its own
+    // `y` in the scroll body (`ArtworkGrid` adds the grid's offset), and this is the
+    // only place that knows the viewport, so this is where "focused" becomes "on
+    // screen". Offsets are negative-down: `PageScroll.scrolled` reports
+    // `0px - content-y`, so a card at `y` lands at `-(y - lead)`.
+    {
+        let shared = app.clone();
+        ui.on_card_focused(move |id, y| {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            // A card that a route change removed is not chased. The grid that reported
+            // the focus may already belong to the page behind this one, and scrolling a
+            // page the user is not looking at is the same class of defect the gate is
+            // about (plan §2.1 U-f).
+            let Some(route) = app.feed_owner else {
+                return;
+            };
+            if route != app.route {
+                return;
+            }
+            let Ok(work_id) = id.as_str().parse::<u64>() else {
+                return;
+            };
+            if !app.items.iter().any(|work| work.id == pixiv_types::Id(work_id)) {
+                return;
+            }
+            let offset = card_scroll_offset(y, FOCUS_LEAD);
+            app.remember_scroll(route, offset);
+            let ui = app.ui();
+            if app.page == Destination::Home {
+                ui.set_home_scroll_y(offset);
+            } else {
+                ui.set_grid_scroll_y(offset);
+            }
+        });
+    }
+
     {
         let shared = app.clone();
         ui.on_select_all(move || App::select_all_loaded(&shared));
@@ -181,4 +223,42 @@ pub(crate) fn install(app: &Shared) {
     }
 
     start_reconcile(app);
+}
+
+/// How far a page must scroll to put a card that took the focus on screen.
+///
+/// `y` is the card's offset in the scroll body's own coordinates and every page offset
+/// in this app is negative-down (`PageScroll.scrolled` reports `0px - content-y`), so the
+/// target is `-(y - lead)`: one lead step above the card, which keeps the row it belongs
+/// to visible instead of pinning its top edge to the page's first pixel.
+///
+/// Clamped to `<= 0` in both directions and defined for the first screen: a card inside
+/// the first `lead` pixels scrolls nowhere at all (a positive offset is not a scroll
+/// position), and a non-finite measurement is treated as "do not move" rather than
+/// handed to the ScrollView.
+fn card_scroll_offset(y: f32, lead: f32) -> f32 {
+    if !y.is_finite() {
+        return 0.0;
+    }
+    (0.0 - (y - lead).max(0.0)).min(0.0)
+}
+
+/// The one lead step: one `Theme.space-3`, 12 logical px.
+const FOCUS_LEAD: f32 = 12.0;
+
+#[cfg(test)]
+mod tests {
+    use super::card_scroll_offset;
+
+    #[test]
+    fn a_focused_card_scrolls_in_with_one_lead_step_and_never_past_the_top() {
+        assert_eq!(card_scroll_offset(0.0, 12.0), 0.0, "the first card moves nothing");
+        assert_eq!(card_scroll_offset(6.0, 12.0), 0.0, "inside the lead, still nothing");
+        assert_eq!(card_scroll_offset(212.0, 12.0), -200.0, "one lead above the card");
+        assert_eq!(
+            card_scroll_offset(f32::NAN, 12.0),
+            0.0,
+            "a measurement that is not a number must not be handed to the view"
+        );
+    }
 }

@@ -14,13 +14,17 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
-import { IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton, ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard, BatchBar, Label, BodyText } from "../components.slint";
+import { IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton, ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard, BatchBar, SegmentedControl, Label, BodyText } from "../components.slint";
 
 /// The masonry columns themselves. No scroll view, no header: callers embed this
 /// inside their own scroll body so the grid can sit under page-specific content.
 export component ArtworkGrid inherits Rectangle {
     in property <[[IllustItem]]> columns: [];
-    in property <length> card-width: 220px;
+    /// Column width, clamped to the band `src/layout.rs` balances against. The two
+    /// bounds were the theme's only unread tokens (U32); reading them here is what
+    /// makes the constant pair a contract instead of a comment.
+    in property <length> card-width: Math.max(
+        Theme.card-min-width, Math.min(Theme.card-max-width, 220px));
     in property <bool> show-author: true;
 
     callback open-illust(string);
@@ -35,7 +39,12 @@ export component ArtworkGrid inherits Rectangle {
     /// position: `columns` is a height-balanced reshuffle of `items`, so no element
     /// of this layout can name a card's index in the feed. Rust owns `items` and
     /// resolves the id to the index the scroll offset needs.
-    callback card-focused(string);
+    callback card-focused(string, length);
+
+    /// Columns are summed into one content-space offset below: a card reports its
+    /// `y` inside its own column, and this is the `y` of the whole grid inside the
+    /// page body, so `card y + grid y` is the position the shell scrolls to (U-f).
+    property <length> grid-y: root.y;
 
     height: cols.preferred-height;
     width: cols.preferred-width;
@@ -61,7 +70,7 @@ export component ArtworkGrid inherits Rectangle {
                 open-author => { root.open-author(it.author-id); }
                 toggle-bookmark => { root.toggle-bookmark(it.id); }
                 clicked-with(ctrl, shift) => { root.card-clicked(it.id, ctrl, shift); }
-                gained-focus => { root.card-focused(it.id); }
+                gained-focus(y) => { root.card-focused(it.id, y + root.grid-y); }
             }
         }
     }
@@ -145,8 +154,34 @@ export component GalleryPage inherits Rectangle {
     public function request-select-all() { root.select-all(); }
     /// A card was clicked with the keys that were (or were not) delivered.
     callback card-clicked(string, bool, bool);
-    /// U3: which card the Tab walk arrived on, by work id (see `ArtworkGrid`).
-    callback card-focused(string);
+    /// U3/U-f: which card the Tab walk arrived on, by work id, and where it sits in
+    /// the scroll body (see `ArtworkGrid`).
+    callback card-focused(string, length);
+
+    // ---- round eleven (docs/OPTIMIZATION-PLAN-R11.md §1): frozen seams ----
+    // Track D fills these; every default is empty or zero, so a page that never
+    // fills them draws exactly what it drew before this round — no empty group and
+    // no empty chip row.
+    in property <[string]> sort-labels: [];
+    in-out property <int> sort-index: 0;
+    in-out property <int> mode-index: 0;
+    callback sort-chosen(int);
+    callback mode-chosen(int);
+    in property <[string]> related-tags: [];
+    callback related-tag-chosen(string);
+    /// The sort group's name for assistive technology, from the owner that fills
+    /// `sort-labels`: the control may not invent a label (§3, G31).
+    in property <string> sort-label: "";
+    /// The match-mode group's labels and name. Neither is in the plan's table, and
+    /// that is what lets the second group honour "draw nothing today": the sort
+    /// labels arrive with the seam, these do not, so the mode control has no items
+    /// until the owner of `mode-index` also fills them (U28's rule, one surface
+    /// over: the page reports, the model writes).
+    in property <[string]> mode-labels: [];
+    in property <string> mode-label: "";
+    /// Roving focus cursor for the related-tag row: the strip is one Tab stop and
+    /// Left/Right walk it, exactly as the tag strip above does (U7).
+    in-out property <int> related-cursor: 0;
 
     /// Roving focus cursors for the two chip rows on this page (U7). A strip is one
     /// Tab stop: Left/Right move this index and the chip that owns it takes focus.
@@ -269,6 +304,63 @@ export component GalleryPage inherits Rectangle {
             }
         }
 
+        // ---------------- round eleven: sort and match mode ----------------
+        // Two groups, both composed from the shared `SegmentedControl`. They report
+        // the index the gesture picked and never assign `sort-index`/`mode-index`:
+        // those belong to the model that owns the query (§2.1 U28).
+        if root.sort-labels.length > 0 : HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            height: Theme.control-height;
+
+            SegmentedControl {
+                label: root.sort-label == "" ? "排序方式" : root.sort-label;
+                items: root.sort-labels;
+                current: root.sort-index;
+                selected(i) => { root.sort-chosen(i); }
+            }
+
+            if root.mode-labels.length > 0 : SegmentedControl {
+                label: root.mode-label == "" ? "匹配方式" : root.mode-label;
+                items: root.mode-labels;
+                current: root.mode-index;
+                selected(i) => { root.mode-chosen(i); }
+            }
+        }
+
+        // ---------------- round eleven: related tags ----------------
+        // The same two-band strip the tag row above uses (chip band, then the
+        // scrollbar's own band), drawn only when the owner has tags to offer.
+        if root.related-tags.length > 0 : Rectangle {
+            height: 48px;
+            clip: true;
+
+            ScrollView {
+                width: 100%;
+                height: 100%;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+
+                HorizontalLayout {
+                    padding-top: Theme.space-1;
+                    spacing: Theme.space-2;
+                    alignment: start;
+
+                    for t[i] in root.related-tags : TagChip {
+                        label: t;
+                        index: i;
+                        cursor: root.related-cursor;
+                        gained-focus(idx) => { root.related-cursor = idx; }
+                        move-cursor(d) => {
+                            root.related-cursor = Math.max(0, Math.min(
+                                root.related-tags.length - 1, root.related-cursor + d));
+                        }
+                        clicked => { root.related-tag-chosen(t); }
+                    }
+                }
+            }
+        }
+
         // ---------------- tag strip ----------------
         // A dedicated horizontal scroller: chips must never be clipped by the
         // body width, and a wrapping row is not expressible in Slint's layout
@@ -355,7 +447,6 @@ export component GalleryPage inherits Rectangle {
                             item: u;
                             card-width: Theme.artist-card-width;
                             open => { root.open-user(u.id); }
-                            toggle-follow => { }
                         }
                     }
                 }
@@ -424,7 +515,7 @@ export component GalleryPage inherits Rectangle {
             open-author(id) => { root.open-author(id); }
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
             card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
-            card-focused(id) => { root.card-focused(id); }
+            card-focused(id, y) => { root.card-focused(id, y); }
         }
 
         // ---------------- empty / error / locked ----------------
