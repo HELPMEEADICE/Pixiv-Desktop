@@ -2993,4 +2993,132 @@ last in its component:\n{}",
         );
     }
 
+    /// G52 — every `in property` / `callback` a page declares is bound by the shell.
+    ///
+    /// A page's `in` surface is the host's side of the contract: the page draws the
+    /// control, the shell owns the state. Round eleven froze `GalleryPage`'s sort and
+    /// target vocabulary and filled only the Slint half, so the page drew two
+    /// `SegmentedControl`s and a related-tag strip whose `sort_chosen`, `mode_chosen` and
+    /// `related_tag` reached nothing — the controls moved and no request left the window.
+    /// The existing `every_declaration_has_a_reader` cannot see that: those properties are
+    /// read *inside* the page, by the controls drawn from them.
+    ///
+    /// The set below is that debt written down rather than waived. The rule passes only
+    /// while the unbound set *equals* this list, so a new unbound declaration on any page
+    /// is red immediately, and the day track D's F1 binds GalleryPage's vocabulary the
+    /// entries have to be deleted — the list shrinking is the only way to keep it green.
+    /// Measured when the rule landed the scan names nineteen, not the plan's eleven:
+    /// `show-header`, the two label knobs, the three cursors and the four other pages'
+    /// `tag-cursor` / `focus-request` declarations are the same class — an `in` the shell
+    /// never fills — and they are recorded here rather than left outside the rule's reach.
+    #[test]
+    fn every_page_property_is_bound_by_the_shell() {
+        // (page, declaration, who owes it)
+        const KNOWN_UNBOUND: [(&str, &str, &str); 19] = [
+            ("DetailPage", "focus-request", "the U21 focus counter, filed for the shell"),
+            ("DetailPage", "tag-cursor", "R11's tag strip, filed for track D"),
+            ("GalleryPage", "mode-chosen", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
+            ("GalleryPage", "mode-index", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
+            ("GalleryPage", "mode-label", "the selected mode's name, filed for track D"),
+            ("GalleryPage", "mode-labels", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
+            ("GalleryPage", "recent-cursor", "the recent-tag strip, filed for track D"),
+            ("GalleryPage", "related-cursor", "the related-tag strip, filed for track D"),
+            ("GalleryPage", "related-tag-chosen", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
+            ("GalleryPage", "related-tags", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
+            ("GalleryPage", "show-header", "defaults to true on every instantiation, filed"),
+            ("GalleryPage", "sort-chosen", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
+            ("GalleryPage", "sort-index", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
+            ("GalleryPage", "sort-label", "the selected order's name, filed for track D"),
+            ("GalleryPage", "sort-labels", "R11's F2 vocabulary, bound by track D (plan §7 F1)"),
+            ("GalleryPage", "tag-cursor", "R11's tag strip, filed for track D"),
+            ("HomePage", "tag-cursor", "the home tag strip, filed for track D"),
+            ("NovelPage", "tag-cursor", "the novel tag strip, filed for track D"),
+            ("ProfilePage", "mutual-label", "the follow-state caption, filed for the shell"),
+        ];
+        let shell = read(&ui_dir().join("main.slint"));
+        let pages = ui_dir().join("pages");
+        let mut offenders = Vec::new();
+        let mut bound_now = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            if !path.starts_with(&pages) {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                let trimmed = code.trim_start();
+                if !(trimmed.starts_with("in property <")
+                    || trimmed.starts_with("in-out property <")
+                    || trimmed.starts_with("callback "))
+                {
+                    continue;
+                }
+                let Some((_kind, field)) = declared_name(trimmed) else {
+                    continue;
+                };
+                let owner = enclosing_component(&source, index);
+                if !owner.ends_with("Page") || !shell.contains(&format!("{owner} {{")) {
+                    continue;
+                }
+                checked += 1;
+                let listed = KNOWN_UNBOUND
+                    .iter()
+                    .any(|(page, unbound, _reason)| *page == owner && *unbound == field);
+                if host_binds(&shell, &field) {
+                    // The other half of the ratchet: an exemption whose declaration has
+                    // since been bound is stale, and a stale exemption hides the next
+                    // regression behind a line nobody re-reads.
+                    if listed {
+                        bound_now.push(format!("{owner}.{field}"));
+                    }
+                    continue;
+                }
+                if listed {
+                    continue;
+                }
+                offenders.push(format!("{name}:{}: {owner}.{field}", index + 1));
+            }
+        }
+        assert!(
+            checked >= 40,
+            "expected the pages' whole in-surface, found {checked}; the scan is broken"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a page property or callback the shell never binds is a control that moves and \
+             asks for nothing. Bind it in main.slint, or record it in KNOWN_UNBOUND with the \
+             item that owes it:\n{}",
+            offenders.join("\n")
+        );
+        assert!(
+            bound_now.is_empty(),
+            "these declarations have a host binding now, so their KNOWN_UNBOUND entry is \
+             stale and has to be deleted:\n{}",
+            bound_now.join("\n")
+        );
+    }
+    /// True when `main.slint` binds `name` on a page instance: `name: …`, `name <=> …`,
+    /// `name(args) => …` or `name => …`.
+    fn host_binds(shell: &str, name: &str) -> bool {
+        shell.lines().any(|line| {
+            let code = line.split("//").next().unwrap_or("");
+            code.match_indices(name).any(|(at, _)| {
+                let before = code[..at].chars().next_back();
+                if matches!(before, Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                    return false;
+                }
+                let rest = &code[at + name.len()..];
+                if matches!(rest.chars().next(), Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                    return false;
+                }
+                let rest = rest.trim_start();
+                rest.starts_with("<=>")
+                    || rest.starts_with(':')
+                    || rest.starts_with("=>")
+                    || (rest.starts_with('(') && rest.contains("=>"))
+            })
+        })
+    }
 }
