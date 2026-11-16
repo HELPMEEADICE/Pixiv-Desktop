@@ -17,6 +17,12 @@ export struct NovelRow {
     cover-state: int,
     /// Series title when the row belongs to one; "" otherwise.
     series: string,
+    /// How far the reader got, as a percentage (F4). `-1` means "no progress":
+    /// a search result is not a reading position, and a novel that was never
+    /// opened has none either. A row at `-1` draws no rule at all, which is why
+    /// the sentinel is not `0`: a full-width track under a novel nobody has
+    /// started would claim a position the store does not have.
+    progress: float,
 }
 
 /// One chapter of a series.

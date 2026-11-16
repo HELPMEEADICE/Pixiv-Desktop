@@ -51,6 +51,20 @@ pub struct NovelProgress {
     pub updated_at: i64,
 }
 
+/// One recently-read row, with where the reader stopped in it (F4).
+///
+/// The two tables answer different questions (see the module comment), so the
+/// join is done once, here, instead of by every caller that wants both: the
+/// novels page draws the list *and* the progress rule under each row, and a
+/// second query per row would be one SQLite call per painted line.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RecentNovel {
+    pub entry: NovelHistoryEntry,
+    /// `None` when this novel has never been opened far enough to have a row.
+    /// A row with no progress draws no rule rather than a 0 % one.
+    pub progress: Option<NovelProgress>,
+}
+
 /// One row of the recently-read list.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NovelHistoryEntry {
@@ -158,6 +172,53 @@ impl Store {
         Ok(out)
     }
 
+    /// The recently-read list, each row joined to its stored position (F4).
+    ///
+    /// One statement, not one per row: the novels page draws the list and the
+    /// progress rule beneath each entry, and `novel_progress` is keyed by the same
+    /// `novel_id`, so a LEFT JOIN answers both halves of the row at once. A novel
+    /// that was opened but never scrolled has no progress row and comes back with
+    /// `None`, which is what "draw no rule" means.
+    ///
+    /// The order is `novel_history`'s own `seq DESC` - identical to
+    /// [`Store::novel_history`] - so the two lists cannot disagree about which
+    /// novel is first.
+    pub fn recent_rows_with_progress(&self, limit: usize) -> Result<Vec<RecentNovel>, StoreError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT h.novel_id, h.title, h.author, h.cover, h.series_id, h.read_at,
+                    p.novel_id, p.series_id, p.block_index, p.char_offset, p.percent,
+                    p.finished, p.updated_at
+             FROM novel_history AS h
+             LEFT JOIN novel_progress AS p ON p.novel_id = h.novel_id
+             ORDER BY h.seq DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit_to_i64(limit)], |row| {
+            let progress = if row.get::<_, Option<String>>(6)?.is_some() {
+                Some(progress_at(row, 6)?)
+            } else {
+                None
+            };
+            Ok(RecentNovel {
+                entry: NovelHistoryEntry {
+                    novel_id: row.get(0)?,
+                    title: row.get(1)?,
+                    author: row.get(2)?,
+                    cover: row.get(3)?,
+                    series_id: row.get(4)?,
+                    read_at: row.get(5)?,
+                },
+                progress,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Record that a novel was opened, moving it to the front of the list.
     ///
     /// `seq` is `MAX(seq) + 1` rather than the timestamp for the same reason
@@ -230,17 +291,26 @@ impl Store {
 }
 
 fn progress_from_row(row: &Row<'_>) -> rusqlite::Result<NovelProgress> {
+    progress_at(row, 0)
+}
+
+/// [`progress_from_row`] for a row whose progress columns start at `offset`.
+///
+/// The join in [`Store::recent_rows_with_progress`] puts the six history columns
+/// in front of the seven progress ones, and one reader with an offset is what
+/// keeps the two statements' decoders from drifting apart.
+fn progress_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<NovelProgress> {
     Ok(NovelProgress {
-        novel_id: row.get(0)?,
-        series_id: row.get(1)?,
+        novel_id: row.get(offset)?,
+        series_id: row.get(offset + 1)?,
         // A hand-edited or truncated database can hold anything in an INTEGER
         // column; a position outside the u32 range is not recoverable, so it
         // reads as the start of the document instead of failing the open.
-        block_index: u32_from(row.get::<_, i64>(2)?),
-        char_offset: u32_from(row.get::<_, i64>(3)?),
-        percent: row.get::<_, f64>(4)? as f32,
-        finished: row.get::<_, i64>(5)? != 0,
-        updated_at: row.get(6)?,
+        block_index: u32_from(row.get::<_, i64>(offset + 2)?),
+        char_offset: u32_from(row.get::<_, i64>(offset + 3)?),
+        percent: row.get::<_, f64>(offset + 4)? as f32,
+        finished: row.get::<_, i64>(offset + 5)? != 0,
+        updated_at: row.get(offset + 6)?,
     })
 }
 
@@ -303,7 +373,7 @@ mod tests {
     #[test]
     fn the_novel_tables_exist_after_a_fresh_migration() {
         let s = store();
-        assert_eq!(s.schema_version().unwrap(), 3);
+        assert_eq!(s.schema_version().unwrap(), 4);
         assert!(s.novel_progress("1").unwrap().is_none());
         assert!(s.novel_history(10).unwrap().is_empty());
         assert!(s.series_progress("555").unwrap().is_empty());
@@ -536,6 +606,92 @@ mod tests {
         // MAX(seq) is a single seek of the same index, not a table scan.
         let next = plan_of(&s, "SELECT COALESCE(MAX(seq), 0) + 1 FROM novel_history");
         assert!(!next.contains("SCAN novel_history"), "{next}");
+    }
+
+    /// C9: the series index carries its sort key, so "newest first" is a read of
+    /// the index instead of a temp B-tree over the series.
+    ///
+    /// The negative experiment is restoring the single-column index
+    /// (`ON novel_progress (series_id)`, which is what migration step 3 wrote):
+    /// SQLite then seeks `series_id` and sorts the answer, and the plan grows
+    /// `USE TEMP B-TREE FOR ORDER BY`.
+    #[test]
+    fn the_series_index_carries_the_updated_at_sort_key() {
+        let s = store();
+        for index in 0..50 {
+            let novel = format!("{index}");
+            s.save_novel_progress(&progress(&novel, "555", 0.5))
+                .unwrap();
+        }
+        let plan = plan_of(
+            &s,
+            "SELECT novel_id FROM novel_progress
+             WHERE series_id = '555'
+             ORDER BY updated_at DESC
+             LIMIT 20",
+        );
+        assert!(plan.contains("idx_novel_progress_series"), "{plan}");
+        assert!(
+            !plan.contains("TEMP B-TREE"),
+            "the sort must be served by the index: {plan}"
+        );
+        assert!(!plan.contains("SCAN novel_progress"), "{plan}");
+
+        // And the index really is the two-column shape, not merely the name: a
+        // query that orders by the second column of the pair is served, which a
+        // single-column index cannot do.
+        let columns = index_columns(&s, "idx_novel_progress_series");
+        assert_eq!(columns, ["series_id", "updated_at"], "{columns:?}");
+    }
+
+    fn index_columns(s: &Store, name: &str) -> Vec<String> {
+        let conn = s.lock();
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+            .expect("pragma_index_info");
+        let rows = stmt.query_map(params![name], |row| row.get::<_, String>(0)).unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
+    /// F4: the recent list carries the stored position, and a novel that was never
+    /// scrolled carries none instead of a 0 %.
+    #[test]
+    fn the_recent_list_joins_the_stored_position_and_leaves_the_rest_empty() {
+        let s = store();
+        s.record_novel_read(&history("a", 1)).unwrap();
+        s.record_novel_read(&history("b", 2)).unwrap();
+        let mut read = progress("a", "", 0.42);
+        read.block_index = 7;
+        read.char_offset = 120;
+        s.save_novel_progress(&read).unwrap();
+
+        let rows = s.recent_rows_with_progress(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].entry.novel_id, "b", "history order is preserved");
+        assert!(
+            rows[0].progress.is_none(),
+            "an unopened novel has no progress to draw"
+        );
+        assert_eq!(rows[1].entry.novel_id, "a");
+        let stored = rows[1].progress.as_ref().expect("the join found the row");
+        assert_eq!(stored.novel_id, "a");
+        assert_eq!(stored.block_index, 7);
+        assert_eq!(stored.char_offset, 120);
+        assert_eq!(stored.percent, 0.42);
+
+        // The list is the same list, in the same order, as the plain one.
+        let plain: Vec<String> = s
+            .novel_history(10)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.novel_id)
+            .collect();
+        let joined: Vec<String> = rows.into_iter().map(|row| row.entry.novel_id).collect();
+        assert_eq!(joined, plain);
+
+        // Limits apply here too, and the degenerate ones are honoured.
+        assert_eq!(s.recent_rows_with_progress(1).unwrap().len(), 1);
+        assert!(s.recent_rows_with_progress(0).unwrap().is_empty());
     }
 
     #[test]

@@ -26,7 +26,7 @@ use thiserror::Error;
 
 mod novel;
 
-pub use novel::{NovelHistoryEntry, NovelProgress};
+pub use novel::{NovelHistoryEntry, NovelProgress, RecentNovel};
 
 /// Persistence failures.
 #[derive(Debug, Error)]
@@ -206,8 +206,29 @@ CREATE INDEX IF NOT EXISTS idx_novel_history_seq ON novel_history (seq DESC);
 CREATE INDEX IF NOT EXISTS idx_novel_progress_series ON novel_progress (series_id);
 "#;
 
+/// Migration step 4: the series progress index gains its sort key (C9).
+///
+/// `series_progress` asks "where did the reader stop in this series, newest
+/// first", and an index on `series_id` alone answers only the first half: SQLite
+/// seeks the two rows and then sorts them, which is a temp B-tree over the whole
+/// series. Widening the same index to `(series_id, updated_at DESC)` makes the
+/// sort a read of the index it already opened. The pair is re-stated under one
+/// name rather than added beside it because two indexes over the same column list
+/// would both be maintained on every save and only one of them read; the batch is
+/// still re-runnable (`DROP ... IF EXISTS` then `CREATE ... IF NOT EXISTS`), which
+/// is the property step 2 and step 3 also keep. No row is touched.
+const MIGRATION_STEP_4: &str = r#"
+DROP INDEX IF EXISTS idx_novel_progress_series;
+CREATE INDEX IF NOT EXISTS idx_novel_progress_series ON novel_progress (series_id, updated_at DESC);
+"#;
+
 /// Ordered migration steps; entry `i` upgrades the schema to version `i + 1`.
-const MIGRATIONS: &[&str] = &[MIGRATION_STEP_1, MIGRATION_STEP_2, MIGRATION_STEP_3];
+const MIGRATIONS: &[&str] = &[
+    MIGRATION_STEP_1,
+    MIGRATION_STEP_2,
+    MIGRATION_STEP_3,
+    MIGRATION_STEP_4,
+];
 
 /// Version the current build produces.
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -756,9 +777,9 @@ mod tests {
 
     #[test]
     fn schema_version_tracks_the_migration_list() {
-        // Three steps today: the tables, the sequence indexes, then the novel
-        // reading tables.
-        assert_eq!(SCHEMA_VERSION, 3);
+        // Four steps today: the tables, the sequence indexes, the novel reading
+        // tables, then the series index's sort key (C9).
+        assert_eq!(SCHEMA_VERSION, 4);
         let s = store();
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
 
@@ -943,6 +964,77 @@ mod tests {
         assert_eq!(s.downloads(10).unwrap().len(), 2);
     }
 
+    /// F1: the local download record in one round trip - insert, list, count,
+    /// delete - including the pair the table refuses twice and the limit the list
+    /// honours.
+    ///
+    /// The downloads page grew its "已完成（本地记录）" band this round and every row
+    /// on it is a row of this table, so the four calls are asserted as one path
+    /// rather than one per function: a caller that only ever saw three of them
+    /// green is how `stats` stayed uncalled for four rounds.
+    #[test]
+    fn f1_a_local_download_record_roundtrips_with_its_unique_pair_and_limit() {
+        let s = store();
+
+        // Empty table: no band, and the counters agree.
+        assert!(s.downloads(50).unwrap().is_empty());
+        assert_eq!(s.stats().unwrap().download_entries, 0);
+
+        let first = s.insert_download(&download("700000001", 0, 1_700_000_000)).unwrap();
+        s.insert_download(&download("700000001", 1, 1_700_000_001))
+            .unwrap();
+        s.insert_download(&download("700000002", 0, 1_700_000_002))
+            .unwrap();
+
+        // The UNIQUE pair: the same page of the same work is one record, and the
+        // rejection is a named error rather than a silent second row.
+        let duplicate = s
+            .insert_download(&download("700000001", 0, 1_700_000_003))
+            .unwrap_err();
+        assert!(
+            matches!(&duplicate, StoreError::Sqlite(message) if message.contains("UNIQUE")),
+            "{duplicate:?}"
+        );
+        assert_eq!(s.downloads(50).unwrap().len(), 3);
+        assert_eq!(s.stats().unwrap().download_entries, 3);
+
+        // Newest first, and the limit is applied by SQLite rather than by the
+        // caller who asked for it.
+        let newest = s.downloads(1).unwrap();
+        assert_eq!(newest.len(), 1);
+        assert_eq!(newest[0].illust_id, "700000002");
+        let order: Vec<String> = s
+            .downloads(50)
+            .unwrap()
+            .into_iter()
+            .map(|row| format!("{}:{}", row.illust_id, row.page_index))
+            .collect();
+        assert_eq!(
+            order,
+            words(&["700000002:0", "700000001:1", "700000001:0"])
+        );
+        assert!(s.downloads(0).unwrap().is_empty(), "a zero limit is empty");
+
+        // The row that comes back is the row that went in, field for field.
+        let stored = &s
+            .downloads(50)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == first)
+            .expect("the first insert is still listed");
+        assert_eq!(stored.title, "title-700000001");
+        assert_eq!(stored.author, "artist");
+        assert_eq!(stored.file_path, "C:/downloads/700000001_p0.png");
+        assert_eq!(stored.created_at, 1_700_000_000);
+
+        // Deleting a record is what "忘记这条记录" does; the file is not touched.
+        s.delete_download(first).unwrap();
+        assert_eq!(s.downloads(50).unwrap().len(), 2);
+        assert_eq!(s.stats().unwrap().download_entries, 2);
+        s.delete_download(first).unwrap();
+        assert_eq!(s.stats().unwrap().download_entries, 2, "delete twice is fine");
+    }
+
     #[test]
     fn stats_counts_rows() {
         let s = store();
@@ -1022,7 +1114,7 @@ mod tests {
         }
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), 4);
         assert_eq!(store.view_history(10).unwrap().len(), 1);
         assert_eq!(store.view_history(10).unwrap()[0].title, "old title");
         assert_eq!(
@@ -1052,7 +1144,7 @@ mod tests {
         // Opening it again must not re-run the step or disturb anything.
         drop(store);
         let reopened = Store::open(&path).unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 3);
+        assert_eq!(reopened.schema_version().unwrap(), 4);
         assert_eq!(reopened.view_history(10).unwrap().len(), 1);
         assert_eq!(reopened.novel_stats().unwrap(), (1, 1));
     }

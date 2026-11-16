@@ -26,7 +26,17 @@ component NovelRowView inherits Rectangle {
     in property <NovelRow> entry;
     callback open(string);
 
-    height: 72px;
+    /// The reading position as a whole percentage, for the caption. `Math.round`
+    /// returns an int, so the string is built from an int and not from a float
+    /// with a locale-dependent tail.
+    out property <int> progress-pct: Math.round(root.entry.progress);
+    /// True only when the store actually had a position for this row.
+    out property <bool> has-progress: root.entry.progress >= 0.0;
+
+    // A floor, not a ceiling: a row with a progress line is taller than one
+    // without, and a fixed 72 px would have clipped the line it just added. The
+    // same shape `ui/pages/profile.slint` uses for its identity card (U10).
+    height: max(72px, row-layout.preferred-height);
     border-radius: Theme.radius-md;
     background: ta.has-hover ? Theme.layer-alt : transparent;
 
@@ -43,7 +53,7 @@ component NovelRowView inherits Rectangle {
         : root.entry.title;
     accessible-action-default => { root.open(root.entry.id); }
 
-    HorizontalLayout {
+    row-layout := HorizontalLayout {
         padding-left: Theme.space-2;
         padding-right: Theme.space-3;
         spacing: Theme.space-3;
@@ -101,6 +111,42 @@ component NovelRowView inherits Rectangle {
                 role: TextRole.Caption;
                 text: root.entry.meta;
                 color: Theme.text-tertiary;
+            }
+
+            // ---- F4: where the reader stopped ----
+            // A 3 px rule and its percentage, under the metadata line. The rule's
+            // height is `Theme.progress-rule-height` (the theme is the only place
+            // a length may be written, and this one is declared there for exactly
+            // this row). A row at -1 draws neither: `has-progress` is false, so
+            // nothing here exists to paint a 0 % bar.
+            if root.has-progress : HorizontalLayout {
+                spacing: Theme.space-2;
+                // Cross-axis centred: a 3 px rule in a 26 px line top-aligned would
+                // read as an underline of the meta line above it.
+                alignment: center;
+                height: Theme.control-height-sm;
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: Theme.progress-rule-height;
+                    border-radius: Theme.radius-pill;
+                    background: Theme.layer-sunken;
+
+                    Rectangle {
+                        width: parent.width * Math.max(0.0, Math.min(1.0, root.entry.progress / 100.0));
+                        height: parent.height;
+                        border-radius: Theme.radius-pill;
+                        background: Theme.accent-ink;
+                    }
+                }
+
+                // "读了 42%", not "42%": the number needs a verb or it reads as a
+                // completion of something the row never started.
+                Label {
+                    role: TextRole.Caption;
+                    text: "读了 " + root.progress-pct + "%";
+                    color: Theme.text-tertiary;
+                }
             }
         }
 

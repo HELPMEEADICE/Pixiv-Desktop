@@ -416,7 +416,33 @@ fn summary_row(summary: &NovelSummary, cover_state: i32) -> NovelRow {
         cover: slint::Image::default(),
         cover_state,
         series: summary.series_title.clone().into(),
+        // A search result is not a reading position: -1 draws no rule.
+        progress: -1.0,
     }
+}
+
+/// The percentage a recent row prints, from the three numbers the store keeps
+/// (F4).
+///
+/// `block_index` and `char_offset` are the position `save_progress` wrote, and
+/// `ratio` is the same position as the fraction the store also keeps. `None`
+/// means "no progress at all", which is what makes a row draw no rule instead of
+/// a 0 % one: a novel that was opened and closed on its first screen has a row and
+/// a zero, and a novel that was never opened has neither.
+///
+/// Every other answer is clamped into 0..=100. The clamp is not defensive
+/// padding: `ratio` was measured against the document that was open, so a
+/// document that changed underneath the saved position (a longer or shorter
+/// revision of the same novel id) can report a fraction above 1, and a progress
+/// rule that drew 134 % would be describing a length that does not exist.
+pub(crate) fn progress_percent(block_index: u32, char_offset: u32, ratio: f32) -> Option<f32> {
+    if !ratio.is_finite() {
+        return None;
+    }
+    if ratio <= 0.0 && block_index == 0 && char_offset == 0 {
+        return None;
+    }
+    Some((ratio * 100.0).clamp(0.0, 100.0))
 }
 
 /// One chapter row of a series.
@@ -828,21 +854,39 @@ impl App {
             (app.store.clone(), app.rt.clone())
         };
         rt.spawn(async move {
-            let rows = store.novel_history(RECENT_KEEP).unwrap_or_default();
+            // One query, not one per row: the position is joined to the entry it
+            // belongs to (F4), so the list and the progress rule under it come from
+            // the same statement and cannot disagree about which novel is first.
+            let rows = store.recent_rows_with_progress(RECENT_KEEP).unwrap_or_default();
             on_ui(move |shared| {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
                 };
                 let recent = rows
                     .iter()
-                    .map(|entry| NovelRow {
-                        id: entry.novel_id.clone().into(),
-                        title: entry.title.clone().into(),
-                        author: entry.author.clone().into(),
-                        meta: "最近阅读".into(),
-                        cover: slint::Image::default(),
-                        cover_state: 2,
-                        series: entry.series_id.clone().into(),
+                    .map(|row| {
+                        let entry = &row.entry;
+                        NovelRow {
+                            id: entry.novel_id.clone().into(),
+                            title: entry.title.clone().into(),
+                            author: entry.author.clone().into(),
+                            meta: "最近阅读".into(),
+                            cover: slint::Image::default(),
+                            cover_state: 2,
+                            series: entry.series_id.clone().into(),
+                            // -1 is the row's "no progress": it draws no rule.
+                            progress: row
+                                .progress
+                                .as_ref()
+                                .and_then(|stored| {
+                                    progress_percent(
+                                        stored.block_index,
+                                        stored.char_offset,
+                                        stored.percent,
+                                    )
+                                })
+                                .unwrap_or(-1.0),
+                        }
                     })
                     .collect::<Vec<_>>();
                 app.novel.recent.set_vec(recent);
@@ -850,7 +894,7 @@ impl App {
                 ui.set_novel_recent(ModelRc::from(app.novel.recent.clone()));
                 let urls: Vec<String> = rows
                     .iter()
-                    .map(|entry| entry.cover.clone())
+                    .map(|row| row.entry.cover.clone())
                     .filter(|url| !url.is_empty())
                     .collect();
                 app.spawn_novel_images(urls);
@@ -1093,18 +1137,24 @@ impl App {
         } else {
             "开始阅读".to_string()
         };
+        // F4: the chapter band says which chapter to continue, not only which one
+        // this is. The two sentences are one string because they are one slot
+        // (`SectionHeader.subtitle`): a band that drew the chapter number twice,
+        // once as "第 4 章" and once as "继续阅读 第 4 章", would be saying one thing
+        // in two places and inviting them to disagree.
         let series_meta = nav
             .as_ref()
             .map(|nav| {
-                format!(
-                    "第 {} 章 · {}",
-                    nav.order,
-                    if nav.concluded {
-                        "已完结"
-                    } else {
-                        "连载中"
-                    }
-                )
+                let status = if nav.concluded {
+                    "已完结"
+                } else {
+                    "连载中"
+                };
+                if percent > 0.001 {
+                    format!("继续阅读 第 {} 章 · {status}", nav.order)
+                } else {
+                    format!("第 {} 章 · {status}", nav.order)
+                }
             })
             .unwrap_or_default();
         let view = NovelView {
@@ -1781,6 +1831,32 @@ mod tests {
         assert_eq!(thousands(4_025), "4,025");
         assert_eq!(thousands(82_847), "82,847");
         assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    /// F4: the row's percentage is `progress_percent(block, char)`, a row with no
+    /// position has -1 (and therefore draws no rule), and a document that changed
+    /// underneath the saved position clamps into 0..=100.
+    #[test]
+    fn a_recent_row_prints_the_percentage_of_its_stored_position() {
+        // The stored position: block 7 of the document, 120 characters in.
+        assert_eq!(progress_percent(7, 120, 0.42), Some(42.0));
+        assert_eq!(progress_percent(1, 0, 0.5), Some(50.0));
+        // Nothing recorded: a zero fraction with the position still at the start of
+        // the first block draws no rule rather than a 0 % one.
+        assert_eq!(progress_percent(0, 0, 0.0), None);
+        assert_eq!(progress_percent(0, 0, -1.0), None, "-1 is not a position");
+        assert_eq!(progress_percent(0, 0, f32::NAN), None, "nor is NaN");
+        // A real position that rounds to zero is still a position, and the two
+        // coordinates are what say so.
+        assert_eq!(progress_percent(0, 12, 0.004), Some(0.4));
+
+        // The document changed underneath: the stored fraction can exceed 1.
+        assert_eq!(progress_percent(99, 9_000, 1.34), Some(100.0));
+        assert_eq!(progress_percent(0, 4, -0.25), Some(0.0));
+
+        // The shape `load_novels_page` publishes: -1 when the store has no row.
+        let none: f32 = None.unwrap_or(-1.0);
+        assert!(none < 0.0, "a row at -1 draws no rule");
     }
 
     #[test]
