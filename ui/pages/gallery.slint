@@ -14,7 +14,7 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
-import { IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton, ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard, BatchBar, SegmentedControl, Label, BodyText } from "../components.slint";
+import { IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton, ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard, BatchBar, SegmentedControl, Label, BodyText, ToggleSwitch } from "../components.slint";
 
 /// The masonry columns themselves. No scroll view, no header: callers embed this
 /// inside their own scroll body so the grid can sit under page-specific content.
@@ -182,6 +182,11 @@ export component GalleryPage inherits Rectangle {
     /// Roving focus cursor for the related-tag row: the strip is one Tab stop and
     /// Left/Right walk it, exactly as the tag strip above does (U7).
     in-out property <int> related-cursor: 0;
+    /// F4: 「排除 AI」. The page reports the gesture and never writes the value: the
+    /// flag is one fact of the search request, so Rust owns it (`FeedControls`), and
+    /// it is read when the *next* request is issued.
+    in property <bool> exclude-ai: false;
+    callback exclude-ai-toggled(bool);
 
     /// Roving focus cursors for the two chip rows on this page (U7). A strip is one
     /// Tab stop: Left/Right move this index and the chip that owns it takes focus.
@@ -324,6 +329,28 @@ export component GalleryPage inherits Rectangle {
                 items: root.mode-labels;
                 current: root.mode-index;
                 selected(i) => { root.mode-chosen(i); }
+            }
+
+            // F4: the AI filter, in the same 32 px control row so the group, the mode
+            // and the filter read as one line of settings. The caption names what the
+            // switch does; the switch itself carries the accessible name.
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: end;
+
+                Label {
+                    role: TextRole.Caption;
+                    text: "AI 作品";
+                    color: Theme.text-secondary;
+                    vertical-alignment: center;
+                }
+
+                ToggleSwitch {
+                    y: (parent.height - self.height) / 2;
+                    label: "排除 AI 生成的作品";
+                    checked: root.exclude-ai;
+                    toggled(on) => { root.exclude-ai-toggled(on); }
+                }
             }
         }
 

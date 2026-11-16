@@ -739,6 +739,9 @@ export component DetailPage inherits Rectangle {
     /// "敏感"). Empty draws no chip at all — a work Pixiv marks nothing is not
     /// "normal", it is unmarked.
     in property <string> sensitivity: "";
+    /// F4: the work is AI-generated or AI-assisted. One badge, because Pixiv's own
+    /// `aiType` tag draws one.
+    in property <bool> ai: false;
 
     in property <[ViewerPage]> pages: [];
     in-out property <int> current-page: 0;
@@ -914,6 +917,21 @@ export component DetailPage inherits Rectangle {
                         label: root.sensitivity;
                         fill: Theme.danger-subtle;
                         ink: Theme.danger;
+                    }
+                }
+
+                // F4: the AI badge, next to the sensitivity one and drawn the same
+                // way. Pixiv's AI tag is informational, not a warning: `layer-alt` with
+                // secondary ink, where the sensitivity chip uses the danger pair.
+                if root.ai : Rectangle {
+                    width: ai-badge.width;
+                    height: 100%;
+
+                    ai-badge := Badge {
+                        y: (parent.height - self.height) / 2;
+                        label: "AI 生成";
+                        fill: Theme.layer-alt;
+                        ink: Theme.text-secondary;
                     }
                 }
 

@@ -183,6 +183,7 @@ impl App {
         ui.set_grid_mode_labels(ModelRc::from(Rc::new(VecModel::from(target))));
         ui.set_grid_mode_index(self.controls.target_index());
         ui.set_grid_mode_label(FeedControls::TARGET_GROUP.into());
+        ui.set_grid_exclude_ai(self.controls.exclude_ai);
     }
 
     /// The related-tag row of the page the reply belongs to.
@@ -450,6 +451,29 @@ mod tests {
             .map(|illust| illust.id.get())
             .collect();
         assert_eq!(kept, vec![1], "AI-assisted (2) is AI too, not only AI-generated");
+    }
+
+    /// F4: the switch is not a query parameter — the endpoint has none — so it is
+    /// the reply that carries it. The two halves are asserted together so the flag
+    /// cannot silently become a URL field nobody sends.
+    #[test]
+    fn f4_the_ai_switch_is_not_a_url_parameter_and_filters_the_reply() {
+        let template = endpoint_search_template();
+        assert!(
+            !template.contains("ai="),
+            "Pixiv's search URL has no AI parameter to carry:\n{template}"
+        );
+        let works = vec![work(1, 0, &[]), work(2, 1, &[])];
+        let on = FeedControls {
+            exclude_ai: true,
+            ..FeedControls::default()
+        };
+        assert_eq!(on.without_ai(works.clone()).len(), 1);
+        assert_eq!(
+            FeedControls::default().without_ai(works).len(),
+            2,
+            "the switch off keeps the page as it arrived"
+        );
     }
 
     #[test]

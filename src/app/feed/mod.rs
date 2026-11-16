@@ -858,6 +858,7 @@ mod tests {
             author_avatar: slint::Image::default(),
             author_avatar_url: "".into(),
             author_avatar_state: 0,
+            ai: false,
             date: "".into(),
             selected: false,
             selectable: false,

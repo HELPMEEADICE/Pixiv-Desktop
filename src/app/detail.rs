@@ -87,12 +87,13 @@ impl App {
                 // F2: a capture cannot reach a work Pixiv marks sensitive offline —
                 // every demo row carries `is_masked: false` — so the state has a name
                 // the capture table can ask for (G24). Nothing else reads it.
-                if matches!(
-                    crate::app::feed::fixture::current(),
-                    crate::app::feed::fixture::Fixture::Sensitive
-                ) {
-                    illust.is_masked = true;
-                    illust.sl = 2;
+                match crate::app::feed::fixture::current() {
+                    crate::app::feed::fixture::Fixture::Sensitive => {
+                        illust.is_masked = true;
+                        illust.sl = 2;
+                    }
+                    crate::app::feed::fixture::Fixture::Ai => illust.ai_type = 1,
+                    _ => {}
                 }
                 let mut app = shared.borrow_mut();
                 app.install_detail_with_follow(
@@ -402,6 +403,7 @@ impl App {
         ui.set_detail_pages(ModelRc::from(models.clone()));
         ui.set_detail_masked(masked);
         ui.set_detail_sensitivity(sensitivity_label(&illust).into());
+        ui.set_detail_ai(illust.ai_type != 0);
         ui.set_detail_state(0);
 
         // ---- O1: decode what is shown, and only what is shown -------------

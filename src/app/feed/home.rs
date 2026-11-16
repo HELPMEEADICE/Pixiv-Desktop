@@ -233,6 +233,24 @@ impl App {
 
 impl App {
     pub(crate) fn demo_items(&self, page: u32) -> Vec<Illust> {
+        let mut items = self.demo_items_unmarked(page);
+        // F4: the catalogue's rows all carry `aiType: 0`, so the AI badge has no
+        // work to draw on offline. The fixture marks every third row — a capture
+        // state with a name, not a rule the app follows (G24).
+        if matches!(
+            crate::app::feed::fixture::current(),
+            crate::app::feed::fixture::Fixture::Ai
+        ) {
+            for (index, illust) in items.iter_mut().enumerate() {
+                if index % 3 == 0 {
+                    illust.ai_type = 1;
+                }
+            }
+        }
+        items
+    }
+
+    fn demo_items_unmarked(&self, page: u32) -> Vec<Illust> {
         match self.page {
             Destination::Ranking => self
                 .demo

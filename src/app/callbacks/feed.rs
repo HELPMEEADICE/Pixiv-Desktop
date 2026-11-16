@@ -116,6 +116,22 @@ pub(crate) fn install(app: &Shared) {
 
     {
         let shared = app.clone();
+        ui.on_search_exclude_ai_toggled(move |on| {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            if app.controls.exclude_ai == on {
+                return;
+            }
+            app.controls.exclude_ai = on;
+            // The switch describes the *next* request: the page is not reloaded and
+            // nothing already on screen is re-filtered (plan §7 F4).
+            app.publish_controls();
+        });
+    }
+
+    {
+        let shared = app.clone();
         ui.on_search_related_tag_chosen(move |tag| {
             // One implementation of "run this word", shared with the search box, the
             // suggestion panel and the palette.

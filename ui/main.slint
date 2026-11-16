@@ -407,6 +407,7 @@ export component AppWindow inherits Window {
     in property <int> grid-mode-index: 0;
     in property <string> grid-mode-label: "";
     in property <[string]> grid-related-tags: [];
+    in property <bool> grid-exclude-ai: false;
     in property <bool> grid-loading-more: false;
     in property <int> ranking-filter: 0;
     in property <[string]> ranking-filters: [];
@@ -447,6 +448,8 @@ export component AppWindow inherits Window {
     /// `Illust.sl` and `Illust.x_restrict` (src/app/detail.rs).
     in property <bool> detail-masked: false;
     in property <string> detail-sensitivity: "";
+    /// F4: the work on screen is AI-generated (or AI-assisted — one badge).
+    in property <bool> detail-ai: false;
 
     // ---- downloads ----
     in property <[DownloadRow]> download-rows: [];
@@ -507,6 +510,8 @@ export component AppWindow inherits Window {
     callback search-sort-chosen(int);
     callback search-mode-chosen(int);
     callback search-related-tag-chosen(string);
+    /// F4: 「排除 AI」. It describes the next request only, so it changes no page.
+    callback search-exclude-ai-toggled(bool);
 
     // ---- detail ----
     callback detail-back();
@@ -1198,9 +1203,11 @@ export component AppWindow inherits Window {
                         mode-index: root.grid-mode-index;
                         mode-label: root.grid-mode-label;
                         related-tags: root.grid-related-tags;
+                        exclude-ai: root.grid-exclude-ai;
                         sort-chosen(i) => { root.search-sort-chosen(i); }
                         mode-chosen(i) => { root.search-mode-chosen(i); }
                         related-tag-chosen(t) => { root.search-related-tag-chosen(t); }
+                        exclude-ai-toggled(on) => { root.search-exclude-ai-toggled(on); }
                         loading-more: root.grid-loading-more;
                         scroll-y <=> root.grid-scroll-y;
                         measured(w) => { root.grid-measured(w); }
@@ -1376,6 +1383,7 @@ export component AppWindow inherits Window {
                         fit-mode: root.detail-fit-mode;
                         masked: root.detail-masked;
                         sensitivity: root.detail-sensitivity;
+                        ai: root.detail-ai;
                         back => { root.detail-back(); }
                         reveal => { root.detail-reveal(); }
                         toggle-bookmark => { root.detail-toggle-bookmark(); }

@@ -337,6 +337,8 @@ pub(crate) fn illust_to_item(illust: &Illust, rank: i32) -> IllustItem {
         // when there is no URL at all, which is the only case where drawing the
         // initial is honest.
         author_avatar_state: if illust.author.avatar.is_some() { 1 } else { 2 },
+        // F4: 1 is generated and 2 is assisted; Pixiv's own AI tag draws both.
+        ai: illust.ai_type != 0,
         // F3: filled by the page that knows whether a card is labelled with a date
         // (`feed::card_item`); the mapping itself may not guess a surface.
         date: String::new().into(),
@@ -590,6 +592,7 @@ pub(crate) mod testkit {
             author_avatar: slint::Image::default(),
             author_avatar_url: "".into(),
             author_avatar_state: 0,
+            ai: false,
             date: "".into(),
             selected: false,
             selectable: false,

@@ -1530,6 +1530,9 @@ export struct IllustItem {
     author-avatar-url: string,
     /// 0 ok, 1 loading, 2 failed or absent
     author-avatar-state: int,
+    /// F4: the payload's `aiType` — 1 generated, 2 assisted — both drawn as the same
+    /// badge: Pixiv's own AI tag does not distinguish them either.
+    ai: bool,
     /// F3: the row's own date, drawn only where the surface labels a card with one
     /// (the ranking board) and only when the payload carried it. Empty means "no
     /// date", and the card then draws no slot and no separator at all.
@@ -1819,6 +1822,30 @@ export component IllustCard inherits Rectangle {
                     color: root.item.rank <= 3 ? Theme.on-accent : Theme.artwork-ink;
                     font-size: Theme.font-caption;
                     font-weight: Type.semibold;
+                    vertical-alignment: center;
+                }
+            }
+
+            // F4: the AI badge, top-centre. The four corners are taken (rank
+            // top-left, type badge top-right, selection check bottom-left, bookmark
+            // pill bottom-right), so this one takes the middle of the top edge and
+            // states an anchor no other overlay in this card shares (G48).
+            if root.item.ai : Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: Theme.space-2;
+                width: ai-label.width + 10px;
+                height: 20px;
+                border-radius: Theme.radius-sm;
+                background: Theme.artwork-scrim;
+
+                ai-label := Text {
+                    x: 5px;
+                    y: 0px;
+                    height: parent.height;
+                    text: "AI 生成";
+                    color: Theme.artwork-ink;
+                    font-size: Theme.font-caption;
+                    font-weight: Type.medium;
                     vertical-alignment: center;
                 }
             }
