@@ -482,6 +482,10 @@ impl Illust {
             account: String::new(),
             avatar: non_empty(w.profile_img),
         };
+        // The row's own date - the stamp the board ranks on - not the upload
+        // timestamp beside it: `date` is the board's label for the entry, and it
+        // is the only date this endpoint labels a card with.
+        out.create_date = non_empty(w.date);
         out.bookmark = Bookmark {
             bookmarked: false,
             restrict: BookmarkRestrict::Public,

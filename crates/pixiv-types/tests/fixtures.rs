@@ -231,3 +231,30 @@ fn a_search_caption_is_cleaned_the_same_way() {
     let illust = Illust::from_search(row);
     assert_eq!(illust.description, "一行目\n二行目\n出典 (https://x.test/p)");
 }
+/// C4: a ranking row carries the date it was ranked, and the ranking was the one
+/// surface whose cards had no date at all.
+///
+/// The row's `date` is the board's own stamp for that work ("2026年11月09日 00:00"),
+/// not the `illust_upload_timestamp`; `from_ranking` read neither before this.
+#[test]
+fn a_ranking_row_carries_the_date_it_was_ranked() {
+    let raw = fixture("ranking_daily.json");
+    let doc: RankingResponseWire = serde_json::from_str(&raw).expect("ranking document");
+    let row = doc.contents.first().cloned().expect("a first row");
+    let stamped = row.date.trim().to_string();
+    assert!(!stamped.is_empty(), "the fixture carries a row date");
+
+    let illust = Illust::from_ranking(row);
+    assert_eq!(illust.create_date.as_deref(), Some(stamped.as_str()));
+}
+
+/// A row with no date is `None`, not an empty string: the card draws no date
+/// rather than an empty slot.
+#[test]
+fn a_ranking_row_without_a_date_has_none() {
+    let raw = fixture("ranking_daily.json");
+    let doc: RankingResponseWire = serde_json::from_str(&raw).expect("ranking document");
+    let mut row = doc.contents.into_iter().next().expect("a first row");
+    row.date = "   ".to_string();
+    assert_eq!(Illust::from_ranking(row).create_date, None);
+}
