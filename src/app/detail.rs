@@ -1164,6 +1164,19 @@ impl App {
         let Some(client) = self.client.clone() else {
             return;
         };
+        // The star and the menu share one slot (B5). This path used to bypass both
+        // the guard and the flag, so the menu and the star could both be in flight
+        // and the later reply won invisibly - the same defect T13 fixed for the star
+        // alone, in the one place that skipped it.
+        {
+            let ui = self.ui();
+            if !toggle_allowed(ui.get_detail_busy()) {
+                return;
+            }
+            ui.set_detail_busy(true);
+        }
+        let epoch = self.detail_epoch;
+        let work = illust_id;
         let rt = self.rt.clone();
         rt.spawn(async move {
             let result = client.set_bookmark(illust_id, true, restrict).await;
@@ -1171,6 +1184,17 @@ impl App {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
                 };
+                // The verdict belongs to the page that asked (B5, same rule as B4);
+                // a page that moved on has already freed the slot it took.
+                if !detail_reply_lands(
+                    app.detail_epoch,
+                    epoch,
+                    app.detail.as_ref().map(|detail| detail.id),
+                    work,
+                ) {
+                    return;
+                }
+                app.ui().set_detail_busy(false);
                 match result {
                     Ok(state) => {
                         // The verdict, not the request: a refused re-tag leaves
@@ -1264,6 +1288,30 @@ async fn load_film_bytes(
 mod tests {
     use super::*;
     use pixiv_types::domain::PageUrls;
+
+    /// B5 · the visibility menu and the star take the same busy slot.
+    ///
+    /// `pick_restrict` consulted neither `toggle_allowed` nor `detail-busy`, so a menu
+    /// row clicked while the star's POST was in flight sent a second request and the
+    /// later reply decided the button. The plant that makes this red is
+    /// [`toggle_allowed`] answering `true` while busy - "the slot is not consulted".
+    #[test]
+    fn b5_the_visibility_menu_and_the_star_take_one_slot() {
+        // The sequence both gestures now follow: ask the slot, take it, free it when
+        // the reply lands.
+        let mut busy = false;
+        assert!(toggle_allowed(busy), "the star's click starts");
+        busy = true;
+        assert!(
+            !toggle_allowed(busy),
+            "the menu row clicked while the star is in flight is dropped, not raced"
+        );
+        busy = false;
+        assert!(
+            toggle_allowed(busy),
+            "the next gesture starts once the reply has landed"
+        );
+    }
 
     /// B4 · A's follow reply must not rewrite B's button.
     ///
