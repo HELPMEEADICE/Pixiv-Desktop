@@ -41,6 +41,8 @@ use crate::route::Route;
 const PREFS_KEY: &str = "novel.reader.prefs";
 /// How many recent reads the novels page shows.
 const RECENT_KEEP: usize = 12;
+/// How many result rows the `PIXIV_DESKTOP_FIXTURE=novels` capture fills (F5).
+const NOVEL_FIXTURE_ROWS: usize = 4;
 /// A progress write rewrites a row, so the reader writes at most this often while
 /// the user scrolls. Leaving the page and closing the app force one.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(2_000);
@@ -532,10 +534,41 @@ pub(crate) fn adopt_novel_page(
     (rows, covers)
 }
 
+/// A novel's language, as its result row spells it.
+///
+/// The row data carries a bare code ("ja", "zh"); the row reads better naming the
+/// language, and a code this build does not know is drawn as itself rather than
+/// guessed at. An empty value is drawn as an em dash: the payload had no language,
+/// which is not the same statement as "English".
+pub(crate) fn language_label(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => "—".to_string(),
+        "ja" => "日本語".to_string(),
+        "zh" | "zh-cn" | "zh-tw" => "中文".to_string(),
+        "en" => "English".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// A novel's bookmark count, as its result row spells it.
+///
+/// `count32` maps both "the payload omitted it" and "zero" to 0, so the row cannot
+/// print a number it does not have: it prints the dash and names the field, which is
+/// a statement about the data instead of a zero the reader would believe.
+pub(crate) fn bookmarks_label(bookmarks: u32) -> String {
+    if bookmarks == 0 {
+        "收藏 —".to_string()
+    } else {
+        format!("收藏 {}", thousands(bookmarks))
+    }
+}
+
 fn summary_row(summary: &NovelSummary, cover_state: i32) -> NovelRow {
     let meta = [
+        language_label(&summary.language),
         characters_label(summary.character_count),
         reading_label(summary.reading_time),
+        bookmarks_label(summary.bookmarks),
         summary.upload_date.clone(),
     ]
     .into_iter()
@@ -982,6 +1015,29 @@ impl App {
             if app.novel.state != 0 && app.novel.rows.row_count() == 0 {
                 app.publish_novels_state(1, "");
             }
+        }
+        // F5: a capture of the result row needs result rows, and `pixiv-demo` has no
+        // novel search to produce them — the page's own search would leave the window.
+        // The fixture fills the model from the catalogue's summaries, so the pictures
+        // come from the same mapping the live path uses (`summary_row`).
+        if matches!(
+            crate::app::feed::fixture::current(),
+            crate::app::feed::fixture::Fixture::Novels
+        ) {
+            let mut app = shared.borrow_mut();
+            let summaries: Vec<NovelSummary> = app
+                .demo
+                .novels()
+                .into_iter()
+                .map(|demo| demo.summary)
+                .take(NOVEL_FIXTURE_ROWS)
+                .collect();
+            let (rows, _covers) = adopt_novel_page(&mut Vec::new(), summaries, &HashMap::new());
+            app.novel.rows.set_vec(rows);
+            let ui = app.ui();
+            ui.set_novel_rows(ModelRc::from(app.novel.rows.clone()));
+            app.publish_novels_state(0, "");
+
         }
         let (store, rt) = {
             let app = shared.borrow();
@@ -2076,6 +2132,8 @@ mod tests {
         assert_eq!(thousands(4_025), "4,025");
         assert_eq!(thousands(82_847), "82,847");
         assert_eq!(thousands(1_234_567), "1,234,567");
+
+
     }
 
     /// F4: the row's percentage is `progress_percent(block, char)`, a row with no
@@ -2467,4 +2525,75 @@ mod tests {
             "the capture embeds two images"
         );
     }
+    // ---------------------------------------------------------------- F5: the row
+
+    /// A summary with the two fields F5 draws, and nothing else optional set.
+    fn summary(language: &str, bookmarks: u32) -> NovelSummary {
+        NovelSummary {
+            id: pixiv_types::Id(810000001),
+            title: "夜の話".to_string(),
+            language: language.to_string(),
+            bookmarks,
+            character_count: 32_000,
+            reading_time: 15,
+            upload_date: "2026-11-09".to_string(),
+            ..NovelSummary::default()
+        }
+    }
+
+    /// F5: both fields reach the row, at the density the illustration row already has
+    /// (one metadata line, one separator).
+    #[test]
+    fn f5_a_result_row_carries_its_language_and_its_bookmarks() {
+        let row = summary_row(&summary("ja", 1_234), 2);
+        assert!(
+            row.meta.contains("日本語"),
+            "the row names the language it was sent: {}",
+            row.meta
+        );
+        assert!(
+            row.meta.contains("收藏 1,234"),
+            "and the bookmark count: {}",
+            row.meta
+        );
+        assert_eq!(
+            row.meta.matches(" · ").count(),
+            4,
+            "one line, one separator: {}",
+            row.meta
+        );
+    }
+
+    /// F5: a missing value is a dash, never a zero the reader would believe.
+    #[test]
+    fn f5_a_missing_language_or_count_draws_a_dash_instead_of_zero() {
+        assert_eq!(language_label(""), "—");
+        assert_eq!(language_label("   "), "—");
+        assert_eq!(bookmarks_label(0), "收藏 —");
+        let row = summary_row(&summary("", 0), 2);
+        assert!(
+            row.meta.starts_with("— · "),
+            "the language slot says nothing is known: {}",
+            row.meta
+        );
+        assert!(
+            row.meta.contains("收藏 —"),
+            "and the count is not printed as 0: {}",
+            row.meta
+        );
+        assert!(
+            !row.meta.contains("收藏 0"),
+            "a zero would be a number the payload never sent: {}",
+            row.meta
+        );
+    }
+
+    /// F5: a code this build does not know is shown as itself.
+    #[test]
+    fn f5_an_unknown_language_code_is_not_guessed_at() {
+        assert_eq!(language_label("ko"), "ko");
+        assert_eq!(language_label(" zh-tw "), "中文");
+        assert_eq!(language_label("en"), "English");
+    }
+
 }

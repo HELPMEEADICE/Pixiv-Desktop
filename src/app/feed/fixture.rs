@@ -23,6 +23,10 @@ pub(crate) enum Fixture {
     /// F4, this track: every third work in a demo page is AI-generated, for the card
     /// badge. The catalogue's rows all carry `aiType: 0`.
     Ai,
+    /// F5, this track: the novels page shows result rows. Nothing else can produce
+    /// them offline — `pixiv-demo` has no novel search, so the page would otherwise
+    /// only ever be photographed in its loading or empty state.
+    Novels,
     /// A value this build does not know. `tools/fixture.ps1` exits 77 for it, so
     /// the app must not pretend it is the same as no fixture.
     Unknown,
@@ -42,6 +46,7 @@ pub(crate) fn fixture_from(value: Option<&str>) -> Fixture {
         "downloads" => Fixture::Downloads,
         "sensitive" => Fixture::Sensitive,
         "ai" => Fixture::Ai,
+        "novels" => Fixture::Novels,
         _ => Fixture::Unknown,
     }
 }
@@ -85,6 +90,7 @@ impl App {
             // (`demo_items`), not here.
             Fixture::Sensitive
             | Fixture::Ai
+            | Fixture::Novels
             | Fixture::Ugoira
             | Fixture::Downloads
             | Fixture::Unknown
@@ -114,6 +120,7 @@ mod tests {
         assert_eq!(fixture_from(Some("downloads")), Fixture::Downloads);
         assert_eq!(fixture_from(Some("sensitive")), Fixture::Sensitive);
         assert_eq!(fixture_from(Some("AI")), Fixture::Ai);
+        assert_eq!(fixture_from(Some("novels")), Fixture::Novels);
         // Not a fixture this build knows: 77 in tools/fixture.ps1, never "no fixture".
         assert_eq!(fixture_from(Some("still-nonsense")), Fixture::Unknown);
     }
