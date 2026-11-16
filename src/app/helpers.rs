@@ -311,6 +311,37 @@ pub(crate) fn illust_to_item(illust: &Illust, rank: i32) -> IllustItem {
     }
 }
 
+// ------------------------------------------------------- landing (B1/B2/B4/B5)
+
+/// Which surface a reply belongs to.
+///
+/// Four of this round's rows are the same sentence with a different key: a reply
+/// computed from one surface's state is written onto whatever surface happens to be
+/// on screen when it lands. The illustration page keys its surface by
+/// `detail_epoch` (bumped by every open), the user page by the account it shows.
+/// The reply carries the key it *asked* with; the page passes the key it is
+/// *showing*; a pair that does not match is dropped whole.
+///
+/// The second half of the same invariant is the busy slot
+/// (`detail.rs`'s [`toggle_allowed`]): a surface takes one reply at a time, so two
+/// gestures cannot both start a request whose replies then race. Together they are
+/// the two halves of "the reply that lands belongs to the page that asked".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ReplySurface {
+    /// The illustration page, keyed by the epoch that opened it.
+    Detail(u64),
+    /// The user page, keyed by the account id it is showing.
+    Profile(u64),
+}
+
+/// Does the reply `asked` still belong to the surface `showing`?
+///
+/// A key never repeats: `detail_epoch` only grows and a profile page's key is the
+/// account itself, so equality is the whole test.
+pub(crate) fn reply_lands(showing: ReplySurface, asked: ReplySurface) -> bool {
+    showing == asked
+}
+
 pub(crate) fn extension_for(url: &str) -> String {
     let lower = url.to_ascii_lowercase();
     for candidate in ["png", "webp", "gif", "jpeg", "jpg"] {

@@ -81,7 +81,7 @@ impl App {
                 let pages = app.demo.pages(illust_id);
                 drop(app);
                 let Some(illust) = found else {
-                    App::fail_detail(shared, "找不到该作品，或它对该账号不可见。");
+                    App::fail_detail(shared, epoch, "找不到该作品，或它对该账号不可见。");
                     return;
                 };
                 let mut app = shared.borrow_mut();
@@ -103,7 +103,7 @@ impl App {
                 let rt = app.rt.clone();
                 drop(app);
                 let Some(client) = client else {
-                    App::fail_detail(shared, "没有可用的网络客户端。");
+                    App::fail_detail(shared, epoch, "没有可用的网络客户端。");
                     return;
                 };
                 rt.spawn(async move {
@@ -114,7 +114,7 @@ impl App {
                         Ok(illust) => illust,
                         Err(error) => {
                             on_ui(move |shared| {
-                                App::fail_detail(shared, &describe_session_error(&error));
+                                App::fail_detail(shared, epoch, &describe_session_error(&error));
                             });
                             return;
                         }
@@ -162,8 +162,22 @@ impl App {
 }
 
 impl App {
-    pub(crate) fn fail_detail(shared: &Shared, message: &str) {
+    /// Say that the illustration page could not be read.
+    ///
+    /// The epoch is compared **first**, exactly like the success path
+    /// (`open_detail_route` installs a payload only when `detail_epoch` still agrees):
+    /// a slow failed read of A used to write `detail-state = 3` over the
+    /// already-loaded B, so B's viewer showed A's error, and the route was not
+    /// restored either. `reply_lands` is the one spelling of that comparison, shared
+    /// with the follow reply (B4), the user page (B2) and the re-tag (B5).
+    pub(crate) fn fail_detail(shared: &Shared, epoch: u64, message: &str) {
         let app = shared.borrow();
+        if !reply_lands(
+            ReplySurface::Detail(app.detail_epoch),
+            ReplySurface::Detail(epoch),
+        ) {
+            return;
+        }
         let ui = app.ui();
         ui.set_detail_state(3);
         ui.set_detail_message(message.into());
@@ -1220,6 +1234,28 @@ async fn load_film_bytes(
 mod tests {
     use super::*;
     use pixiv_types::domain::PageUrls;
+
+    /// B1 · a failed read belongs to the page that asked for it.
+    ///
+    /// The success path has compared `detail_epoch` since round six; the failure path
+    /// wrote `detail-state = 3` with no epoch at all, so a slow failed load of A
+    /// replaced the already-loaded B with A's error. The plant that makes this red is
+    /// the rule as it was - [`reply_lands`] answering `true` for every pair.
+    #[test]
+    fn b1_a_failed_read_lands_only_on_the_page_that_asked() {
+        assert!(reply_lands(
+            ReplySurface::Detail(7),
+            ReplySurface::Detail(7)
+        ));
+        assert!(
+            !reply_lands(ReplySurface::Detail(8), ReplySurface::Detail(7)),
+            "B opened while A's read was in flight: A's error must not land"
+        );
+        assert!(
+            !reply_lands(ReplySurface::Profile(3), ReplySurface::Detail(7)),
+            "the user page is not the illustration page"
+        );
+    }
 
     fn synthetic_page(index: usize) -> PageMeta {
         PageMeta {
