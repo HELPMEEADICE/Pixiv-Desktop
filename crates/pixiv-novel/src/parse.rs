@@ -765,17 +765,33 @@ fn decode_entities(input: &str) -> String {
     out
 }
 
+/// Characters a caption may not hold, whatever entity asked for them.
+///
+/// Two classes, both invisible and both able to rewrite what follows:
+///
+/// * the control characters (`is_control()`: C0, DEL and C1). U+0000 truncates a
+///   Slint text model and reads as nothing at all, and `&#x1b;` hands a renderer
+///   an escape;
+/// * the bidirectional overrides U+202A..U+202E (LRE, RLE, PDF, LRO, RLO). One
+///   `&#x202e;` reverses every character after it on screen, and a caption is the
+///   one place a stranger writes for the reader.
+///
+/// A refused entity stays literal text (`&#x202e;` prints as `&#x202e;`), which is
+/// what this module already does with an entity it does not know: the reader gets
+/// the author's text rather than a silently deleted character.
+fn is_unrenderable(ch: char) -> bool {
+    ch.is_control() || ('\u{202a}'..='\u{202e}').contains(&ch)
+}
+
 fn numeric_entity(body: &str) -> Option<char> {
     let digits = body.strip_prefix('#')?;
     let value = match digits.strip_prefix(['x', 'X']) {
         Some(hex) => u32::from_str_radix(hex, 16).ok()?,
         None => digits.parse::<u32>().ok()?,
     };
-    // `&#0;` (and `&#x0;`) is not a character the reader may hold: U+0000
-    // truncates C strings, breaks a Slint text model, and reads as nothing at
-    // all - so it stays literal text like any other entity this module does not
-    // know. `char::from_u32(0)` is `Some`, which is why the filter is explicit.
-    char::from_u32(value).filter(|ch| *ch != '\0')
+    // `char::from_u32(0)` is `Some`, which is why every refusal is explicit; a
+    // codepoint outside the scalar range is refused by `from_u32` itself.
+    char::from_u32(value).filter(|ch| !is_unrenderable(*ch))
 }
 
 #[cfg(test)]
@@ -1184,6 +1200,45 @@ mod tests {
         let decoded = clean_caption("&#65;&#0;&#66;");
         assert_eq!(decoded, "A&#0;B");
         assert!(!decoded.contains('\u{0}'));
+    }
+
+    /// C8: an entity that decodes to an invisible control or a bidirectional
+    /// override stays literal text, like any entity this module does not know.
+    ///
+    /// Both classes rewrite what follows them: one `&#x202e;` reverses the rest of
+    /// the line on screen, and `&#x1b;` hands a renderer an escape. The negative
+    /// experiment is the old filter (`*ch != '\0'`): every assertion below then
+    /// reads the decoded character instead of the entity text.
+    #[test]
+    fn a_control_or_override_entity_stays_literal_text() {
+        // The one `&#0;` test's neighbour: no NUL, and now no ESC either.
+        assert_eq!(clean_caption("あ&#x1b;い"), "あ&#x1b;い");
+        assert_eq!(clean_caption("&#27;"), "&#27;");
+        // The whole C0 range plus DEL and C1, in the hex spelling.
+        for code in [1u32, 7, 8, 9, 10, 13, 27, 31, 127, 133] {
+            let entity = format!("&#x{code:x};");
+            assert_eq!(
+                clean_caption(&entity),
+                entity,
+                "U+{code:04X} must not decode"
+            );
+        }
+        // LRE, RLE, PDF, LRO, RLO: the overrides that re-order what follows.
+        for code in 0x202Au32..=0x202E {
+            let entity = format!("&#x{code:x};");
+            assert_eq!(
+                clean_caption(&entity),
+                entity,
+                "U+{code:04X} must not decode"
+            );
+        }
+        let reversed = clean_caption("左&#x202e;右");
+        assert_eq!(reversed, "左&#x202e;右");
+        assert!(!reversed.contains('\u{202e}'), "no override reached the reader");
+        // The characters either side of that range are ordinary and still decode.
+        assert_eq!(clean_caption("&#x2029;"), "\u{2029}");
+        assert_eq!(clean_caption("&#x202f;"), "\u{202f}");
+        assert_eq!(clean_caption("&#x2192;"), "\u{2192}");
     }
 
     /// An `href=` that lives inside another attribute's value is not this
