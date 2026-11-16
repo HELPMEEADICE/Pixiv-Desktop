@@ -258,3 +258,32 @@ fn a_ranking_row_without_a_date_has_none() {
     row.date = "   ".to_string();
     assert_eq!(Illust::from_ranking(row).create_date, None);
 }
+/// C5: a novel row carries its genre, language and bookmark count, so the two
+/// lists of one search surface have the same information density.
+///
+/// The row shape is `/ajax/search/novels/*`'s: `genre` is a *string* code, the
+/// count is `bookmarkCount` (the detail document's `bookmarkCount` is the same
+/// number under the same name, which is why the row does not rename it).
+#[test]
+fn a_novel_row_keeps_its_genre_language_and_bookmarks() {
+    let row: NovelItemWire = serde_json::from_str(
+        r#"{"id":"27815393","title":"華国異伝","genre":"2","language":"ja","bookmarkCount":412,"textCount":120}"#,
+    )
+    .expect("novel row");
+    let summary = NovelSummary::from_row(row);
+    assert_eq!(summary.genre, "2");
+    assert_eq!(summary.language, "ja");
+    assert_eq!(summary.bookmarks, 412);
+}
+
+/// The two absence rules, because a missing value must not become a zero the
+/// list then prints: no genre is the empty string, no count is 0.
+#[test]
+fn a_novel_row_without_genre_or_count_reports_neither() {
+    let row: NovelItemWire =
+        serde_json::from_str(r#"{"id":"1","title":"t"}"#).expect("bare row");
+    let summary = NovelSummary::from_row(row);
+    assert_eq!(summary.genre, "");
+    assert_eq!(summary.language, "");
+    assert_eq!(summary.bookmarks, 0);
+}

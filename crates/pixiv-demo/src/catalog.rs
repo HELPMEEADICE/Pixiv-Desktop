@@ -650,6 +650,11 @@ fn summary_of(novel: &Novel) -> NovelSummary {
         cover: novel.cover.clone(),
         tags: novel.tags.clone(),
         caption: novel.caption.clone(),
+        // The document does not carry a genre code, so the row derives it from the
+        // one field Pixiv also derives it from: an original work is オリジナル.
+        genre: if novel.is_original { "1" } else { "2" }.to_owned(),
+        language: novel.language.clone(),
+        bookmarks: novel.bookmarks,
         character_count: novel.character_count,
         reading_time: novel.reading_time,
         series_id: series.map(|nav| nav.id),

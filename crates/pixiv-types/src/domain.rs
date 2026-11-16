@@ -1509,6 +1509,13 @@ pub struct NovelSummary {
     pub cover: Option<String>,
     pub tags: Vec<Tag>,
     pub caption: String,
+    /// Pixiv's genre code, kept as the text the row sends ("1" オリジナル,
+    /// "2" 二次創作): a future code must show up as itself, not as a guess.
+    pub genre: String,
+    /// The work's language ("ja", "zh", ...); empty when the row omits it.
+    pub language: String,
+    /// Bookmarks on the work, from the row's `bookmarkCount`.
+    pub bookmarks: u32,
     /// Characters, from the row's "textCount".
     pub character_count: u32,
     pub reading_time: u32,
@@ -1538,6 +1545,9 @@ impl NovelSummary {
             cover: non_empty(w.url),
             tags: clean_tags(w.tags),
             caption: clean_caption(&w.description),
+            genre: w.genre.trim().to_string(),
+            language: w.language,
+            bookmarks: count32(w.bookmark_count),
             character_count: count32(w.text_count),
             reading_time: count32(w.reading_time),
             series_id: w.series_id.filter(|id| !id.is_zero()),
