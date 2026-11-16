@@ -433,6 +433,72 @@ $iconRow = @($iconRun -split "\r?\n" | Where-Object { $_ -match "first differenc
 Add-Case -Name "icon-geometry" -Wanted "the shipped ui/icons.slint matches its generator; one changed attribute is a FAIL naming the line" -Ok ($iconCleanCode -eq 0 -and $iconClean -match "icons match" -and $iconRunCode -eq 1 -and $iconRun -match "first difference at line") -Evidence ("shipped exit={0} [{1}]; drifted copy exit={2} [{3}]" -f $iconCleanCode, $iconClean.Trim(), $iconRunCode, $iconRow.Trim())
 
 
+
+# ---- case launch-keys: G59/E11 - one sweep of the launch keys, and it is page-set's ----
+# tools/shot.ps1 used to set the page name, clear PIXIV_DESKTOP_START_ILLUST and leave the
+# other three keys as it found them, so a leftover PIXIV_DESKTOP_START_NOVEL in the calling
+# shell made "-Page home" photograph the reader. The fix routes the sweep through
+# tools/page-set.ps1 Set-PageLaunch, which is the one function that writes or clears every
+# key the shell reads.
+#
+# The experiment is dynamic but needs no window: an env-printing probe is spliced in front
+# of the line that starts the app, so each copy reports exactly what the app would inherit.
+# One copy is the shipped script; the other is the shipped script with the Set-PageLaunch
+# call replaced by a no-op, which is the regression - and it has to show the leak, or the
+# case would be satisfied by a probe that prints nothing.
+$shotScript = Join-Path (Split-Path -Parent $VerifyScript) "shot.ps1"
+$shotDir = Join-Path $WorkDir "shot"
+if (Test-Path $shotDir) { Remove-Item $shotDir -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $shotDir | Out-Null
+Copy-Item (Join-Path (Split-Path -Parent $VerifyScript) "page-set.ps1") $shotDir -Force
+$spliceMarker = '$log = [System.IO.Path]::GetTempFileName()'
+$probeLine = 'Write-Host ("ENV novel=[{0}] reader=[{1}] user=[{2}] illust=[{3}] page=[{4}]" -f $env:PIXIV_DESKTOP_START_NOVEL, $env:PIXIV_DESKTOP_START_READER, $env:PIXIV_DESKTOP_START_USER, $env:PIXIV_DESKTOP_START_ILLUST, $env:PIXIV_DESKTOP_START_PAGE); exit 0'
+$shotText = Get-Content $shotScript -Raw
+if (-not $shotText.Contains($spliceMarker)) { throw "case launch-keys: tools/shot.ps1 no longer starts the app at the GetTempFileName line, so the probe cannot be spliced" }
+function Add-EnvProbe {
+    param([string]$Text, [string]$Path)
+    $spliced = $Text.Replace($spliceMarker, ($probeLine + [Environment]::NewLine + $spliceMarker))
+    [System.IO.File]::WriteAllText($Path, $spliced, (New-Object System.Text.UTF8Encoding($false)))
+}
+$probeShipped = Join-Path $shotDir "shot-probe.ps1"
+Add-EnvProbe -Text $shotText -Path $probeShipped
+# The regression is "no sweep at all": both Set-PageLaunch calls become no-ops, which is
+# what the file did before E11 in every respect that matters (it set the page name and
+# cleared one key). The first replacement keeps the shape so the else branch still binds.
+$regressed = $shotText.Replace('Set-PageLaunch -Page $Page', 'Write-Verbose "sweep removed"').Replace('Set-PageLaunch -Clear', 'Write-Verbose "sweep removed"')
+if ($regressed -eq $shotText) { throw "case launch-keys: no Set-PageLaunch call was found in tools/shot.ps1, so the regression cannot be planted" }
+$probeRegressed = Join-Path $shotDir "shot-regressed.ps1"
+Add-EnvProbe -Text $regressed -Path $probeRegressed
+
+$previousEnv = @{}
+foreach ($key in @("PIXIV_DESKTOP_START_NOVEL", "PIXIV_DESKTOP_START_READER", "PIXIV_DESKTOP_START_USER", "PIXIV_DESKTOP_START_ILLUST", "PIXIV_DESKTOP_START_PAGE", "PIXIV_DESKTOP_FIXTURE")) {
+    $previousEnv[$key] = [Environment]::GetEnvironmentVariable($key)
+}
+$noExePath = "target\debug\nope.exe"
+try {
+    $env:PIXIV_DESKTOP_START_NOVEL = "810000001"
+    $env:PIXIV_DESKTOP_START_READER = "1"
+    $env:PIXIV_DESKTOP_START_USER = "900000"
+    Remove-Item Env:\PIXIV_DESKTOP_START_ILLUST -ErrorAction SilentlyContinue
+    $leakText = & pwsh -NoProfile -File $probeRegressed -Page home -Mode size -Size 1024x768 -Out (Join-Path $shotDir "r.png") -Exe $noExePath 2>&1 | Out-String
+    $sweptText = & pwsh -NoProfile -File $probeShipped -Page home -Mode size -Size 1024x768 -Out (Join-Path $shotDir "s.png") -Exe $noExePath 2>&1 | Out-String
+    $recipeText = & pwsh -NoProfile -File $probeShipped -Page novel-reader -Mode size -Size 1024x768 -Out (Join-Path $shotDir "n.png") -Exe $noExePath 2>&1 | Out-String
+}
+finally {
+    foreach ($key in $previousEnv.Keys) { [Environment]::SetEnvironmentVariable($key, $previousEnv[$key]) }
+}
+$leaks = ($leakText -match "novel=\[810000001\]") -and ($leakText -match "reader=\[1\]")
+$swept = ($sweptText -match "novel=\[\]") -and ($sweptText -match "reader=\[\]") -and ($sweptText -match "user=\[\]") -and ($sweptText -match "page=\[home\]")
+$recipeOk = ($recipeText -match "novel=\[810000001\]") -and ($recipeText -match "reader=\[1\]") -and ($recipeText -match "page=\[home\]")
+# The static half: the script does not own a launch-key list. The only two keys it may
+# write by hand are the page name it was given and the -Illust override; every other key is
+# Set-PageLaunch's business. Before E11 the hand-written set was "page + illust" too, and
+# the difference is that the *clearing* is now a function call rather than a list that
+# only remembered one key.
+$directKeys = @([regex]::Matches($shotText, '[$]env:PIXIV_DESKTOP_START_([A-Z]+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+$oneKey = (@($directKeys | Where-Object { $_ -ne "PAGE" -and $_ -ne "ILLUST" }).Count -eq 0) -and ($shotText -match 'Set-PageLaunch')
+Add-Case -Name "launch-keys" -Wanted "a leftover START_NOVEL survives the regressed script and not the shipped one; a page's own recipe still applies; one direct key" -Ok ($leaks -and $swept -and $recipeOk -and $oneKey) -Evidence ("regressed: {0} | shipped -Page home: {1} | shipped -Page novel-reader: {2} | direct launch keys in shot.ps1: [{3}]" -f $leakText.Trim(), $sweptText.Trim(), $recipeText.Trim(), ($directKeys -join ", "))
+
 # ---------------------------------------------------------------- round nine
 
 <#

@@ -52,8 +52,21 @@ public class Shot {
 '@
 [void][Shot]::SetProcessDPIAware()
 
-$env:PIXIV_DESKTOP_START_PAGE = $Page
-if ($Illust) { $env:PIXIV_DESKTOP_START_ILLUST = $Illust } else { Remove-Item Env:\PIXIV_DESKTOP_START_ILLUST -ErrorAction SilentlyContinue }
+# G59: the launch keys come from tools/page-set.ps1's recipe for the page, applied by
+# Set-PageLaunch, which writes or clears every key the shell reads. This script used to
+# set the page name, clear START_ILLUST and touch nothing else - so a leftover
+# PIXIV_DESKTOP_START_NOVEL in the calling shell made `-Page home` photograph the reader,
+# with a real capture under a name that described a different page.
+. (Join-Path $PSScriptRoot "page-set.ps1") | Out-Null
+if ((Get-PageLaunch -Page $Page).Count -gt 0) { Set-PageLaunch -Page $Page }
+else {
+    # A name the page set does not know keeps the old standalone behaviour - start there -
+    # but the sweep happens first, so an ambient deep link cannot outlive it.
+    Set-PageLaunch -Clear
+    $env:PIXIV_DESKTOP_START_PAGE = $Page
+}
+# The one key a caller can still override by hand, applied after the recipe.
+if ($Illust) { $env:PIXIV_DESKTOP_START_ILLUST = $Illust }
 Remove-Item Env:\PIXIV_DESKTOP_SIZE -ErrorAction SilentlyContinue
 if ($Trace) { $env:PIXIV_DESKTOP_TRACE = "1" } else { Remove-Item Env:\PIXIV_DESKTOP_TRACE -ErrorAction SilentlyContinue }
 if ($Dark) { $env:PIXIV_DESKTOP_THEME = "dark" } else { Remove-Item Env:\PIXIV_DESKTOP_THEME -ErrorAction SilentlyContinue }

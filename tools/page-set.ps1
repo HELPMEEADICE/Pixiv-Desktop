@@ -207,8 +207,11 @@ function Get-PageLaunch {
   cannot get one by accident.
 #>
 function Set-PageLaunch {
-    param([string]$Page)
-    $recipe = Get-PageLaunch -Page $Page
+    # -Clear sweeps every key without applying a recipe. tools/shot.ps1 uses it for a page
+    # name the page set does not know, so even that call cannot inherit a deep link from
+    # whatever ran before it (G59/E11).
+    param([string]$Page, [switch]$Clear)
+    $recipe = if ($Clear) { @{} } else { Get-PageLaunch -Page $Page }
     if ($recipe.ContainsKey("StartPage")) { $env:PIXIV_DESKTOP_START_PAGE = $recipe.StartPage }
     else { Remove-Item Env:\PIXIV_DESKTOP_START_PAGE -ErrorAction SilentlyContinue }
     foreach ($pair in @(
