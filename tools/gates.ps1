@@ -192,7 +192,7 @@ Invoke-Gate "cargo fmt --check" { cargo fmt --all -- --check 2>&1 | Out-Host } |
 
 # ---- 2. the test suite. It never touches the network: the live suite in
 # crates/pixiv-api/tests/live.rs is inert unless PIXIV_LIVE_PHPSESSID is set. ----
-if (-not $failed -and -not $SkipTest) {
+if (-not $SkipTest) {
     Invoke-Gate "cargo test --workspace" {
         # --locked (G19): a stale Cargo.lock must fail here as it would in CI, not
         # pass locally because cargo silently re-resolved the graph.
@@ -203,7 +203,7 @@ if (-not $failed -and -not $SkipTest) {
 }
 
 # ---- 3. lint ----
-if (-not $failed -and $Lint -ne "Off") {
+if ($Lint -ne "Off") {
     $mode = $Lint
     if ($mode -eq "Auto") {
         $mode = if (Test-Path $driver) { "Driver" } else { "Clippy" }
@@ -296,61 +296,57 @@ if (-not $failed -and $Lint -ne "Off") {
 # with the UI gates because it must run on a host with no session - it is the proof
 # that the other gates can fail, and a proof that only runs where they run is no proof
 # (G17: it was invoked by nothing while two documents described it as a gate). ----
-if (-not $failed) {
-    Invoke-Gate "tools/selftest-gates.ps1" {
-        pwsh -File tools/selftest-gates.ps1 2>&1 | Select-Object -Last 30 | Out-Host
-    } | Out-Null
-}
+Invoke-Gate "tools/selftest-gates.ps1" {
+    pwsh -File tools/selftest-gates.ps1 2>&1 | Select-Object -Last 30 | Out-Host
+} | Out-Null
 
 # ---- 5. the measured UI gates. Opt-in: see the header. ----
-if (-not $failed -and $Ui) {
+#
+# G37: every row below runs whatever the row before it said. Round ten found this
+# section chaining each gate behind `if (-not $failed)`, so the first failure -
+# verify-visual, on one unreproducible capture state - deleted the four gates after it
+# and the run printed "6 gates, 1 failed, 0 skipped" for a mode that owns ten rows.
+# A suite that reports least when it matters most is the same defect round nine wrote
+# down (docs/OPTIMIZATION-PLAN-R9.md 2.1) and then fixed only on CI, where each job
+# names its own failure. This is the other half: the script always attempts every row
+# and the summary counts rows attempted, not rows reached. `tools/selftest-gates.ps1`
+# case gate-independence is what keeps it that way.
+if ($Ui) {
     # The two harnesses drive target/debug, which the release gate above does not
     # produce, so build it here rather than assuming it is current.
     Invoke-Gate "cargo build (debug, for the capture harness)" {
         cargo build 2>&1 | Select-Object -Last 2 | Out-Host
     } | Out-Null
-    if (-not $failed) {
-        Invoke-Gate "tools/verify-a11y.ps1" {
-            pwsh -File tools/verify-a11y.ps1 2>&1 | Out-Host
-        } | Out-Null
-    }
-    if (-not $failed) {
-        Invoke-Gate "tools/verify-visual.ps1" {
-            pwsh -File tools/verify-visual.ps1 2>&1 | Select-Object -Last 30 | Out-Host
-        } | Out-Null
-    }
-    if (-not $failed) {
-        # -BaselineDir is passed, not inherited: G22 makes one page walk every stop, so
-        # the old default (docs/screenshots/baseline) would append forty-one focus-*.png
-        # to a *tracked* directory on every -Ui run. Round eight had already untracked
-        # thirty-four of them for the same reason. A gate must not write into the tree it
-        # is judging.
-        Invoke-Gate "tools/verify-focus.ps1" {
-            pwsh -File tools/verify-focus.ps1 -BaselineDir "target\focus\baseline" 2>&1 | Select-Object -Last 40 | Out-Host
-        } | Out-Null
-    }
-    if (-not $failed) {
-        Invoke-Gate "tools/verify-dpi.ps1" {
-            pwsh -File tools/verify-dpi.ps1 2>&1 | Select-Object -Last 40 | Out-Host
-        } | Out-Null
-    }
+    Invoke-Gate "tools/verify-a11y.ps1" {
+        pwsh -File tools/verify-a11y.ps1 2>&1 | Out-Host
+    } | Out-Null
+    Invoke-Gate "tools/verify-visual.ps1" {
+        pwsh -File tools/verify-visual.ps1 2>&1 | Select-Object -Last 30 | Out-Host
+    } | Out-Null
+    # -BaselineDir is passed, not inherited: G22 makes one page walk every stop, so
+    # the old default (docs/screenshots/baseline) would append forty-one focus-*.png
+    # to a *tracked* directory on every -Ui run. Round eight had already untracked
+    # thirty-four of them for the same reason. A gate must not write into the tree it
+    # is judging.
+    Invoke-Gate "tools/verify-focus.ps1" {
+        pwsh -File tools/verify-focus.ps1 -BaselineDir "target\focus\baseline" 2>&1 | Select-Object -Last 40 | Out-Host
+    } | Out-Null
+    Invoke-Gate "tools/verify-dpi.ps1" {
+        pwsh -File tools/verify-dpi.ps1 2>&1 | Select-Object -Last 40 | Out-Host
+    } | Out-Null
     # G17: verify-icons and verify-layout were described as gates by README.md and
     # UI-NOTES.md and invoked by nothing, so the one measurement that reads glyph ink
     # and the 24-check layout matrix had not run since the round that wrote them.
-    if (-not $failed) {
-        Invoke-Gate "tools/verify-icons.ps1" {
-            pwsh -File tools/verify-icons.ps1 2>&1 | Select-Object -Last 25 | Out-Host
-        } | Out-Null
-    }
-    if (-not $failed) {
-        Invoke-Gate "tools/verify-layout.ps1" {
-            pwsh -File tools/verify-layout.ps1 2>&1 | Select-Object -Last 35 | Out-Host
-        } | Out-Null
-    }
+    Invoke-Gate "tools/verify-icons.ps1" {
+        pwsh -File tools/verify-icons.ps1 2>&1 | Select-Object -Last 25 | Out-Host
+    } | Out-Null
+    Invoke-Gate "tools/verify-layout.ps1" {
+        pwsh -File tools/verify-layout.ps1 2>&1 | Select-Object -Last 35 | Out-Host
+    } | Out-Null
 }
 
 # ---- 6. the shipped artefact. Last, because it is by far the slowest. ----
-if (-not $failed -and -not $SkipBuild) {
+if (-not $SkipBuild) {
     Invoke-Gate "cargo build --release" {
         cargo build --release 2>&1 | Select-Object -Last 3 | Out-Host
     } | Out-Null
@@ -364,5 +360,5 @@ $total = ($results | Measure-Object -Property Seconds -Sum).Sum
 $bad = @($results | Where-Object { $_.Verdict -eq "FAIL" })
 $skipped = @($results | Where-Object { $_.Verdict -eq "SKIP" })
 $colour = if ($bad.Count) { "Red" } else { "Green" }
-Write-Host ("{0} gates, {1} failed, {2} skipped (exit 77 = cannot run on this host), {3:N1}s total" -f $results.Count, $bad.Count, $skipped.Count, $total) -ForegroundColor $colour
+Write-Host ("{0} gates attempted, {1} failed, {2} skipped (exit 77 = cannot run on this host), {3:N1}s total" -f $results.Count, $bad.Count, $skipped.Count, $total) -ForegroundColor $colour
 if ($bad.Count) { exit 1 }

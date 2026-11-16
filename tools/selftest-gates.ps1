@@ -453,6 +453,31 @@ $needsGates = ($ciTail -match "needs:\s*\[[^\]]*\bgates\b")
 $failsOnFailure = ($ciTail -match "contains\(needs\.\*\.result, 'failure'\)")
 Add-Case -Name "ci-gates" -Wanted "gates job on windows-latest runs tools/gates.ps1, no -Ui, ci needs it" -Ok ($hasJob -and $onWindows -and $runsScript -and $noUi -and $needsGates -and $failsOnFailure) -Evidence ("job={0} windows={1} script={2} runLines={3} noUi={4} needs={5} failsOnFailure={6}" -f $hasJob, $onWindows, $runsScript, $gateRunLines.Count, $noUi, $needsGates, $failsOnFailure)
 
+# ---- case gate-independence: G37 - no gate inherits another gate's verdict ----
+# Round ten measured the hole: with verify-visual failing on one capture state, the four
+# gates after it never ran and the run printed "6 gates, 1 failed" for a mode that owns
+# ten rows. This case reads the shape of tools/gates.ps1 rather than running it, because
+# proving it live needs a deliberately failing gate - which is the gate's own job, not
+# this script's. The negative control is the same predicate applied to the guard re-planted
+# into a copy: a filter that matched nothing would satisfy the assertion without deciding
+# anything, and this is the line that stops that.
+function Get-GateGuards {
+    param([string]$Text)
+    # A comment that quotes the guard is not a guard: the header explains the defect by
+    # naming it, so comment lines are excluded before the pattern is applied.
+    return @($Text -split "\r?\n" | Where-Object {
+        ($_.Trim() -notlike "#*") -and ($_ -match 'if\s*\(\s*-not\s+\$failed|-not\s+\$failed\s*-and')
+    })
+}
+$gatesText = Get-Content $GatesScript -Raw
+$guardsNow = @(Get-GateGuards -Text $gatesText).Count
+$plantedGuard = $gatesText + [Environment]::NewLine + 'if (-not $failed) { }' + [Environment]::NewLine
+$guardsPlanted = @(Get-GateGuards -Text $plantedGuard).Count
+# The summary has to count rows attempted, not rows reached: "6 gates" after a failure at
+# row five reads as a six-gate suite that was satisfied.
+$countsAttempts = ($gatesText -match 'gates attempted')
+Add-Case -Name "gate-independence" -Wanted "no gate guarded by a previous verdict; summary counts attempts" -Ok ($guardsNow -eq 0 -and $guardsPlanted -eq 1 -and $countsAttempts) -Evidence ("guards in tools/gates.ps1={0}; planted control={1}; summary says attempted={2}" -f $guardsNow, $guardsPlanted, $countsAttempts)
+
 Write-Host ""
 $bad = @($cases | Where-Object { -not $_.Ok })
 $colour = if ($bad.Count) { "Red" } else { "Green" }
