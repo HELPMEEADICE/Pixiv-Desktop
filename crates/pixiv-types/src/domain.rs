@@ -566,7 +566,10 @@ impl Illust {
             regular,
             original: String::new(),
         };
-        out.description = w.description;
+        // The third caption field of the three routes: the street payload sends the
+        // same "<br />" / "<a href>" markup as the detail and search documents, so a
+        // home card is reduced by the same cleaner rather than binding tags.
+        out.description = clean_caption(&w.description);
         out.author = Author {
             id: w.user_id,
             name: w.user_name,

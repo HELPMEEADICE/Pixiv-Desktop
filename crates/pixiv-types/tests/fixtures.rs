@@ -340,3 +340,37 @@ fn a_street_card_keeps_the_mask_flag() {
     assert!(!card.is_masked);
     assert_eq!(card.sl, 0);
 }
+/// A street card's caption is the same HTML-ish text as a detail caption, so it
+/// is reduced the same way (C1's rule, applied to the third constructor).
+///
+/// The negative experiment is `out.description = w.description` in `from_street`:
+/// the two `contains` assertions then read the raw tags, which is what a home card
+/// would have drawn.
+#[test]
+fn a_street_caption_is_cleaned_too() {
+    let raw = r#"{"id":"151999999","title":"t","description":"一行目<br />二行目<br /><a href=\"https://www.pixiv.net/novel/show.php?id=27815393\">出典</a>"}"#;
+    let row: StreetThumbWire = serde_json::from_str(raw).expect("street row");
+    // The payload is half of this gate: a caption with no markup cannot fail it.
+    assert!(row.description.contains("<br"), "the row must carry a break");
+    assert!(row.description.contains("<a "), "and a link");
+
+    let card = Illust::from_street(row);
+    assert!(
+        !card.description.contains("<br"),
+        "markup reached the domain: {}",
+        card.description
+    );
+    assert!(
+        !card.description.contains("<a "),
+        "markup reached the domain: {}",
+        card.description
+    );
+    assert_eq!(
+        card.description,
+        "一行目\n二行目\n出典 (https://www.pixiv.net/novel/show.php?id=27815393)"
+    );
+    // A card with no caption stays empty instead of gaining a stray space.
+    let silent: StreetThumbWire =
+        serde_json::from_str(r#"{"id":"2","title":"t"}"#).expect("street row");
+    assert_eq!(Illust::from_street(silent).description, "");
+}
