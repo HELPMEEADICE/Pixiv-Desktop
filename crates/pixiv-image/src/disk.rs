@@ -58,6 +58,18 @@ pub(crate) struct DiskTier {
     /// How long a test write pretends to take. Test-only.
     #[cfg(test)]
     slow_write: Mutex<Option<std::time::Duration>>,
+    /// Writers currently inside the injected write, and the highest number of
+    /// them seen at once. Test-only: the structural half of O11's assertion.
+    ///
+    /// Elapsed time cannot decide "six writers did not queue behind one another" on
+    /// a shared CI runner - measured there, the same test that takes 27 ms on the
+    /// development machine took longer than 60 ms of wall clock, and the ceiling that
+    /// made it pass locally failed in CI. How many writers *overlapped* is the fact
+    /// the lock width actually changes, and it does not depend on the machine.
+    #[cfg(test)]
+    live_writes: AtomicU64,
+    #[cfg(test)]
+    peak_writes: AtomicU64,
     /// Directory scans this tier has run, the opening one included.
     ///
     /// O2's acceptance is "zero on the hot path", and a counter is the only way to
@@ -105,6 +117,10 @@ impl DiskTier {
             sweep: RwLock::new(()),
             #[cfg(test)]
             slow_write: Mutex::new(None),
+            #[cfg(test)]
+            live_writes: AtomicU64::new(0),
+            #[cfg(test)]
+            peak_writes: AtomicU64::new(0),
             // The scan above is this tier's first, and counting it keeps
             // `scans()` honest about what a hot path is allowed to cost.
             scans: AtomicU64::new(1),
@@ -136,10 +152,25 @@ impl DiskTier {
             // sleep would serialise the very writers this seam exists to release.
             let pause = *self.slow_write.lock();
             if let Some(pause) = pause {
+                // O11's structural measurement: how many writers are inside the
+                // write at the same time. One means they queued; more than one means
+                // the lock that used to span this call does not any more.
+                let live = self.live_writes.fetch_add(1, Ordering::AcqRel) + 1;
+                self.peak_writes.fetch_max(live, Ordering::AcqRel);
                 std::thread::sleep(pause);
+                self.live_writes.fetch_sub(1, Ordering::AcqRel);
             }
         }
         write_synced(temp, bytes)
+    }
+
+    /// The most writers seen inside one injected write at the same time. Test-only.
+    ///
+    /// 1 means every writer waited for the one before it; 2 or more means they
+    /// overlapped, which is what O11 bought.
+    #[cfg(test)]
+    pub(crate) fn peak_concurrent_writes(&self) -> u64 {
+        self.peak_writes.load(Ordering::Acquire)
     }
 
     /// Directory scans run so far, the opening one included. Test-only.
@@ -632,13 +663,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// O11: six concurrent writers pay for one write, not six.
+    /// O11: six concurrent writers overlap inside one write instead of queueing.
     ///
-    /// `put` used to hold the index lock across create, write, sync_all and
-    /// rename, so six covers serialised behind six fsyncs. With a 20 ms write
-    /// injected, six writers finish in about one sleep instead of six - and the
-    /// accounting still describes the tree, which is the invariant the lock was
-    /// widened for in the first place (O2).
+    /// `put` used to hold the index lock across create, write, sync_all and rename,
+    /// so six covers serialised behind six fsyncs.
+    ///
+    /// What is asserted is the *overlap*, not the wall clock. The first version of
+    /// this test bounded the elapsed time, and it was green here (27 ms) and red in
+    /// CI (> 60 ms on a shared runner with a cold cache) on the same tree: a clock
+    /// cannot decide a structural question. The injected write counts how many
+    /// writers are inside it at once, and the old shape could only ever report 1.
+    /// The accounting invariants below are unchanged - the counter still has to
+    /// describe the tree, which is what the lock was widened for in the first place
+    /// (O2).
     #[test]
     fn six_concurrent_writers_do_not_queue_behind_one_write() {
         use std::sync::Arc;
@@ -660,13 +697,16 @@ mod tests {
             writer.join().expect("writer thread");
         }
         let elapsed = started.elapsed();
+        // The cost has to have been paid, or the run measured nothing. There is
+        // deliberately no upper bound on the clock: see this test's doc comment.
         assert!(
             elapsed >= SLOW,
             "the injected write cost was paid: {elapsed:?}"
         );
+        let peak = tier.peak_concurrent_writes();
         assert!(
-            elapsed < SLOW * 3,
-            "six writers queued behind one another: {elapsed:?}, not about {SLOW:?}"
+            peak >= 2,
+            "six writers queued behind one another: at most {peak} was inside a write              at once, and the lock that used to span the whole put is what would hold that              at 1 (elapsed {elapsed:?})"
         );
 
         let on_disk: u64 = super::walk(&dir)
@@ -680,6 +720,42 @@ mod tests {
             "the counter still describes the tree"
         );
         assert_eq!(tier.indexed().len(), 6, "every writer published its entry");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The control for the test above: the overlap counter can report 1.
+    ///
+    /// A structural assertion is worth something only if the measurement can come out
+    /// the other way. Here the writers are serialised by a mutex of their own, so no two
+    /// are ever inside a write at once - which is exactly the shape the index lock used
+    /// to impose on them - and the counter says so.
+    #[test]
+    fn the_overlap_counter_reports_a_serialised_write() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        const SLOW: std::time::Duration = std::time::Duration::from_millis(10);
+        let dir = scratch("disk-serialised-put");
+        let tier = Arc::new(DiskTier::open(dir.clone(), 1 << 20).expect("disk tier"));
+        tier.slow_write(SLOW);
+        let gate = Arc::new(Mutex::new(()));
+        let mut writers = Vec::new();
+        for index in 0..4u32 {
+            let tier = Arc::clone(&tier);
+            let gate = Arc::clone(&gate);
+            writers.push(std::thread::spawn(move || {
+                let _serialised = gate.lock().expect("gate");
+                tier.put(&format!("{index:02}-serial"), b"1234")
+                    .expect("put");
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        assert_eq!(
+            tier.peak_concurrent_writes(),
+            1,
+            "the measurement must be able to report one writer at a time"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
