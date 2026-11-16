@@ -1608,4 +1608,820 @@ mod tests {
             "the reader sliders and the model that clamps them disagree: {mismatched:?}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Round eleven (docs/OPTIMIZATION-PLAN-R11.md §6, track A)
+    // -----------------------------------------------------------------------
+
+
+    /// The code on a block's opening line, before its `{`.
+    ///
+    /// `ElementBlock` records where a block starts, not what announced it, and the two
+    /// rules below are about *conditional* surfaces (`if root.x : Rectangle {`).
+    fn opener(source: &str, block: &ElementBlock) -> String {
+        let start = source[..block.start].rfind('\n').map_or(0, |at| at + 1);
+        source[start..block.start]
+            .split("//")
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// G29 — a state overlay is declared after the content it covers.
+    ///
+    /// Slint hit-tests in reverse declaration order, so a full-surface overlay declared
+    /// *before* the thing it covers loses every click to it: the panel looks open and is
+    /// pointer-dead. The rule asks about the shape that makes it an overlay — a
+    /// conditional block that claims the whole window (`root.width` and `root.height`)
+    /// and carries a hit surface — and then insists that no bare hit surface is declared
+    /// after it outside a conditional of its own.
+    #[test]
+    fn a_state_overlay_is_declared_after_the_content_it_covers() {
+        let mut offenders = Vec::new();
+        let mut overlays = 0;
+        for path in page_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            for block in &blocks {
+                if !opener(&source, block).contains("if ") {
+                    continue;
+                }
+                let own = own_lines(&block.body);
+                let covers = (own.contains("width: root.width") || own.contains("width: 100%"))
+                    && (own.contains("height: root.height") || own.contains("height: 100%"));
+                if !covers || !own.contains("TouchArea") {
+                    continue;
+                }
+                overlays += 1;
+                let overlay_line = source[..block.start].lines().count() + 1;
+                for later in blocks.iter().filter(|later| later.start > block.start) {
+                    if later.name != "TouchArea" {
+                        continue;
+                    }
+                    let mut conditional = false;
+                    let mut ancestor = enclosing_block(&blocks, later);
+                    while let Some(parent) = ancestor {
+                        if opener(&source, parent).contains("if ") {
+                            conditional = true;
+                            break;
+                        }
+                        ancestor = enclosing_block(&blocks, parent);
+                    }
+                    if conditional {
+                        continue;
+                    }
+                    let line = source[..later.start].lines().count() + 1;
+                    offenders.push(format!(
+                        "{name}:{line}: a hit surface is declared after the overlay at line {overlay_line}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            overlays >= 3,
+            "expected the shell and the reader to carry full-surface overlays, found {overlays}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "an overlay declared before the content it covers receives no clicks. Move it \
+last in its component:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// G30 — every hit surface that takes a click declares a role *and* a name.
+    ///
+    /// Round ten asked the question of a fixed list of ten components, which checks the
+    /// primitives and nothing that uses them. This asks it of every `TouchArea` with a
+    /// `clicked` handler: either the surface names itself, or the cell it lives in does
+    /// (the shape every working primitive already uses — role and label on the root, the
+    /// pointer target last). A dismiss-only backdrop is exempt and must name itself
+    /// `*-scrim`: Escape is its keyboard path, and a screen reader narrating "background"
+    /// between every panel is worse than silence.
+    #[test]
+    fn every_hit_surface_that_takes_a_click_declares_a_role_and_a_name() {
+        // Files another track owns this round (plan §7): their hit surfaces are that
+        // track's debt. The sample is every file this track owns, plus the shared
+        // primitives — which is where the negative experiment lands.
+        const FILED_WITH_ANOTHER_TRACK: [&str; 5] = [
+            "detail.slint",
+            "downloads.slint",
+            "novel.slint",
+            "novels.slint",
+            "profile.slint",
+        ];
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        let mut scrims = 0;
+        for path in page_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if FILED_WITH_ANOTHER_TRACK.contains(&name.as_str()) {
+                continue;
+            }
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            for block in blocks.iter().filter(|block| block.name == "TouchArea") {
+                if !own_lines(&block.body).contains("clicked") {
+                    continue;
+                }
+                if opener(&source, block).contains("scrim") {
+                    scrims += 1;
+                    continue;
+                }
+                checked += 1;
+                // The surface names itself, or the cell it lives in does, or the
+                // component does — the three shapes every working primitive uses. The
+                // walk goes all the way up because a `for` delegate's parent is the
+                // layout, not the component that gave the row its role.
+                let mut covered = block.body.contains("accessible-role")
+                    && block.body.contains("accessible-label");
+                let mut ancestor = enclosing_block(&blocks, block);
+                while let Some(parent) = ancestor {
+                    if parent.body.contains("accessible-role")
+                        && parent.body.contains("accessible-label")
+                    {
+                        covered = true;
+                        break;
+                    }
+                    ancestor = enclosing_block(&blocks, parent);
+                }
+                if !covered {
+                    let line = source[..block.start].lines().count() + 1;
+                    offenders.push(format!("{name}:{line}"));
+                }
+            }
+        }
+        assert!(
+            checked >= 10 && scrims >= 1,
+            "expected many named hit surfaces and at least one scrim; found {checked} and {scrims}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these hit surfaces take a click and expose neither a role nor a name:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// G31 — every shared control is created with its accessible name.
+    ///
+    /// The role rules check the primitive; nothing checked the *call site*, which is where
+    /// the name actually comes from: a `Switch` created without `label:` is a switch a
+    /// screen reader cannot describe, and an `IconButton` without `tip:` is a glyph with
+    /// no meaning. One property per primitive — the one that carries its name.
+    #[test]
+    fn every_shared_control_is_created_with_its_accessible_name() {
+        const NAMED: [(&str, &str); 7] = [
+            ("AppButton", "label"),
+            ("IconButton", "tip"),
+            ("TextField", "placeholder"),
+            ("ToggleSwitch", "label"),
+            ("SegmentedControl", "label"),
+            ("TagChip", "label"),
+            ("NavItem", "label"),
+        ];
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            for block in &blocks {
+                let Some((_, prop)) = NAMED.iter().find(|(control, _)| *control == block.name)
+                else {
+                    continue;
+                };
+                if opener(&source, block).contains("component ") {
+                    continue;
+                }
+                checked += 1;
+                if !own_lines(&block.body).contains(&format!("{prop}:")) {
+                    let line = source[..block.start].lines().count() + 1;
+                    offenders.push(format!("{name}:{line}: {} without {prop}:", block.name));
+                }
+            }
+        }
+        assert!(
+            checked >= 40,
+            "expected to inspect every shared control instance; found {checked}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a control created without its name is a control a screen reader cannot describe:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// G31 — radii, type sizes and the theme's spacing steps are theme-only, everywhere
+    /// but the theme itself.
+    ///
+    /// Round ten asked this question of colours in page files. The defect class is the
+    /// same one dimension over: a 12px radius, a 19px font size and a 4px gutter are all
+    /// numbers two files must agree on, and a literal is a number two files will disagree
+    /// on. The colour half is `pages_take_colours_from_the_theme`, which already reads
+    /// every file; this is the radius, type, spacing and control-size half (U32/U35 end
+    /// green under it).
+    #[test]
+    fn radii_type_sizes_and_spacing_steps_come_from_the_theme() {
+        // (file, property, value) that belongs to a file another track owns this round
+        // (plan §7). Named rather than skipped: profile.slint's two 4px spacings are
+        // `Theme.space-1`, and the file is track D's.
+        const FILED_WITH_ANOTHER_TRACK: [(&str, &str, f32); 1] =
+            [("profile.slint", "spacing", 4.0)];
+        let theme = read(&ui_dir().join("theme.slint"));
+        let theme_value = |name: &str| -> Option<f32> {
+            theme.lines().find_map(|line| {
+                let code = line.split("//").next().unwrap_or("").trim();
+                let rest = code.strip_prefix(&format!("out property <length> {name}: "))?;
+                rest.trim_end_matches(';').trim().strip_suffix("px")?.parse().ok()
+            })
+        };
+        let mut steps = Vec::new();
+        for step in 1..=8 {
+            if let Some(value) = theme_value(&format!("space-{step}")) {
+                steps.push(value);
+            }
+        }
+        let mut icon_sizes = Vec::new();
+        for name in ["icon-size", "icon-size-lg"] {
+            if let Some(value) = theme_value(name) {
+                icon_sizes.push(value);
+            }
+        }
+        let control = theme_value("control-height").expect("the control height is a token");
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            if path.file_name().and_then(|n| n.to_str()) == Some("theme.slint") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("").trim();
+                let mut offender = |what: String| {
+                    offenders.push(format!("{name}:{}: {what}", index + 1));
+                };
+                // Every one of these properties is *inspected*; the count is the rule's
+                // sample, so a tree with nothing left to report still proves it looked.
+                for prop in ["border-radius", "font-size", "spacing", "padding", "size"] {
+                    if code.starts_with(&format!("{prop}:")) {
+                        checked += 1;
+                    }
+                }
+                if let Some(radius) = bare_px(code, "border-radius") {
+                    offender(format!("border-radius: {radius}px"));
+                }
+                if let Some(size) = bare_px(code, "font-size") {
+                    offender(format!("font-size: {size}px"));
+                }
+                let spacing = bare_px(code, "spacing")
+                    .or_else(|| bare_px(code, "padding"))
+                    .or_else(|| bare_px(code, "padding-left"))
+                    .or_else(|| bare_px(code, "padding-right"))
+                    .or_else(|| bare_px(code, "padding-top"))
+                    .or_else(|| bare_px(code, "padding-bottom"));
+                if let Some(value) = spacing {
+                    if value > 0.0 && steps.iter().any(|step| (*step - value).abs() < f32::EPSILON)
+                    {
+                        let filed = FILED_WITH_ANOTHER_TRACK
+                            .iter()
+                            .any(|(file, _, v)| *file == name && (*v - value).abs() < f32::EPSILON);
+                        if !filed {
+                            offender(format!("a {value}px spacing step is Theme.space-*"));
+                        }
+                    }
+                }
+                if let Some(value) = bare_px(code, "size") {
+                    if icon_sizes
+                        .iter()
+                        .any(|icon| (*icon - value).abs() < f32::EPSILON)
+                    {
+                        offender(format!("size: {value}px is Theme.icon-size*"));
+                    }
+                }
+            }
+            // U34: a button shorter than the control height is a compact button, and a
+            // compact button that does not say so paints outside the row it was put in.
+            let blocks = element_blocks(&source);
+            for block in blocks.iter().filter(|block| block.name == "AppButton") {
+                if opener(&source, block).contains("component ") {
+                    continue;
+                }
+                let own = own_lines(&block.body);
+                let Some(height) = bare_px(&own, "row-height") else {
+                    continue;
+                };
+                if height <= 0.0 || height >= control {
+                    continue;
+                }
+                checked += 1;
+                if !own.contains("compact: true") {
+                    let line = source[..block.start].lines().count() + 1;
+                    offenders.push(format!(
+                        "{name}:{line}: a {height}px AppButton in a {control}px world needs compact: true"
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked >= 10,
+            "expected to inspect literals and short buttons; found {checked}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "radii, font sizes and spacing steps are theme tokens, not literals:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// U32 — the theme's card-width band is the one `src/layout.rs` balances with.
+    ///
+    /// `Theme.card-min-width` / `card-max-width` are the only numbers that exist twice in
+    /// two languages: Slint draws the card, Rust decides how many columns fit. Nothing
+    /// tied them together, so the balancer could clamp a card to a band the grid would
+    /// never honour. The shape is `reader_bounds_match_the_preference_model`'s: read the
+    /// declaration out of both texts and compare.
+    #[test]
+    fn grid_widths_match_the_layout_model() {
+        let theme = read(&ui_dir().join("theme.slint"));
+        let layout = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/layout.rs"),
+        )
+        .expect("the layout model must exist");
+        let last_number = |line: &str| -> f32 {
+            let mut current = String::new();
+            let mut runs: Vec<String> = Vec::new();
+            for ch in line.chars() {
+                if ch.is_ascii_digit() || (ch == '.' && !current.is_empty()) {
+                    current.push(ch);
+                } else if !current.is_empty() {
+                    runs.push(std::mem::take(&mut current));
+                }
+            }
+            if !current.is_empty() {
+                runs.push(current);
+            }
+            runs.pop()
+                .unwrap_or_else(|| panic!("no number on {line:?}"))
+                .parse()
+                .unwrap_or_else(|e| panic!("{line:?}: {e}"))
+        };
+        let pairs = [
+            ("card-min-width", "CARD_MIN_WIDTH"),
+            ("card-max-width", "CARD_MAX_WIDTH"),
+        ];
+        let mut mismatched = Vec::new();
+        for (token, constant) in pairs {
+            let shown = last_number(
+                theme
+                    .lines()
+                    .find(|line| line.contains(&format!(" {token}: ")))
+                    .unwrap_or_else(|| panic!("theme.slint must declare {token}")),
+            );
+            let enforced = last_number(
+                layout
+                    .lines()
+                    .find(|line| line.contains(&format!("const {constant}: f32")))
+                    .unwrap_or_else(|| panic!("layout.rs must declare {constant}")),
+            );
+            if (shown - enforced).abs() > f32::EPSILON {
+                mismatched.push(format!("Theme.{token}={shown} but layout::{constant}={enforced}"));
+            }
+        }
+        assert!(
+            mismatched.is_empty(),
+            "the theme's card widths and the Rust balancer disagree: {mismatched:?}"
+        );
+    }
+
+    /// The value of a bare `prop: <n>px` line in a block, if there is one.
+    ///
+    /// "Bare" is the whole point of the literal rules below: `height: 100%` fills the
+    /// cross axis and needs no alignment, and `Theme.space-2` is a token, not a
+    /// literal. Only a plain number with the `px` unit is a literal the theme owns.
+    fn bare_px(body: &str, prop: &str) -> Option<f32> {
+        for line in body.lines() {
+            let code = line.split("//").next().unwrap_or("").trim();
+            let Some(rest) = code.strip_prefix(prop) else {
+                continue;
+            };
+            let Some(value) = rest.strip_prefix(':') else {
+                continue;
+            };
+            let value = value.trim().trim_end_matches(';').trim();
+            let Some(digits) = value.strip_suffix("px") else {
+                continue;
+            };
+            if let Ok(number) = digits.trim().parse::<f32>() {
+                return Some(number);
+            }
+        }
+        None
+    }
+
+
+    /// The lines a block owns, i.e. its own declarations and not a child's.
+    ///
+    /// `ElementBlock.body` holds the whole sub-tree, so `body.contains("width: 100%")`
+    /// answers a question about the children as often as about the element — the first
+    /// draft of the two rules below flagged six nested layouts that "claimed the page"
+    /// because a grandchild did. Depth-aware filtering is what makes "this box claims
+    /// the page" a statement about the box.
+    fn own_lines(body: &str) -> String {
+        // A block's body starts at its own `{` and stops before its matching `}`, so
+        // the opening brace is stripped once and the depth then starts at zero.
+        let inner = body.strip_prefix('{').unwrap_or(body);
+        let mut out = String::new();
+        let mut depth = 0i32;
+        for line in inner.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            if depth == 0 {
+                out.push_str(code);
+                out.push('\n');
+            }
+            depth += code.matches('{').count() as i32;
+            depth -= code.matches('}').count() as i32;
+        }
+        out
+    }
+
+    /// True when a block body declares `clip: true`.
+    fn clips(body: &str) -> bool {
+        body.lines().any(|line| {
+            let code = line.split("//").next().unwrap_or("").trim();
+            code == "clip: true;" || code == "clip: true"
+        })
+    }
+
+    /// G26 — a page-level clipped body must be reachable through a `ScrollView`.
+    ///
+    /// The class this prevents is the one four earlier rounds kept re-introducing: a
+    /// body that clips its overflow instead of scrolling it, so the content below the
+    /// fold exists and cannot be reached. The rule only asks about a box that claims the
+    /// page on both axes (`100%`, `root.width`, `root.height` or `vertical-stretch: 1`)
+    /// and is not inside a scroller: a 48px chip strip may clip, a page body may not.
+    #[test]
+    fn a_clipped_page_body_is_reachable_through_a_scroll_view() {
+        const SCROLLERS: [&str; 3] = ["ScrollView", "PageScroll", "Flickable"];
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            if !path.starts_with(ui_dir().join("pages")) {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            for block in &blocks {
+                let own = own_lines(&block.body);
+                if !clips(&own) || SCROLLERS.contains(&block.name.as_str()) {
+                    continue;
+                }
+                checked += 1;
+                let claims_page = (own.contains("width: 100%")
+                    || own.contains("width: root.width"))
+                    && (own.contains("height: 100%")
+                        || own.contains("height: root.height")
+                        || own.contains("vertical-stretch: 1"));
+                if !claims_page {
+                    continue;
+                }
+                let mut ancestor = enclosing_block(&blocks, block);
+                let mut scrollable = false;
+                while let Some(parent) = ancestor {
+                    if SCROLLERS.contains(&parent.name.as_str()) {
+                        scrollable = true;
+                        break;
+                    }
+                    ancestor = enclosing_block(&blocks, parent);
+                }
+                if scrollable {
+                    continue;
+                }
+                let line = source[..block.start].lines().count() + 1;
+                offenders.push(format!("{name}:{line}: {} clips the page box", block.name));
+            }
+        }
+        assert!(
+            checked >= 4,
+            "expected several clipped boxes in ui/pages; found {checked}, so the scan is broken"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a page body that clips instead of scrolling hides its own content. Put it in a \
+             ScrollView (or PageScroll):\n{}",
+            offenders.join("\n")
+        );
+    }
+
+
+    /// Kebab-case to snake_case: `shell-height` is `get_shell_height` in Rust.
+    fn snake(name: &str) -> String {
+        name.replace('-', "_")
+    }
+
+    /// How many times `name` is *used* in `source`, ignoring the declaration line,
+    /// binding targets and empty handler bodies.
+    ///
+    /// A binding target (`name: value`) writes the declaration and is not a reader; an
+    /// empty body (`name => { }`) is not an invoker either — that is the shape that let
+    /// `UserCard.toggle-follow` live for a whole round with two call sites that did
+    /// nothing. Everything else counts.
+    fn uses(source: &str, name: &str, skip_line: usize) -> usize {
+        let mut count = 0;
+        for (index, line) in source.lines().enumerate() {
+            if index + 1 == skip_line {
+                continue;
+            }
+            let code = line.split("//").next().unwrap_or("");
+            let indent = code.len() - code.trim_start().len();
+            for (at, _) in code.match_indices(name) {
+                let before = code[..at].chars().next_back();
+                if matches!(before, Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                    continue;
+                }
+                let after = &code[at + name.len()..];
+                match after.chars().next() {
+                    Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_' => continue,
+                    _ => {}
+                }
+                if at == indent && after.trim_start().starts_with(':') {
+                    continue;
+                }
+                if after.trim_start().starts_with("=> { }") || after.trim_start().starts_with("=> {}") {
+                    continue;
+                }
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// G28 + G39 — a declaration has a reader: a `property` has a read site and a
+    /// `callback` has an invoker (and a `public function` a caller).
+    ///
+    /// A declaration nobody reads is silent: Slint compiles it, the app runs, and the
+    /// surface it was declared for is either missing or was removed a round ago. Measured
+    /// on this tree the rule named `open-card-author` and `novel-detail-back` on the app
+    /// window, `UserCard.toggle-follow` (declared, then bound twice to an empty body),
+    /// `TagChip.take-focus` (a focus entry with no caller), `InfoBar.dismissible` and
+    /// eleven theme tokens. The tree is clean now, so the rule lands green.
+    ///
+    /// Three samples, because "a reader" means three different things:
+    ///
+    /// * a component declaration — the reader is a `.slint` file that uses it;
+    /// * a `Theme` token — the reader is a `.slint` file that reads `Theme.<name>`, or the
+    ///   Rust half of the same contract (the mirror tests read the name on both sides);
+    /// * a declaration on the app window — the reader is the UI, or the host: these are
+    ///   the Rust seam, so `get_`/`set_`/`on_` in `src/` counts.
+    ///
+    /// The check is name-based, and one consequence is worth writing down: a declaration
+    /// whose *name* is also declared by another component looks alive, because the scan
+    /// cannot tell `UserCard.toggle-follow` from `ProfilePage.toggle-follow`. Measured
+    /// while proving the rule: re-adding `UserCard.toggle-follow` passes, because
+    /// `ProfilePage` uses a callback of the same name. That is the price of a text rule;
+    /// the deletions below were confirmed one at a time against a name that is unique
+    /// (`InfoBar.dismissible`).
+    #[test]
+    fn every_declaration_has_a_reader() {
+        // Declarations another track owns this round (plan §7). Named, with a reason,
+        // rather than silently skipped: a dead declaration that this rule cannot reach
+        // is still a dead declaration.
+        const FILED_WITH_ANOTHER_TRACK: [(&str, &str); 1] = [("profile.slint", "webpage")];
+        // Theme tokens whose reader is the Rust half of a two-language contract.
+        const THEME_READERS_ELSEWHERE: [(&str, &str); 8] = [
+            ("reader-font-min", "src/uiaudit.rs pins it against prefs.rs"),
+            ("reader-font-max", "src/uiaudit.rs pins it against prefs.rs"),
+            ("reader-measure-min", "src/uiaudit.rs pins it against prefs.rs"),
+            ("reader-measure-max", "src/uiaudit.rs pins it against prefs.rs"),
+            ("card-min-width", "grid_widths_match_the_layout_model pins it"),
+            ("card-max-width", "grid_widths_match_the_layout_model pins it"),
+            // The brand colour may be a decorative fill and nothing may paint text or
+            // glyphs with it, so `accent_is_decoration_only` forbids a reader on purpose.
+            ("accent", "accent_is_decoration_only forbids a reader"),
+            // A frozen seam for track D (plan §1/§4 F4): a 3px progress rule under a
+            // partly-read row. It has no reader *until* F4 lands, and it may not be
+            // invented at the call site then.
+            ("progress-rule-height", "frozen seam for track D, plan §4 F4"),
+        ];
+        let files: Vec<(String, String)> = page_files()
+            .into_iter()
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                (name, read(&path))
+            })
+            .collect();
+        let mut rust = String::new();
+        for path in rust_files() {
+            rust.push_str(&read(&path));
+            rust.push('\n');
+        }
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for (name, source) in &files {
+            if name == "theme.slint" {
+                continue;
+            }
+            let is_window = name == "main.slint";
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                let trimmed = code.trim_start();
+                let Some((kind, declared)) = declared_name(trimmed) else {
+                    continue;
+                };
+                if FILED_WITH_ANOTHER_TRACK
+                    .iter()
+                    .any(|(file, field)| file == name && *field == declared)
+                {
+                    continue;
+                }
+                checked += 1;
+                let used_here: usize = files
+                    .iter()
+                    .map(|(other_name, other)| {
+                        let skip = if other_name == name { index + 1 } else { 0 };
+                        uses(other, &declared, skip)
+                    })
+                    .sum();
+                let used_rust = if is_window && used_here == 0 {
+                    let suffix = snake(&declared);
+                    rust.contains(&format!("get_{suffix}"))
+                        || rust.contains(&format!("set_{suffix}"))
+                        || rust.contains(&format!("on_{suffix}"))
+                } else {
+                    false
+                };
+                if used_here == 0 && !used_rust {
+                    offenders.push(format!("{name}:{}: {kind} {declared}", index + 1));
+                }
+            }
+        }
+        // (b) the Theme global: every token has a reader, here or in Rust.
+        let theme = read(&ui_dir().join("theme.slint"));
+        // Only the `Theme` global: `Type` below it is an int ramp read as `Type.semibold`,
+        // and a name-based check over the whole file would ask the wrong question.
+        let theme = theme
+            .split("export global Type")
+            .next()
+            .unwrap_or(theme.as_str())
+            .to_string();
+        let readers = files
+            .iter()
+            .filter(|(name, _)| name != "theme.slint")
+            .map(|(_, source)| source.as_str())
+            .collect::<Vec<_>>();
+        for (index, line) in theme.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            let Some(rest) = code.trim_start().strip_prefix("out property <") else {
+                continue;
+            };
+            let Some(after) = rest.split('>').nth(1) else {
+                continue;
+            };
+            let declared: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if declared.is_empty()
+                || THEME_READERS_ELSEWHERE
+                    .iter()
+                    .any(|(name, _reason)| *name == declared)
+            {
+                continue;
+            }
+            checked += 1;
+            let needle = format!("Theme.{declared}");
+            let read_somewhere = readers.iter().any(|source| {
+                source.lines().any(|line| {
+                    let code = line.split("//").next().unwrap_or("");
+                    code.match_indices(&needle).any(|(at, _)| {
+                        !matches!(code[at + needle.len()..].chars().next(),
+                            Some(c) if c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    })
+                })
+            });
+            if !read_somewhere {
+                offenders.push(format!("theme.slint:{}: token {declared} has no reader", index + 1));
+            }
+        }
+        assert!(
+            checked > 200,
+            "expected to inspect the whole declaration surface; found {checked}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "these declarations have no reader — delete them or wire them:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// The declaration on a trimmed line, as (kind, name).
+    fn declared_name(line: &str) -> Option<(&'static str, String)> {
+        if line.contains("component ") || line.starts_with("export ") || line.starts_with("import ") {
+            return None;
+        }
+        let rest = line
+            .strip_prefix("in-out property <")
+            .or_else(|| line.strip_prefix("in property <"))
+            .or_else(|| line.strip_prefix("out property <"))
+            .or_else(|| line.strip_prefix("private property <"))
+            // A component-local `property <T> name` is a declaration like any other: the
+            // plan's own experiment plants one, and a local nobody reads is the same
+            // silent dead weight.
+            .or_else(|| line.strip_prefix("property <"));
+        if let Some(rest) = rest {
+            let name: String = rest
+                .split('>')
+                .nth(1)?
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(("property", name));
+        }
+        for prefix in ["callback ", "public function ", "function "] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if name.is_empty() {
+                    return None;
+                }
+                let kind = if prefix == "callback " { "callback" } else { "function" };
+                return Some((kind, name));
+            }
+        }
+        None
+    }
+
+    /// Every `.rs` file under `src/`, for the rules that have to read the Rust half of a
+    /// contract (the theme is two languages).
+    fn rust_files() -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        collect_with_extension(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), "rs", &mut files);
+        files
+    }
+    /// G27 — widened from `uiaudit.rs:1514`: *every* fixed-size child of a horizontal row
+    /// states its cross-axis alignment, not only `Text`.
+    ///
+    /// A child of a `HorizontalLayout` that states its own height is placed at the *start*
+    /// of the cross axis, which is why the icon layer needed `IconPresenter`, the text rule
+    /// needed `vertical-alignment`, and a button needs `row-height` or `y:`. The old rule
+    /// asked the question of `Text` only; a `Rectangle` with a literal height and no `y:`
+    /// has exactly the same bug and had no such rule, so the widening is the change and the
+    /// sample grows with it.
+    #[test]
+    fn a_fixed_size_child_of_a_horizontal_row_states_its_cross_axis_alignment() {
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            for block in &blocks {
+                let Some(parent) = enclosing_block(&blocks, block) else {
+                    continue;
+                };
+                if parent.name != "HorizontalLayout" {
+                    continue;
+                }
+                let Some(height) = bare_px(&own_lines(&block.body), "height") else {
+                    continue;
+                };
+                if height <= 0.0 {
+                    continue;
+                }
+                checked += 1;
+                let aligned = block.body.contains("vertical-alignment")
+                    || block.body.lines().any(|line| {
+                        let code = line.split("//").next().unwrap_or("").trim_start();
+                        code.starts_with("y:")
+                    });
+                if !aligned {
+                    let line = source[..block.start].lines().count() + 1;
+                    offenders.push(format!(
+                        "{name}:{line}: {} (height {height}px, no y: and no vertical-alignment)",
+                        block.name
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked >= 4,
+            "expected to inspect several fixed-size children of a HorizontalLayout, found \
+             {checked}; the scan is broken, not the UI"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a fixed-height child of a HorizontalLayout is aligned to the start of the cross \
+             axis. State where it goes (y:, row-height: or vertical-alignment:):\n{}",
+            offenders.join("\n")
+        );
+    }
 }
