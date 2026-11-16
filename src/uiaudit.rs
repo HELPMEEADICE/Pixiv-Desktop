@@ -2676,4 +2676,56 @@ last in its component:\n{}",
             offenders.join("\n")
         );
     }
+    /// The `key:` binding of a block, as written: from the key to its terminating `;`.
+    ///
+    /// Taken as text rather than as a number because the question is *which tokens* an
+    /// anchor names — a geometry rule that only read the value would pass on a literal
+    /// that happens to equal the token today.
+    fn geometry_binding(body: &str, key: &str) -> Option<String> {
+        let prefix = format!("{key}:");
+        let mut offset = 0usize;
+        for line in body.split_inclusive('\n') {
+            let code = line.split("//").next().unwrap_or("");
+            if code.trim_start().starts_with(&prefix) {
+                let start = offset + (code.len() - code.trim_start().len());
+                let rest = &body[start..];
+                let end = rest.find(';').map_or(rest.len(), |at| at + 1);
+                return Some(rest[..end].to_string());
+            }
+            offset += line.len();
+        }
+        None
+    }
+
+    /// G47 — the notice bar's and the batch bar's `y` ranges must not intersect.
+    ///
+    /// The batch bar is anchored to the bottom of the page box on three destinations, and
+    /// the shell's notice bar is anchored to the bottom of the content area, which is the
+    /// same box: `H - 44 - 16` for the notice and `H - 48 - 12` for the bar, so the notice
+    /// covered all 44 px of the bar. The notice takes no input except its own close
+    /// button, so the clicks aimed at the buttons it was covering went *through* it to the
+    /// bar underneath — a batch download that raised a notice hid the bar it came from and
+    /// left it clickable. The anchor has to subtract the bar it is above, and it has to
+    /// ask `selection-mode`: the bar only exists then.
+    #[test]
+    fn the_notice_bar_clears_the_batch_bar_in_selection_mode() {
+        let source = read(&ui_dir().join("main.slint"));
+        let blocks = element_blocks(&source);
+        let notice = blocks
+            .iter()
+            .find(|block| opener(&source, block).contains("root.notice != \"\""))
+            .expect("the shell must draw a notice bar");
+        let anchor = geometry_binding(&notice.body, "y")
+            .expect("the notice bar must state its own y");
+        assert!(
+            anchor.contains("batch-bar-height"),
+            "the notice bar is anchored at the bottom of the content area, where the batch \
+             bar floats. Subtract Theme.batch-bar-height from its y:\n{anchor}"
+        );
+        assert!(
+            anchor.contains("selection-mode"),
+            "the subtraction has to ask selection-mode: the batch bar exists only then:\n{anchor}"
+        );
+    }
+
 }

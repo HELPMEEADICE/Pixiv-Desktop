@@ -1441,7 +1441,17 @@ export component AppWindow inherits Window {
                         // paints exactly the pixels it painted before (U30).
                         property <length> bar-height:
                             Theme.notice-line-height * 2 + Theme.space-1 * 2;
-                        y: parent.height - self.bar-height - Theme.space-4;
+                        // A3: the batch bar floats at the page's own bottom on 首页,
+                        // 发现 / 排行榜 / 收藏 / 画师主页 — inside the box this bar is
+                        // anchored to — and both used to sit 60 px above it: the notice
+                        // covered select-all / download / bookmark / clear / done while
+                        // letting their clicks through, so a notice raised by a batch
+                        // download hid the bar that raised it. Subtraction rather than a
+                        // second anchor, so the offset is exactly one bar plus one step.
+                        y: parent.height - self.bar-height - Theme.notice-gap
+                            - (root.selection-mode
+                                ? Theme.batch-bar-height + Theme.space-2
+                                : 0px);
                         width: parent.width - Theme.space-4 * 2;
                         height: self.bar-height;
                         // U30: a sentence the shell says to the user is an alert, not

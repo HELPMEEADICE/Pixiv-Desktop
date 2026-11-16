@@ -290,6 +290,19 @@ export global Theme {
     /// the number, and this file is the only place a length may be written.
     out property <length> progress-rule-height: 3px;
 
+    // ---- round twelve (docs/OPTIMIZATION-PLAN-R12.md §2, track A) ----
+    /// The floating batch bar's own height. It was a literal in `BatchBar` and in the
+    /// three pages that reserve room for it, and the shell's notice bar has to know it
+    /// too: with the notice anchored at the bottom of the content area the two boxes
+    /// overlapped by 44 px, so a notice raised by a batch download covered the very
+    /// buttons that raised it. One token, read by the bar, by the three pages' spacers
+    /// and by the notice's own anchor.
+    out property <length> batch-bar-height: 48px;
+    /// The shell's notice bar sits this far above whatever is under it. It was `space-4`
+    /// written at the anchor; naming it is what lets the bar keep its distance from the
+    /// batch bar without a second literal.
+    out property <length> notice-gap: 16px;
+
     // ---- motion --------------------------------------------------------
     // Short and linear-ish: a desktop tool should never feel animated. Every
     // animation in the UI names one of these two, no `animate` carries a
