@@ -164,29 +164,34 @@ worse than one that says what it does not know.
    5s timer reads one registry DWORD (`AppsUseLightTheme`). It stops itself the moment a
    fixed theme is chosen. A push notification would need a raw window procedure, which
    this app does not have because it keeps the native frame.
-10. **The keyboard reaches every control, and the page still does not follow it.**
-    Round nine added a coverage assertion — every focusable `Button`, `ListItem` and
-    `Edit` must be walked by Tab or the page fails — and it promptly found three
-    controls per page that were focusable and unreachable (a duplicated search field,
-    the account button, the session field). Every page it could measure now walks every
-    one of them (`reached == required` on each), and the three novel pages joined that
-    set in round eleven. What is still wrong: focus does not scroll the page, so past
-    the fold a keyboard user tabs into artwork that is not on screen.
-    The seam exists (`IllustCard.gained-focus` → `card-focused(id)`) and the offset
-    needs the card's content-space position, which only the page can compute; that
-    component is next round's first item. Chips are real stops now — roving focus is
-    not expressible in Slint 1.18, because a `FocusScope` with `enabled: false` still
-    reports itself focusable — so a chip row costs one stop per chip.
+10. **The keyboard reaches every control, and the page follows it.** Round nine added
+    a coverage assertion — every focusable `Button`, `ListItem` and `Edit` must be
+    walked by Tab or the page fails — and it promptly found three controls per page that
+    were focusable and unreachable (a duplicated search field, the account button, the
+    session field). Every page it could measure now walks every one of them
+    (`reached == required` on each), and the three novel pages joined that set in round
+    eleven. Round eleven also closed what this limit used to report as missing:
+    `IllustCard.gained-focus` reports the card's position in the scroll body, the grid
+    adds its own offset, and the shell turns that into the scroll position — one
+    `Theme.space-3` of lead, never above the top, remembered per route, and ignored when
+    the card belongs to a page the user is not on
+    (`src/app/callbacks/feed.rs`, `card_scroll_offset`). What is still true: a chip row
+    costs one stop per chip — roving focus is not expressible in Slint 1.18, because a
+    `FocusScope` with `enabled: false` still reports itself focusable — and the offset
+    comes from the card's own `y`, so a work whose card is not in the loaded model does
+    not scroll.
 11. **1920×1080 at 150% DPI was not captured.** That needs a 2880×1620 physical client
    area and this screen is 2560×1600, so `tools/verify-icons.ps1` reports the clamp and
    skips instead of measuring a truncated frame. Every other size in the matrix was
    measured.
 12. **A resumed download starts its body again.** Pause frees the row's permit
-   immediately (the in-flight request is abandoned through the same cancellation a
-   cancel uses) and holds the row at its place in the queue, but nothing resumes over
-   HTTP Range: the body is fetched again from byte zero. That is why a resumed row
-   restarts rather than continues, and why a pause costs bandwidth on a metered
-   connection.
+   immediately — a running row is cancelled at the transport level, which is the only way
+   the permit comes back before the body does — and the row keeps its place in the queue,
+   so what was queued behind it stays behind it. Nothing resumes over HTTP Range: the
+   body is fetched again from byte zero, and the attempt's progress, rate and destination
+   go with it. `crates/pixiv-download/src/lib.rs` carries that state machine and
+   `worker.rs` the `paused` flag and `requeue`. That is why a resumed row restarts
+   rather than continues, and why a pause costs bandwidth on a metered connection.
 13. **Batch actions need a session.** Batch bookmark is a sequence of real
    `set_bookmark` calls and batch download a sequence of page lookups; without a signed-in
    session the first reports `Unauthorized` per row and the second falls back to each
