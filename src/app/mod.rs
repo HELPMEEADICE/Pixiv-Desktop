@@ -489,8 +489,10 @@ impl App {
         };
         let page = route.page;
 
-        let restore = |app: &App| {
-            let offset = app.stored_scroll(route);
+        // Split so a refresh can put back an offset it captured *before* the reload:
+        // reload_feed zeroes the stored entry, so reading it afterwards would
+        // restore the top of the page rather than the row the user was reading.
+        let put_scroll = |app: &App, offset: f32| {
             let ui = app.ui();
             if page == Destination::Home {
                 ui.set_home_scroll_y(offset);
@@ -498,6 +500,7 @@ impl App {
                 ui.set_grid_scroll_y(offset);
             }
         };
+        let restore = |app: &App| put_scroll(app, app.stored_scroll(route));
 
         match page {
             // The detail page is not a feed: it is re-shown from its own route,
@@ -580,6 +583,23 @@ impl App {
             }
         }
 
+        // The one page whose own content changes while the user is elsewhere (B6):
+        // record_view queues the work just opened to the same local table, so the
+        // history sheet a reader comes back to is one view stale. It is re-read - and
+        // the scroll is put back, because this is a refresh and not a navigation.
+        if destination_rereads(page) {
+            let offset = shared.borrow().stored_scroll(route);
+            App::reload_feed(shared);
+            {
+                let app = shared.borrow();
+                put_scroll(&app, offset);
+            }
+            let mut app = shared.borrow_mut();
+            app.remember_scroll(route, offset);
+            app.refresh_chrome();
+            return;
+        }
+
         if reuse_feed && restore_scroll {
             let app = shared.borrow();
             restore(&app);
@@ -615,16 +635,43 @@ const DISCOVERY_MAX_BATCHES: u32 = 12;
 #[cfg(test)]
 mod tests {
     use super::downloads::{sync_download_rows, to_download_rows};
-    use super::helpers::{history_illust, retry_url};
+    use super::helpers::{destination_rereads, history_illust, retry_url};
     use super::settings::describe_session_error;
     // Track B (docs/OPTIMIZATION-PLAN-R11.md §2.2) · the failure-honesty tests.
     use super::detail::{FollowState, detail_note, read_detail, toggle_allowed, viewer_page_count};
     use super::feed::{append_feed_page, rank_in, rank_table};
-    use crate::DownloadRow;
+    use crate::{Destination, DownloadRow};
     use pixiv_download::{DownloadRequest, DownloadTask, TaskState};
     use pixiv_types::domain::PageMeta;
     use slint::Model;
     use std::path::PathBuf;
+
+    /// B6 - the history page reads its table again on the way back.
+    ///
+    /// /load_page/'s reuse shortcut restored the scroll and returned, so the work the
+    /// reader had just opened - queued to the same table by record_view - was missing
+    /// until the page was left and re-entered. The plant that makes this red is
+    /// [destination_rereads] answering false, which is the rule it had.
+    #[test]
+    fn b6_history_reads_its_table_again_and_the_other_pages_do_not() {
+        assert!(
+            destination_rereads(Destination::History),
+            "the local table changed while the page was not on screen"
+        );
+        for page in [
+            Destination::Home,
+            Destination::Search,
+            Destination::Ranking,
+            Destination::Bookmarks,
+            Destination::Discovery,
+            Destination::Novels,
+        ] {
+            assert!(
+                !destination_rereads(page),
+                "{page:?} keeps the feed it already has"
+            );
+        }
+    }
 
     #[test]
     fn history_rows_build_cards_and_demo_rows_are_excluded() {

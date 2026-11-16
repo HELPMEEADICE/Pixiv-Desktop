@@ -334,6 +334,18 @@ pub(crate) enum ReplySurface {
     Profile(u64),
 }
 
+/// Must this destination read its source again even though a feed is loaded?
+///
+/// Every destination but one reuses what it already has: re-fetching a ranking or a
+/// search would lose the scroll for nothing, which is why /load_page/ restores
+/// instead of reloading. History is the exception, and the reason is that its source
+/// is a local table the app writes to *while the user is on another page*:
+/// record_view queues the work just opened, so the list the page shows on the way
+/// back is one work stale until the page is left and re-entered (B6).
+pub(crate) fn destination_rereads(page: Destination) -> bool {
+    page == Destination::History
+}
+
 /// Does a reply about one work still belong to the illustration page on screen?
 ///
 /// [`reply_lands`] answers "is this the same page"; the illustration page also has to
