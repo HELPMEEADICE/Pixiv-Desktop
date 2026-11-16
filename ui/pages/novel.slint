@@ -25,6 +25,9 @@ export component NovelPage inherits Rectangle {
     in property <NovelView> view;
     in property <[string]> tags: [];
     in property <[NovelChapter]> chapters: [];
+    /// Which chip holds the tag strip's single keyboard cursor (U6, the idiom
+    /// `home.slint`'s recommend-tags band already uses).
+    in-out property <int> tag-cursor: 0;
 
     callback scrolled(length);
     callback read();
@@ -165,6 +168,27 @@ export component NovelPage inherits Rectangle {
                                     }
                                 }
 
+                                // U2 (plan R10 §2.2): the author block was a click
+                                // target and nothing else — two TouchAreas and zero
+                                // roles on the whole page. One name, one action, and a
+                                // FocusScope *before* the TouchArea, exactly as
+                                // IllustCard orders its three pieces.
+                                accessible-role: AccessibleRole.button;
+                                accessible-label: root.view.account != ""
+                                    ? root.view.author + " (@" + root.view.account + ")"
+                                    : root.view.author;
+                                accessible-action-default => { root.open-author(); }
+
+                                key_focus := FocusScope {
+                                    key-pressed(e) => {
+                                        if (e.text == "\n" || e.text == " ") {
+                                            root.open-author();
+                                            return EventResult.accept;
+                                        }
+                                        EventResult.reject
+                                    }
+                                }
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.open-author(); }
@@ -205,28 +229,77 @@ export component NovelPage inherits Rectangle {
                         }
                     }
 
+                    // U6 + U11 (plan R10 §2.2).
+                    //
+                    // U6: this was 26 px of chip in a `clip: true` box around a bare
+                    // `Flickable` with both scrollbars off. Chips past the width could
+                    // not be wheel-scrolled (the flickable was drag-only and competed
+                    // with the page's own vertical drag), could not be reached by the
+                    // keyboard, and the drag gesture moved the page under the pointer.
+                    // The strip is now the shape `home.slint`'s recommend-tags band
+                    // already uses — a `ScrollView` with the chips' roving focus, so
+                    // Left/Right walk the row and Tab leaves it in one press — plus
+                    // the two arrow buttons a strip this short needs, because the
+                    // horizontal bar cannot be drawn on it: R9 §12d measured the bar
+                    // landing on the chip baseline.
+                    //
+                    // U11: the height was the literal 26 twice (container and the
+                    // flickable's `content-height`), unrelated to the chip it was
+                    // supposed to hold. It is now the chip row's own height, so a
+                    // taller `TagChip` can only make the band taller, never crop.
                     if root.tags.length > 0 : Rectangle {
-                        height: 26px;
-                        clip: true;
+                        height: chip-row.preferred-height;
                         background: transparent;
 
-                        ScrollView {
-                            width: 100%;
+                        IconButton {
+                            x: 0px;
+                            y: 0px;
+                            icon: "chevron-left";
+                            tip: "向左滚动标签";
+                            size: Theme.control-height-sm;
+                            row-height: Theme.control-height-sm;
+                            enabled: strip.content-x < 0px;
+                            clicked => {
+                                strip.content-x = min(0px, strip.content-x + strip.visible-width);
+                            }
+                        }
+
+                        strip := ScrollView {
+                            x: Theme.control-height-sm + Theme.space-1;
+                            width: max(0px, root.width - (Theme.control-height-sm + Theme.space-1) * 2);
                             height: 100%;
-                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
-                            Flickable {
-                                interactive: true;
-                                content-width: strip.preferred-width;
-                                content-height: 26px;
-                                strip := HorizontalLayout {
-                                    spacing: Theme.space-2;
-                                    for t[i] in root.tags : TagChip {
-                                        label: t;
-                                        index: i;
-                                        clicked => { root.open-tag(t); }
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                            chip-row := HorizontalLayout {
+                                spacing: Theme.space-2;
+                                alignment: start;
+                                for t[i] in root.tags : TagChip {
+                                    label: t;
+                                    index: i;
+                                    cursor: root.tag-cursor;
+                                    gained-focus(idx) => { root.tag-cursor = idx; }
+                                    move-cursor(d) => {
+                                        root.tag-cursor = Math.max(0, Math.min(
+                                            root.tags.length - 1, root.tag-cursor + d));
                                     }
+                                    clicked => { root.open-tag(t); }
                                 }
+                            }
+                        }
+
+                        IconButton {
+                            x: root.width - Theme.control-height-sm;
+                            y: 0px;
+                            icon: "chevron-right";
+                            tip: "向右滚动标签";
+                            size: Theme.control-height-sm;
+                            row-height: Theme.control-height-sm;
+                            enabled: strip.content-x > strip.visible-width - strip.content-width + 1px;
+                            clicked => {
+                                strip.content-x = max(
+                                    strip.visible-width - strip.content-width,
+                                    strip.content-x - strip.visible-width);
                             }
                         }
                     }
@@ -287,6 +360,26 @@ export component NovelPage inherits Rectangle {
                         border-radius: Theme.radius-sm;
                         background: c.current ? Theme.accent-subtle
                             : (row.has-hover ? Theme.layer-alt : transparent);
+
+                        // The second of the page's two anonymous hit surfaces (U2's
+                        // evidence): the chapter row was clickable and nothing else,
+                        // so the series list could not be walked at all. Named,
+                        // actionable, and focused the way every other row is.
+                        accessible-role: AccessibleRole.list-item;
+                        accessible-label: c.current
+                            ? "第 " + c.order + " 章：" + c.title + "（当前）"
+                            : "第 " + c.order + " 章：" + c.title;
+                        accessible-action-default => { root.open-chapter(c.id); }
+
+                        chapter_focus := FocusScope {
+                            key-pressed(e) => {
+                                if (e.text == "\n" || e.text == " ") {
+                                    root.open-chapter(c.id);
+                                    return EventResult.accept;
+                                }
+                                EventResult.reject
+                            }
+                        }
 
                         HorizontalLayout {
                             padding-left: Theme.space-2;

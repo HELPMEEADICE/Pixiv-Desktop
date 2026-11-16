@@ -30,6 +30,19 @@ component NovelRowView inherits Rectangle {
     border-radius: Theme.radius-md;
     background: ta.has-hover ? Theme.layer-alt : transparent;
 
+    // U1 (plan R10 §2.2): the row's only hit surface was a bare `TouchArea`, so it
+    // was unreachable by keyboard and anonymous in the UIA tree. Same three pieces
+    // as `IllustCard`: one role and one name on the row, Enter/Space as its
+    // default action, and the FocusScope declared *before* the TouchArea — a scope
+    // declared after it is the topmost input element and swallows the first press
+    // to take focus, so the row would need two clicks to open (`uiaudit` keeps
+    // that order).
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: root.entry.author != ""
+        ? root.entry.title + " · " + root.entry.author
+        : root.entry.title;
+    accessible-action-default => { root.open(root.entry.id); }
+
     HorizontalLayout {
         padding-left: Theme.space-2;
         padding-right: Theme.space-3;
@@ -95,6 +108,16 @@ component NovelRowView inherits Rectangle {
             role: TextRole.Caption;
             text: "#" + root.entry.id;
             color: Theme.text-tertiary;
+        }
+    }
+
+    key_focus := FocusScope {
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") {
+                root.open(root.entry.id);
+                return EventResult.accept;
+            }
+            EventResult.reject
         }
     }
 

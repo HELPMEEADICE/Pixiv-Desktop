@@ -539,6 +539,22 @@ component NovelBlockView inherits Rectangle {
             border-radius: Theme.radius-sm;
             background: link-row.has-hover ? Theme.layer-alt : transparent;
 
+            // A link row is a hit surface with a click handler; without a role it is
+            // absent from the UIA tree (the U1/U2 class, in the reader's own body).
+            accessible-role: AccessibleRole.button;
+            accessible-label: root.block.text;
+            accessible-action-default => { root.open-work(root.block.id); }
+
+            link_focus := FocusScope {
+                key-pressed(e) => {
+                    if (e.text == "\n" || e.text == " ") {
+                        root.open-work(root.block.id);
+                        return EventResult.accept;
+                    }
+                    EventResult.reject
+                }
+            }
+
             HorizontalLayout {
                 padding-left: Theme.space-2;
                 padding-right: Theme.space-2;
@@ -800,6 +816,38 @@ export component NovelReaderPage inherits Rectangle {
                 clicked => { root.next-chapter(); }
             }
 
+            // U12 (plan R10 §2.2): `prev-label` / `next-label` were declared,
+            // published on every reader value, and read by nothing — so the two
+            // arrows could not say which chapter they lead to, which is the one
+            // thing a reader wants before pressing them. Two caption lines in the
+            // toolbar's own 44 px band: the band keeps its height (two captions at
+            // the existing Caption role are shorter than that), the measure stays
+            // 160 px so a long chapter title elides instead of squeezing the centre
+            // column, and a neighbour that does not exist draws nothing rather than
+            // an empty line.
+            VerticalLayout {
+                width: Theme.control-height * 5;
+                alignment: center;
+                spacing: 0px;
+
+                if root.view.has-prev && root.view.prev-label != "" : Label {
+                    role: TextRole.Caption;
+                    text: "上一篇 · " + root.view.prev-label;
+                    color: Theme.text-tertiary;
+                    horizontal-alignment: left;
+                    overflow: elide;
+                    max-lines: 1;
+                }
+                if root.view.has-next && root.view.next-label != "" : Label {
+                    role: TextRole.Caption;
+                    text: "下一篇 · " + root.view.next-label;
+                    color: Theme.text-tertiary;
+                    horizontal-alignment: left;
+                    overflow: elide;
+                    max-lines: 1;
+                }
+            }
+
             VerticalLayout {
                 alignment: center;
                 spacing: 0px;
@@ -899,6 +947,10 @@ export component NovelReaderPage inherits Rectangle {
         background: transparent;
 
         scrim := TouchArea {
+            // The panel's dismissal backdrop: pointer-only until now, and nameless.
+            accessible-role: AccessibleRole.button;
+            accessible-label: "关闭阅读设置";
+            accessible-action-default => { root.toggle-settings(); }
             clicked => { root.toggle-settings(); }
         }
     }
