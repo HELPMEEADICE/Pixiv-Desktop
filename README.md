@@ -297,11 +297,11 @@ cargo test --workspace --locked              # the run prints its own case count
                                             # rules over ui/*.slint live in src/uiaudit.rs; the
                                             # live suite returns early without PIXIV_LIVE_PHPSESSID
                                             # instead of failing, so a green run names that number
-cargo build --release
+cargo build --release --locked
 
 # lint (see limit 2 for why not `cargo clippy`)
 $env:RUSTC_WORKSPACE_WRAPPER="C:\msys64\ucrt64\bin\clippy-driver.exe"
-cargo check --workspace --all-targets
+cargo check --workspace --all-targets --locked
 ```
 
 `.github/workflows/ci.yml` runs the host-independent gates on every push: `cargo fmt`

@@ -54,8 +54,14 @@
 # as gates. The UI section now runs a11y, visual, focus, dpi, icons and layout; the
 # selftest runs in the non-UI flow, because it needs no desktop.
 #
-# G19: the three cargo steps pass --locked, so a stale Cargo.lock fails here instead
-# of passing locally and failing on a CI runner that resolves the graph.
+# G19: every cargo command that resolves the dependency graph passes --locked, so a
+# stale Cargo.lock fails here instead of passing locally and failing on a CI runner that
+# resolves the graph. The one command without it is `cargo fmt`, which is a rustfmt
+# wrapper and takes no lock at all; that exemption is written down here because
+# tools/selftest-gates.ps1 case locked-cargo reads this file and would otherwise have to
+# guess. (Round twelve removed the count that used to stand in this sentence: two of the
+# six cargo invocations did not carry --locked, and a number in a comment is a number
+# nobody re-measures - G35.)
 #
 # -Ui is opt-in because it needs an interactive desktop: it launches the app,
 # reads the UI Automation tree, presses real Tab keys and captures the screen. On
@@ -315,7 +321,7 @@ if ($Ui) {
     # The two harnesses drive target/debug, which the release gate above does not
     # produce, so build it here rather than assuming it is current.
     Invoke-Gate "cargo build (debug, for the capture harness)" {
-        cargo build 2>&1 | Select-Object -Last 2 | Out-Host
+        cargo build --locked 2>&1 | Select-Object -Last 2 | Out-Host
     } | Out-Null
     Invoke-Gate "tools/verify-a11y.ps1" {
         pwsh -File tools/verify-a11y.ps1 2>&1 | Out-Host
@@ -350,7 +356,7 @@ if ($Ui) {
 # ---- 6. the shipped artefact. Last, because it is by far the slowest. ----
 if (-not $SkipBuild) {
     Invoke-Gate "cargo build --release" {
-        cargo build --release 2>&1 | Select-Object -Last 3 | Out-Host
+        cargo build --release --locked 2>&1 | Select-Object -Last 3 | Out-Host
     } | Out-Null
 }
 

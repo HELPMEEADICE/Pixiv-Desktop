@@ -251,6 +251,41 @@ $run = Invoke-VisualGate -Case $case
 $row = @($run.Output -split "\r?\n" | Where-Object { $_ -match "^\s+home\s+light" }) -join " / "
 Add-Case -Name "erase" -Wanted "exit 1 and DIFF" -Ok ($run.Code -eq 1 -and $run.Output -match "DIFF") -Evidence ("exit={0} {1}" -f $run.Code, $row.Trim())
 
+# ---- case locked-cargo: G19/E5 - every cargo command that resolves the graph locks ----
+# Read, not run: proving it live needs a stale Cargo.lock, and Cargo.lock is not this
+# script's to bend. What is decided is the shape of tools/gates.ps1 - each invocation
+# that resolves the dependency graph carries --locked, so a lock file that would not
+# resolve fails here exactly as it fails on a CI runner. The one exemption is `cargo
+# fmt`, a rustfmt wrapper that takes no lock; it is named, not silently allowed, because
+# a rule with an invisible exception is a rule that stops being read.
+# The control appends the line round twelve removed, so a scan that matched nothing
+# cannot satisfy the case.
+function Find-UnlockedCargo {
+    param([string]$Text)
+    $hits = New-Object System.Collections.Generic.List[string]
+    $number = 0
+    foreach ($line in ($Text -split "\r?\n")) {
+        $number++
+        $t = $line.Trim()
+        if ($t -eq "" -or $t -like "#*") { continue }
+        # A gate's *name* is not a command: tools/gates.ps1 names each row after the
+        # command it runs ("cargo test --workspace"), and the name carries no flags.
+        # This rule therefore reads the invocation lines, which is the shape that file
+        # uses throughout - one command per line, inside the block.
+        if ($t -like "Invoke-Gate*") { continue }
+        if ($t -notmatch 'cargo(\.exe)?["\)]*\s+(build|check|test|clippy|run)\b') { continue }
+        if ($t -match '\bfmt\b') { continue }
+        if ($t -match '--locked') { continue }
+        $hits.Add(("line {0}: {1}" -f $number, $t))
+    }
+    return $hits.ToArray()
+}
+$gatesOnce = Get-Content $GatesScript -Raw
+$unlockedNow = @(Find-UnlockedCargo -Text $gatesOnce)
+$unlockedPlanted = @(Find-UnlockedCargo -Text ($gatesOnce + [Environment]::NewLine + 'cargo build --release 2>&1 | Out-Host' + [Environment]::NewLine))
+$unlockedShown = if ($unlockedNow.Count) { $unlockedNow -join " | " } else { "none" }
+Add-Case -Name "locked-cargo" -Wanted "every graph-resolving cargo step in tools/gates.ps1 passes --locked; fmt exempt" -Ok ($unlockedNow.Count -eq 0 -and $unlockedPlanted.Count -eq 1) -Evidence ("unlocked={0} [{1}]; planted control={2}" -f $unlockedNow.Count, $unlockedShown, $unlockedPlanted.Count)
+
 # ---- case blob: a 12x12 icon-sized difference must not fit inside the budget ----
 # 144 px on a 1536x1152 capture is 0.0081 %, which the percentage budget (0.02 % =
 # 354 px) admits with room to spare. This is the case the absolute pixel ceiling
