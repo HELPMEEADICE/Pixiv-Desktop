@@ -11,9 +11,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
         Ok(app) => Rc::new(RefCell::new(app)),
         Err(error) => {
             tracing::error!(%error, "no history store could be opened; the window reports it");
-            let message = format!(
-                "无法打开本地数据库：{error}。请检查数据目录是否可写，然后重新启动。"
-            );
+            let message =
+                format!("无法打开本地数据库：{error}。请检查数据目录是否可写，然后重新启动。");
             // The home page is the destination this window starts on, and each of its
             // bands draws its own state: the reason has to be on all four, or the only
             // thing a user sees is a set of skeletons that never fill (T8).

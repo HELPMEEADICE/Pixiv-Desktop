@@ -980,7 +980,9 @@ mod tests {
         assert!(s.downloads(50).unwrap().is_empty());
         assert_eq!(s.stats().unwrap().download_entries, 0);
 
-        let first = s.insert_download(&download("700000001", 0, 1_700_000_000)).unwrap();
+        let first = s
+            .insert_download(&download("700000001", 0, 1_700_000_000))
+            .unwrap();
         s.insert_download(&download("700000001", 1, 1_700_000_001))
             .unwrap();
         s.insert_download(&download("700000002", 0, 1_700_000_002))
@@ -1009,10 +1011,7 @@ mod tests {
             .into_iter()
             .map(|row| format!("{}:{}", row.illust_id, row.page_index))
             .collect();
-        assert_eq!(
-            order,
-            words(&["700000002:0", "700000001:1", "700000001:0"])
-        );
+        assert_eq!(order, words(&["700000002:0", "700000001:1", "700000001:0"]));
         assert!(s.downloads(0).unwrap().is_empty(), "a zero limit is empty");
 
         // The row that comes back is the row that went in, field for field.
@@ -1032,7 +1031,11 @@ mod tests {
         assert_eq!(s.downloads(50).unwrap().len(), 2);
         assert_eq!(s.stats().unwrap().download_entries, 2);
         s.delete_download(first).unwrap();
-        assert_eq!(s.stats().unwrap().download_entries, 2, "delete twice is fine");
+        assert_eq!(
+            s.stats().unwrap().download_entries,
+            2,
+            "delete twice is fine"
+        );
     }
 
     #[test]

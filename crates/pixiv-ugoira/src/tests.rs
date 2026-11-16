@@ -651,7 +651,9 @@ fn export_ceiling_is_two_hundred_fifty_six_mebibytes() {
 #[test]
 fn export_gif_stops_at_the_ceiling_with_an_encode_error() {
     let film = film(&[200, 100, 300]);
-    let gif = film.export_gif().expect("a legitimate film is under the ceiling");
+    let gif = film
+        .export_gif()
+        .expect("a legitimate film is under the ceiling");
     assert!((gif.len() as u64) < MAX_EXPORT_BYTES);
 
     // A ceiling the header alone cannot fit: the writer refuses and the error is
@@ -663,7 +665,10 @@ fn export_gif_stops_at_the_ceiling_with_an_encode_error() {
                 "the message names the ceiling: {message}"
             );
         }
-        other => panic!("expected an Encode refusal, got {:?}", other.map(|g| g.len())),
+        other => panic!(
+            "expected an Encode refusal, got {:?}",
+            other.map(|g| g.len())
+        ),
     }
 }
 

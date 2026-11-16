@@ -80,9 +80,11 @@ impl PixivError {
             Self::RateLimited(_) => true,
             Self::Http { status, .. } => *status == 429 || *status >= 500,
             Self::Api(_) | Self::Decode(_) | Self::Io(_) => false,
-            Self::Unauthorized | Self::Forbidden | Self::NotFound(_) | Self::Cancelled | Self::Other(_) => {
-                false
-            }
+            Self::Unauthorized
+            | Self::Forbidden
+            | Self::NotFound(_)
+            | Self::Cancelled
+            | Self::Other(_) => false,
         }
     }
 }

@@ -311,8 +311,7 @@ impl UgoiraFilm {
         let frames = frames
             .into_iter()
             .map(|frame| {
-                let rgba =
-                    area_average(&frame.rgba, source_width, source_height, width, height);
+                let rgba = area_average(&frame.rgba, source_width, source_height, width, height);
                 FilmFrame {
                     file: frame.file,
                     // Timing is metadata; a smaller frame has the same delay.
@@ -376,9 +375,7 @@ impl UgoiraFilm {
                 refused: Arc::clone(&ceiling_hit),
             };
             let mut encoder = GifEncoder::new(&mut writer);
-            encoder
-                .set_repeat(Repeat::Infinite)
-                .map_err(encode_error)?;
+            encoder.set_repeat(Repeat::Infinite).map_err(encode_error)?;
             for frame in &self.frames {
                 // The encoder needs an owned buffer, so this is the one place the
                 // film is copied; the copy is dropped as soon as it is encoded.

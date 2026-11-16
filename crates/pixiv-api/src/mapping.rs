@@ -1482,10 +1482,7 @@ mod tests {
             PixivError::Unauthorized
         ));
         // A 403 asks for the account that owns the route, not for a session.
-        assert!(matches!(
-            map_status_error(403, ""),
-            PixivError::Forbidden
-        ));
+        assert!(matches!(map_status_error(403, ""), PixivError::Forbidden));
         // A 400 carrying Pixiv's own message keeps *both*: the sentence is
         // Pixiv's, and the status stays on the error. It used to arrive as
         // `Api(message)`, a variant with no status in it, so the caller could not

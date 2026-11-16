@@ -99,7 +99,9 @@ impl PriorityGate {
             state.waiters.swap_remove(pos)
         };
         // The lock is gone here on purpose - see the doc comment above.
-        if let Err(returned) = waiter.tx.send(GatePermit { gate: Some(Arc::clone(self)) }) {
+        if let Err(returned) = waiter.tx.send(GatePermit {
+            gate: Some(Arc::clone(self)),
+        }) {
             // Dropping it *is* the re-entry: the slot goes to the next waiter, or
             // back to the pool. Nothing is lost either way.
             drop(returned);

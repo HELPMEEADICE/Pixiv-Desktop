@@ -326,8 +326,8 @@ impl App {
                     csrf_token: account.csrf_token.clone(),
                 };
                 if let Err(error) = crate::session::save(&data_dir, &verified) {
-                tracing::warn!(%error, "verified session could not be saved");
-            }
+                    tracing::warn!(%error, "verified session could not be saved");
+                }
                 (account, verified)
             });
             on_ui(move |shared| {

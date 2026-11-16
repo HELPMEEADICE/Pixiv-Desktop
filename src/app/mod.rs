@@ -67,9 +67,8 @@ use crate::layout::{self, GridGeometry};
 use crate::route::{History, Route, RouteHistory, RouteParam};
 use crate::{
     AppWindow, Destination, DownloadRow, IllustItem, LocalRow, NovelBlock, NovelChapter, NovelRow,
-    NovelView,
-    ProfileStatItem, ReaderView, RecommendTagItem, RecommendUserItem, SuggestionItem, Theme,
-    ThemeMode, Tip, ViewerPage,
+    NovelView, ProfileStatItem, ReaderView, RecommendTagItem, RecommendUserItem, SuggestionItem,
+    Theme, ThemeMode, Tip, ViewerPage,
 };
 
 /// Real in-memory cache budget, in MiB. Settings displays this value, so the page
@@ -619,7 +618,7 @@ mod tests {
     use super::helpers::{history_illust, retry_url};
     use super::settings::describe_session_error;
     // Track B (docs/OPTIMIZATION-PLAN-R11.md §2.2) · the failure-honesty tests.
-    use super::detail::{detail_note, read_detail, toggle_allowed, viewer_page_count, FollowState};
+    use super::detail::{FollowState, detail_note, read_detail, toggle_allowed, viewer_page_count};
     use super::feed::{append_feed_page, rank_in, rank_table};
     use crate::DownloadRow;
     use pixiv_download::{DownloadRequest, DownloadTask, TaskState};
@@ -1088,11 +1087,14 @@ mod tests {
     /// tree; on this one it is a None that on_ui turns into one dropped result.
     #[test]
     fn t8_a_window_that_is_gone_yields_no_handle() {
-        use slint::ComponentHandle;
         use super::helpers::live_window;
+        use slint::ComponentHandle;
         let live = crate::AppWindow::new().expect("a component, before it is shown");
         let weak = live.as_weak();
-        assert!(live_window(&weak).is_some(), "a window that exists is handed out");
+        assert!(
+            live_window(&weak).is_some(),
+            "a window that exists is handed out"
+        );
         drop(live);
         assert!(
             live_window(&weak).is_none(),
@@ -1114,7 +1116,10 @@ mod tests {
             "a click that arrives while one is in flight is dropped"
         );
         busy = false;
-        assert!(toggle_allowed(busy), "the slot is free once the reply lands");
+        assert!(
+            toggle_allowed(busy),
+            "the slot is free once the reply lands"
+        );
     }
 
     // =====================================================================
@@ -1354,12 +1359,13 @@ mod tests {
                 let Some(shape) = g41_shape(line) else {
                     continue;
                 };
-                match G41_ALLOWED
-                    .iter()
-                    .position(|(scope, needle, _)| relative.contains(scope) && line.contains(needle))
-                {
+                match G41_ALLOWED.iter().position(|(scope, needle, _)| {
+                    relative.contains(scope) && line.contains(needle)
+                }) {
                     Some(slot) => used[slot] = true,
-                    None => unlisted.push(format!("{relative}:{}: {trimmed}  [{shape}]", index + 1)),
+                    None => {
+                        unlisted.push(format!("{relative}:{}: {trimmed}  [{shape}]", index + 1))
+                    }
                 }
             }
         }

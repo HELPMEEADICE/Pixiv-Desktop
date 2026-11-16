@@ -649,7 +649,9 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
             .expect("pragma_index_info");
-        let rows = stmt.query_map(params![name], |row| row.get::<_, String>(0)).unwrap();
+        let rows = stmt
+            .query_map(params![name], |row| row.get::<_, String>(0))
+            .unwrap();
         rows.map(|row| row.unwrap()).collect()
     }
 

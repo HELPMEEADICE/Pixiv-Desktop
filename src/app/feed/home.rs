@@ -294,7 +294,12 @@ impl App {
 
         let (page, mode, cursor, epoch) = {
             let app = shared.borrow();
-            (app.page, app.mode, next_page_cursor(app.page_cursor), app.epoch)
+            (
+                app.page,
+                app.mode,
+                next_page_cursor(app.page_cursor),
+                app.epoch,
+            )
         };
 
         match mode {

@@ -293,7 +293,11 @@ impl App {
             // The button's label is a claim about the artist, so it is only drawn
             // from a read that actually answered (T1).
             ui.set_detail_following(following.known().unwrap_or(false));
-            ui.set_detail_message(detail_note(pages_failed, following).unwrap_or_default().into());
+            ui.set_detail_message(
+                detail_note(pages_failed, following)
+                    .unwrap_or_default()
+                    .into(),
+            );
             ui.set_detail_ugoira_hint(
                 if illust.kind == IllustKind::Ugoira {
                     "正在准备内置播放；也能导出为 GIF 保存在下载目录。"

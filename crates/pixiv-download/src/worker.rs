@@ -345,9 +345,7 @@ impl Inner {
             .iter()
             .filter(|record| !record.state.is_terminal())
             .filter(|record| Some(record.id) != except)
-            .find(|record| {
-                same_destination(&Self::destination_of(config, record), destination)
-            })
+            .find(|record| same_destination(&Self::destination_of(config, record), destination))
             .map(|record| record.id)
     }
 
@@ -535,9 +533,8 @@ impl Inner {
             let destination = Self::destination_of(&config, &queue.records[position]);
             match Self::clash(&queue, &config, &destination, Some(id)) {
                 Some(owner) => {
-                    queue.records[position].state = TaskState::Failed(format!(
-                        "目标文件已被任务 {owner} 占用，无法重新排队"
-                    ));
+                    queue.records[position].state =
+                        TaskState::Failed(format!("目标文件已被任务 {owner} 占用，无法重新排队"));
                 }
                 None => {
                     queue.records[position].requeue();
@@ -1607,7 +1604,11 @@ mod tests {
 
         let queued = manager.tasks();
         let first = queued.iter().find(|t| t.id == ids[0]).expect("first row");
-        assert_eq!(first.state, TaskState::Queued, "the first request is the owner");
+        assert_eq!(
+            first.state,
+            TaskState::Queued,
+            "the first request is the owner"
+        );
         let second = queued.iter().find(|t| t.id == ids[1]).expect("second row");
         match &second.state {
             TaskState::Failed(reason) => {
@@ -1638,7 +1639,10 @@ mod tests {
         let first = tasks.iter().find(|t| t.id == ids[0]).expect("first row");
         assert_eq!(first.state, TaskState::Completed, "{tasks:?}");
         assert!(
-            matches!(tasks.iter().find(|t| t.id == ids[1]).map(|t| &t.state), Some(TaskState::Failed(_))),
+            matches!(
+                tasks.iter().find(|t| t.id == ids[1]).map(|t| &t.state),
+                Some(TaskState::Failed(_))
+            ),
             "the refused row never runs: {tasks:?}"
         );
         let published = std::fs::read(dir.join("42.jpg")).expect("the file was published");
@@ -1695,7 +1699,11 @@ mod tests {
             .into_iter()
             .find(|task| task.id == second[0])
             .expect("the owner is still there");
-        assert_eq!(owner.state, TaskState::Queued, "the owner was not disturbed");
+        assert_eq!(
+            owner.state,
+            TaskState::Queued,
+            "the owner was not disturbed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -857,7 +857,9 @@ impl App {
             // One query, not one per row: the position is joined to the entry it
             // belongs to (F4), so the list and the progress rule under it come from
             // the same statement and cannot disagree about which novel is first.
-            let rows = store.recent_rows_with_progress(RECENT_KEEP).unwrap_or_default();
+            let rows = store
+                .recent_rows_with_progress(RECENT_KEEP)
+                .unwrap_or_default();
             on_ui(move |shared| {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;

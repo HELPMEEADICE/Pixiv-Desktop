@@ -158,7 +158,11 @@ pub(crate) fn install(app: &Shared) {
             let Ok(work_id) = id.as_str().parse::<u64>() else {
                 return;
             };
-            if !app.items.iter().any(|work| work.id == pixiv_types::Id(work_id)) {
+            if !app
+                .items
+                .iter()
+                .any(|work| work.id == pixiv_types::Id(work_id))
+            {
                 return;
             }
             let offset = card_scroll_offset(y, FOCUS_LEAD);
@@ -252,9 +256,21 @@ mod tests {
 
     #[test]
     fn a_focused_card_scrolls_in_with_one_lead_step_and_never_past_the_top() {
-        assert_eq!(card_scroll_offset(0.0, 12.0), 0.0, "the first card moves nothing");
-        assert_eq!(card_scroll_offset(6.0, 12.0), 0.0, "inside the lead, still nothing");
-        assert_eq!(card_scroll_offset(212.0, 12.0), -200.0, "one lead above the card");
+        assert_eq!(
+            card_scroll_offset(0.0, 12.0),
+            0.0,
+            "the first card moves nothing"
+        );
+        assert_eq!(
+            card_scroll_offset(6.0, 12.0),
+            0.0,
+            "inside the lead, still nothing"
+        );
+        assert_eq!(
+            card_scroll_offset(212.0, 12.0),
+            -200.0,
+            "one lead above the card"
+        );
         assert_eq!(
             card_scroll_offset(f32::NAN, 12.0),
             0.0,

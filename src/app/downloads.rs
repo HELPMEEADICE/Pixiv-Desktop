@@ -107,10 +107,7 @@ pub(crate) struct LocalRecord {
 /// gone" without a filesystem, the same shape `snapshot_downloads` takes its
 /// source in.
 #[allow(dead_code)] // read by the band, once its binding exists (see `LocalRecord`)
-pub(crate) fn local_row(
-    record: &DownloadRecord,
-    exists: impl FnOnce(&str) -> bool,
-) -> LocalRecord {
+pub(crate) fn local_row(record: &DownloadRecord, exists: impl FnOnce(&str) -> bool) -> LocalRecord {
     LocalRecord {
         id: i32::try_from(record.id).unwrap_or(i32::MAX),
         title: record.title.clone(),
@@ -1170,7 +1167,10 @@ mod tests {
 
         let request = redownload_request(&stored, &pages).expect("page 1 exists");
         assert_eq!(request.illust_id, "700000001");
-        assert_eq!(request.page_index, 1, "the page the record names, not page 0");
+        assert_eq!(
+            request.page_index, 1,
+            "the page the record names, not page 0"
+        );
         assert_eq!(request.page_count, 3);
         assert_eq!(request.url, "demo://illust/700000001/801_p1.png");
         assert_eq!(request.extension, "png");
@@ -1185,7 +1185,10 @@ mod tests {
         // A work that lost the page falls back to the first one rather than
         // queueing a URL that does not exist; an empty page list records nothing.
         let gone = record(9, "700000001", 7, 1_700_000_000);
-        assert_eq!(redownload_request(&gone, &pages).map(|r| r.page_index), Some(0));
+        assert_eq!(
+            redownload_request(&gone, &pages).map(|r| r.page_index),
+            Some(0)
+        );
         assert!(redownload_request(&stored, &[]).is_none());
     }
 

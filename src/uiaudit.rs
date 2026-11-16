@@ -1613,7 +1613,6 @@ mod tests {
     // Round eleven (docs/OPTIMIZATION-PLAN-R11.md §6, track A)
     // -----------------------------------------------------------------------
 
-
     /// The code on a block's opening line, before its `{`.
     ///
     /// `ElementBlock` records where a block starts, not what announced it, and the two
@@ -1833,7 +1832,11 @@ last in its component:\n{}",
             theme.lines().find_map(|line| {
                 let code = line.split("//").next().unwrap_or("").trim();
                 let rest = code.strip_prefix(&format!("out property <length> {name}: "))?;
-                rest.trim_end_matches(';').trim().strip_suffix("px")?.parse().ok()
+                rest.trim_end_matches(';')
+                    .trim()
+                    .strip_suffix("px")?
+                    .parse()
+                    .ok()
             })
         };
         let mut steps = Vec::new();
@@ -1882,7 +1885,10 @@ last in its component:\n{}",
                     .or_else(|| bare_px(code, "padding-top"))
                     .or_else(|| bare_px(code, "padding-bottom"));
                 if let Some(value) = spacing {
-                    if value > 0.0 && steps.iter().any(|step| (*step - value).abs() < f32::EPSILON)
+                    if value > 0.0
+                        && steps
+                            .iter()
+                            .any(|step| (*step - value).abs() < f32::EPSILON)
                     {
                         let filed = FILED_WITH_ANOTHER_TRACK
                             .iter()
@@ -1945,10 +1951,9 @@ last in its component:\n{}",
     #[test]
     fn grid_widths_match_the_layout_model() {
         let theme = read(&ui_dir().join("theme.slint"));
-        let layout = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/layout.rs"),
-        )
-        .expect("the layout model must exist");
+        let layout =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/layout.rs"))
+                .expect("the layout model must exist");
         let last_number = |line: &str| -> f32 {
             let mut current = String::new();
             let mut runs: Vec<String> = Vec::new();
@@ -1986,7 +1991,9 @@ last in its component:\n{}",
                     .unwrap_or_else(|| panic!("layout.rs must declare {constant}")),
             );
             if (shown - enforced).abs() > f32::EPSILON {
-                mismatched.push(format!("Theme.{token}={shown} but layout::{constant}={enforced}"));
+                mismatched.push(format!(
+                    "Theme.{token}={shown} but layout::{constant}={enforced}"
+                ));
             }
         }
         assert!(
@@ -2019,7 +2026,6 @@ last in its component:\n{}",
         }
         None
     }
-
 
     /// The lines a block owns, i.e. its own declarations and not a child's.
     ///
@@ -2115,7 +2121,6 @@ last in its component:\n{}",
         );
     }
 
-
     /// Kebab-case to snake_case: `shell-height` is `get_shell_height` in Rust.
     fn snake(name: &str) -> String {
         name.replace('-', "_")
@@ -2149,7 +2154,9 @@ last in its component:\n{}",
                 if at == indent && after.trim_start().starts_with(':') {
                     continue;
                 }
-                if after.trim_start().starts_with("=> { }") || after.trim_start().starts_with("=> {}") {
+                if after.trim_start().starts_with("=> { }")
+                    || after.trim_start().starts_with("=> {}")
+                {
                     continue;
                 }
                 count += 1;
@@ -2193,17 +2200,32 @@ last in its component:\n{}",
         const THEME_READERS_ELSEWHERE: [(&str, &str); 8] = [
             ("reader-font-min", "src/uiaudit.rs pins it against prefs.rs"),
             ("reader-font-max", "src/uiaudit.rs pins it against prefs.rs"),
-            ("reader-measure-min", "src/uiaudit.rs pins it against prefs.rs"),
-            ("reader-measure-max", "src/uiaudit.rs pins it against prefs.rs"),
-            ("card-min-width", "grid_widths_match_the_layout_model pins it"),
-            ("card-max-width", "grid_widths_match_the_layout_model pins it"),
+            (
+                "reader-measure-min",
+                "src/uiaudit.rs pins it against prefs.rs",
+            ),
+            (
+                "reader-measure-max",
+                "src/uiaudit.rs pins it against prefs.rs",
+            ),
+            (
+                "card-min-width",
+                "grid_widths_match_the_layout_model pins it",
+            ),
+            (
+                "card-max-width",
+                "grid_widths_match_the_layout_model pins it",
+            ),
             // The brand colour may be a decorative fill and nothing may paint text or
             // glyphs with it, so `accent_is_decoration_only` forbids a reader on purpose.
             ("accent", "accent_is_decoration_only forbids a reader"),
             // A frozen seam for track D (plan §1/§4 F4): a 3px progress rule under a
             // partly-read row. It has no reader *until* F4 lands, and it may not be
             // invented at the call site then.
-            ("progress-rule-height", "frozen seam for track D, plan §4 F4"),
+            (
+                "progress-rule-height",
+                "frozen seam for track D, plan §4 F4",
+            ),
         ];
         let files: Vec<(String, String)> = page_files()
             .into_iter()
@@ -2303,7 +2325,10 @@ last in its component:\n{}",
                 })
             });
             if !read_somewhere {
-                offenders.push(format!("theme.slint:{}: token {declared} has no reader", index + 1));
+                offenders.push(format!(
+                    "theme.slint:{}: token {declared} has no reader",
+                    index + 1
+                ));
             }
         }
         assert!(
@@ -2319,7 +2344,8 @@ last in its component:\n{}",
 
     /// The declaration on a trimmed line, as (kind, name).
     fn declared_name(line: &str) -> Option<(&'static str, String)> {
-        if line.contains("component ") || line.starts_with("export ") || line.starts_with("import ") {
+        if line.contains("component ") || line.starts_with("export ") || line.starts_with("import ")
+        {
             return None;
         }
         let rest = line
@@ -2353,7 +2379,11 @@ last in its component:\n{}",
                 if name.is_empty() {
                     return None;
                 }
-                let kind = if prefix == "callback " { "callback" } else { "function" };
+                let kind = if prefix == "callback " {
+                    "callback"
+                } else {
+                    "function"
+                };
                 return Some((kind, name));
             }
         }
@@ -2364,7 +2394,11 @@ last in its component:\n{}",
     /// contract (the theme is two languages).
     fn rust_files() -> Vec<PathBuf> {
         let mut files = Vec::new();
-        collect_with_extension(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), "rs", &mut files);
+        collect_with_extension(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            "rs",
+            &mut files,
+        );
         files
     }
     /// G27 — widened from `uiaudit.rs:1514`: *every* fixed-size child of a horizontal row

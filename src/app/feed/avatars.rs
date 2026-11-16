@@ -222,8 +222,7 @@ impl App {
                 let Some(mut item) = column.row_data(row) else {
                     continue;
                 };
-                if item.author_avatar_url.as_str() != url
-                    || item.author_avatar_state == BAND_EMPTY
+                if item.author_avatar_url.as_str() != url || item.author_avatar_state == BAND_EMPTY
                 {
                     continue;
                 }
@@ -679,7 +678,10 @@ mod tests {
     #[test]
     fn t10_a_failed_avatar_parks_the_row_in_its_failure_state() {
         let url = "https://i.pximg.net/face.jpg";
-        let users = vec![user(1, Some(url)), user(2, Some("https://i.pximg.net/other.jpg"))];
+        let users = vec![
+            user(1, Some(url)),
+            user(2, Some("https://i.pximg.net/other.jpg")),
+        ];
         let rows: Vec<RecommendUserItem> = users
             .iter()
             .map(|user| RecommendUserItem {
