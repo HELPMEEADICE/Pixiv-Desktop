@@ -256,8 +256,10 @@ pwsh -File tools/verify-a11y.ps1          # -Report to measure without failing
 
 # ...and what those keystrokes produce on screen: presses Tab across three pages,
 # reads each focused element's rect from UI Automation and counts pixels of the
-# focus ring. Its captures are harness output under docs/screenshots/baseline/focus-*
-# and are untracked: the file it measures is always the fresh one in target/focus.
+# focus ring. Every capture is harness output under target/focus: the per-stop
+# reference it keeps is target/focus/baseline, and the frame it measures is always the
+# fresh one in target/focus/current. tools/gates.ps1 passes -BaselineDir explicitly for
+# the same reason - a gate must not write into the tree it is judging.
 pwsh -File tools/verify-focus.ps1          # -MinPixels to force the failure path
 
 # the DPI ladder, both halves: four real scale factors measured from the app's own
