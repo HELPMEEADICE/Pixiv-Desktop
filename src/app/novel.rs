@@ -147,6 +147,174 @@ impl NovelState {
     }
 }
 
+/// What one settings-panel edit did to the reader.
+///
+/// The three answers are the whole O5 split (plan R10 §2.3): most opcodes change
+/// what the `ReaderView` resolves to and nothing else, so the block model must be
+/// left alone; two of them are flattened into the rows' own text, so the model has
+/// to be replaced. `Reflowed` is the *only* path that touches `blocks` inside
+/// `NovelState::apply_edit`, which is what makes counting it the same thing as
+/// counting `rows_from` + `set_vec`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ReaderEdit {
+    /// An opcode this build does not have: no preference, no row and no store
+    /// write changed (O4).
+    Ignored,
+    /// The resolved view changed; the body rows did not.
+    Restyled,
+    /// The rows themselves changed, so the block model was rebuilt and replaced.
+    Reflowed,
+}
+
+/// Whether one settings opcode changes the rows' own text.
+///
+/// Exactly two do, because `rows_from` bakes them into the string it hands
+/// Slint: the ruby mode ("base（reading）" vs "base") and the first-line indent
+/// (a run of full-width spaces in front of each paragraph). Everything else —
+/// size, line height, tracking, weight, family, italic, alignment, separator,
+/// measure, margins, colours, paging, chrome, progress — is drawn by Slint from
+/// the resolved `ReaderView`, so rebuilding the model for it re-creates text that
+/// did not change. That was O5: changing the theme colour reset an 800-block
+/// model.
+fn reader_op_reflows(op: i32) -> bool {
+    matches!(op, 8 | 15)
+}
+
+impl NovelState {
+    /// Build the body rows from the document this state already holds.
+    ///
+    /// The one place rows are produced: the mount (`App::adopt_document`) and the
+    /// two reflowing opcodes, and nothing else. A colour edit therefore has nothing
+    /// to call.
+    pub(crate) fn build_body(&mut self) {
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        let rows = rows_from(document, &self.prefs);
+        self.blocks.set_vec(rows);
+    }
+
+    /// The URLs the built body needs decoded, in row order.
+    ///
+    /// Derived from the model rather than from the rows before they are pushed, so
+    /// there is one row list and one order (O5 moved the rebuild inside the state).
+    fn image_urls(
+        &self,
+        images: &std::collections::BTreeMap<String, parse::ImageInfo>,
+    ) -> Vec<String> {
+        self.blocks
+            .iter()
+            .filter(|row| row.kind == K_IMAGE)
+            .filter_map(|row| {
+                let info = images.get(row.id.as_str())?;
+                let url = if info.large.is_empty() {
+                    info.small.clone()
+                } else {
+                    info.large.clone()
+                };
+                if url.is_empty() { None } else { Some(url) }
+            })
+            .collect()
+    }
+
+    /// One settings-panel edit, applied to the preference model.
+    ///
+    /// The opcodes are the contract with ui/pages/novel-reader.slint's
+    /// ReaderSettings component, and values arrive as 0..1 ratios; the clamp lives
+    /// in the preference model, so an extreme slider position can only produce a
+    /// value it already allows.
+    ///
+    /// The answer says what the edit cost (see [`ReaderEdit`]), which is what keeps
+    /// a colour change from rebuilding the body.
+    ///
+    /// An unknown opcode changes **nothing** and answers `Ignored`, so the caller
+    /// writes no row and rebuilds no rows (plan R10 §2.3 O4). Guessing
+    /// `ReaderPrefs::default()` here — which is what this used to do — reset all
+    /// nineteen settings and persisted the reset over the user's row, so a panel
+    /// from a newer build talking to an older one would silently wipe the
+    /// reader's appearance. Being inert is the only answer that cannot lose data.
+    pub(crate) fn apply_edit(&mut self, op: i32, value: f32, text: &str) -> ReaderEdit {
+        let mut prefs = self.prefs.clone();
+        match op {
+            0 => prefs.theme = theme_from(value.round() as i32),
+            1 => prefs.custom_background = text.trim().to_string(),
+            2 => prefs.custom_ink = text.trim().to_string(),
+            3 => prefs.font_family = text.trim().to_string(),
+            4 => {
+                prefs.font_size = value_of(
+                    value,
+                    novel_prefs::MIN_FONT_SIZE,
+                    novel_prefs::MAX_FONT_SIZE,
+                )
+            }
+            5 => {
+                prefs.line_height = value_of(
+                    value,
+                    novel_prefs::MIN_LINE_HEIGHT,
+                    novel_prefs::MAX_LINE_HEIGHT,
+                )
+            }
+            6 => {
+                prefs.letter_spacing = value_of(
+                    value,
+                    novel_prefs::MIN_LETTER_SPACING,
+                    novel_prefs::MAX_LETTER_SPACING,
+                )
+            }
+            7 => {
+                prefs.paragraph_spacing = value_of(
+                    value,
+                    novel_prefs::MIN_PARAGRAPH_SPACING,
+                    novel_prefs::MAX_PARAGRAPH_SPACING,
+                )
+            }
+            8 => {
+                prefs.first_line_indent = value_of(
+                    value,
+                    novel_prefs::MIN_FIRST_LINE_INDENT,
+                    novel_prefs::MAX_FIRST_LINE_INDENT,
+                )
+            }
+            9 => {
+                prefs.margin_x =
+                    value_of(value, novel_prefs::MIN_MARGIN_X, novel_prefs::MAX_MARGIN_X)
+            }
+            10 => {
+                prefs.max_width = value_of(
+                    value,
+                    novel_prefs::MIN_MAX_WIDTH,
+                    novel_prefs::MAX_MAX_WIDTH,
+                )
+            }
+            11 => {
+                let index = value.round() as i32;
+                prefs.font_weight = WEIGHTS[index.clamp(0, 2) as usize];
+            }
+            12 => prefs.italic = value > 0.5,
+            13 => prefs.align = align_from(value.round() as i32),
+            14 => prefs.paragraph_rule = rule_from(value.round() as i32),
+            15 => {
+                prefs.ruby = if value > 0.5 {
+                    parse::RubyMode::Inline
+                } else {
+                    parse::RubyMode::Hidden
+                }
+            }
+            16 => prefs.paged = value > 0.5,
+            17 => prefs.show_progress = value > 0.5,
+            18 => prefs.hide_chrome = value > 0.5,
+            _ => return ReaderEdit::Ignored,
+        }
+        self.prefs = prefs.clamped();
+        if reader_op_reflows(op) {
+            self.build_body();
+            ReaderEdit::Reflowed
+        } else {
+            ReaderEdit::Restyled
+        }
+    }
+}
+
 /// A landing-page value with every field present and nothing loaded.
 fn empty_view() -> NovelView {
     NovelView {
@@ -1160,21 +1328,12 @@ impl App {
             })
             .collect();
         let document = parse::parse(&novel.body, &images);
-        let rows = rows_from(&document, &self.novel.prefs);
-        let urls: Vec<String> = rows
-            .iter()
-            .filter(|row| row.kind == K_IMAGE)
-            .filter_map(|row| {
-                let info = images.get(row.id.as_str())?;
-                if info.large.is_empty() {
-                    Some(info.small.clone())
-                } else {
-                    Some(info.large.clone())
-                }
-            })
-            .filter(|url| !url.is_empty())
-            .collect();
-        self.novel.blocks.set_vec(rows);
+        // One row-build site (O5): the mount builds the body here, and the only
+        // other caller is the two opcodes whose text changes. The URLs come from
+        // the model that was just built, so there is one row list in one order.
+        self.novel.document = Some(document);
+        self.novel.build_body();
+        let urls = self.novel.image_urls(&images);
         let title = novel.title.clone();
         let chapter_meta = novel
             .series
@@ -1206,7 +1365,6 @@ impl App {
             settings_open,
             app_dark,
         );
-        self.novel.document = Some(document);
         // A capture (and a manual test) can ask the reader to open at a position:
         // PIXIV_DESKTOP_READER_SCROLL=0.42 exercises the restore path without input.
         if let Ok(value) = std::env::var("PIXIV_DESKTOP_READER_SCROLL") {
@@ -1272,93 +1430,34 @@ impl App {
     /// the preference model, so an extreme slider position can only ever produce a
     /// value the model already allows.
     pub(crate) fn apply_reader_edit(&mut self, op: i32, value: f32, text: &str) {
-        let mut prefs = self.novel.prefs.clone();
-        match op {
-            0 => prefs.theme = theme_from(value.round() as i32),
-            1 => prefs.custom_background = text.trim().to_string(),
-            2 => prefs.custom_ink = text.trim().to_string(),
-            3 => prefs.font_family = text.trim().to_string(),
-            4 => {
-                prefs.font_size = value_of(
-                    value,
-                    novel_prefs::MIN_FONT_SIZE,
-                    novel_prefs::MAX_FONT_SIZE,
-                )
-            }
-            5 => {
-                prefs.line_height = value_of(
-                    value,
-                    novel_prefs::MIN_LINE_HEIGHT,
-                    novel_prefs::MAX_LINE_HEIGHT,
-                )
-            }
-            6 => {
-                prefs.letter_spacing = value_of(
-                    value,
-                    novel_prefs::MIN_LETTER_SPACING,
-                    novel_prefs::MAX_LETTER_SPACING,
-                )
-            }
-            7 => {
-                prefs.paragraph_spacing = value_of(
-                    value,
-                    novel_prefs::MIN_PARAGRAPH_SPACING,
-                    novel_prefs::MAX_PARAGRAPH_SPACING,
-                )
-            }
-            8 => {
-                prefs.first_line_indent = value_of(
-                    value,
-                    novel_prefs::MIN_FIRST_LINE_INDENT,
-                    novel_prefs::MAX_FIRST_LINE_INDENT,
-                )
-            }
-            9 => {
-                prefs.margin_x =
-                    value_of(value, novel_prefs::MIN_MARGIN_X, novel_prefs::MAX_MARGIN_X)
-            }
-            10 => {
-                prefs.max_width = value_of(
-                    value,
-                    novel_prefs::MIN_MAX_WIDTH,
-                    novel_prefs::MAX_MAX_WIDTH,
-                )
-            }
-            11 => {
-                let index = value.round() as i32;
-                prefs.font_weight = WEIGHTS[index.clamp(0, 2) as usize];
-            }
-            12 => prefs.italic = value > 0.5,
-            13 => prefs.align = align_from(value.round() as i32),
-            14 => prefs.paragraph_rule = rule_from(value.round() as i32),
-            15 => {
-                prefs.ruby = if value > 0.5 {
-                    parse::RubyMode::Inline
-                } else {
-                    parse::RubyMode::Hidden
-                }
-            }
-            16 => prefs.paged = value > 0.5,
-            17 => prefs.show_progress = value > 0.5,
-            18 => prefs.hide_chrome = value > 0.5,
-            _ => prefs = ReaderPrefs::default(),
+        // O4 (plan R10 §2.3): an opcode this build does not know is a no-op and
+        // stops here, before the write and before the reflow. The fallback used to
+        // be `ReaderPrefs::default()`, which wiped all nineteen settings and then
+        // persisted the wipe over the user's row.
+        //
+        // O5: the body is rebuilt by `apply_edit` itself, and only for the two
+        // opcodes whose text changes. Everything below therefore republishes the
+        // resolved view and nothing else.
+        if self.novel.apply_edit(op, value, text) == ReaderEdit::Ignored {
+            return;
         }
-        self.novel.prefs = prefs.clamped();
         self.save_prefs(false);
         self.rerender_reader();
     }
 
-    /// Re-render the body after a preference change and keep the place.
+    /// Re-render after a preference change and keep the place.
+    ///
+    /// O5: this used to rebuild the body rows for *every* edit, including the ones
+    /// that only change a colour, so a theme switch reset an 800-block model. The
+    /// rows are now rebuilt by `NovelState::apply_edit` for the two opcodes that
+    /// change their text and by nobody else; this function only republishes the
+    /// value the page draws from.
     ///
     /// The restore is what makes a font-size change feel like a reflow instead of a
     /// jump: the ratio the page last reported is applied again once the new layout
     /// exists, so the paragraph the user was reading stays under their eyes.
     fn rerender_reader(&mut self) {
         let ratio = self.novel.ratio;
-        if let Some(document) = self.novel.document.clone() {
-            let rows = rows_from(&document, &self.novel.prefs);
-            self.novel.blocks.set_vec(rows);
-        }
         let title = self.novel.reader.title.clone();
         let chapter_meta = self.novel.reader.chapter_meta.clone();
         let prev = self.novel.reader.prev_label.clone();
@@ -1698,6 +1797,204 @@ mod tests {
         assert_eq!(ratio_of(3.0, 4.0, 4.0), 0.0);
         assert!((value_of(0.5, 0.0, 10.0) - 5.0).abs() < f32::EPSILON);
         assert!((value_of(2.0, 0.0, 10.0) - 10.0).abs() < f32::EPSILON);
+    }
+
+    /// A preference set that differs from the default in **every** field, so a
+    /// reset is visible field by field instead of being masked by a coincidence.
+    fn exotic_prefs() -> ReaderPrefs {
+        ReaderPrefs {
+            font_family: "Source Han Serif".into(),
+            font_size: 26.0,
+            font_weight: 600,
+            italic: true,
+            line_height: 2.4,
+            letter_spacing: 1.5,
+            paragraph_spacing: 20.0,
+            first_line_indent: 2.0,
+            margin_x: 120.0,
+            max_width: 900.0,
+            align: novel_prefs::Align::Center,
+            paragraph_rule: novel_prefs::ParagraphRule::Rule,
+            theme: novel_prefs::ReaderTheme::Sepia,
+            custom_background: "#fffff0".into(),
+            custom_ink: "#101010".into(),
+            ruby: parse::RubyMode::Hidden,
+            hide_chrome: true,
+            show_progress: false,
+            paged: true,
+        }
+        .clamped()
+    }
+
+    #[test]
+    fn an_unknown_reader_opcode_is_inert_and_writes_nothing() {
+        // Plan R10 §2.3 O4, the whole acceptance: an opcode this build does not
+        // know must change no field and must not reach set_novel_setting. The
+        // fallback used to be ReaderPrefs::default(), which reset all nineteen
+        // settings and saved the reset over the user's row.
+        let mut state = NovelState::new();
+        state.prefs = exotic_prefs();
+        let before = state.prefs.clone();
+
+        // Exactly the shape of App::apply_reader_edit: one persistence write per
+        // opcode the state says it understood.
+        let mut writes = 0;
+        for op in [-1, 19, 23, 42, 99, i32::MAX] {
+            if state.apply_edit(op, 0.75, "wiped") != ReaderEdit::Ignored {
+                writes += 1;
+            }
+        }
+        assert_eq!(
+            writes, 0,
+            "an unknown opcode must not reach set_novel_setting"
+        );
+
+        // Nineteen fields, one assertion each, so a failure names what moved.
+        let after = &state.prefs;
+        assert_eq!(after.font_family, before.font_family, "font_family");
+        assert_eq!(after.font_size, before.font_size, "font_size");
+        assert_eq!(after.font_weight, before.font_weight, "font_weight");
+        assert_eq!(after.italic, before.italic, "italic");
+        assert_eq!(after.line_height, before.line_height, "line_height");
+        assert_eq!(
+            after.letter_spacing, before.letter_spacing,
+            "letter_spacing"
+        );
+        assert_eq!(
+            after.paragraph_spacing, before.paragraph_spacing,
+            "paragraph_spacing"
+        );
+        assert_eq!(
+            after.first_line_indent, before.first_line_indent,
+            "first_line_indent"
+        );
+        assert_eq!(after.margin_x, before.margin_x, "margin_x");
+        assert_eq!(after.max_width, before.max_width, "max_width");
+        assert_eq!(after.align, before.align, "align");
+        assert_eq!(
+            after.paragraph_rule, before.paragraph_rule,
+            "paragraph_rule"
+        );
+        assert_eq!(after.theme, before.theme, "theme");
+        assert_eq!(
+            after.custom_background, before.custom_background,
+            "custom_background"
+        );
+        assert_eq!(after.custom_ink, before.custom_ink, "custom_ink");
+        assert_eq!(after.ruby, before.ruby, "ruby");
+        assert_eq!(after.hide_chrome, before.hide_chrome, "hide_chrome");
+        assert_eq!(after.show_progress, before.show_progress, "show_progress");
+        assert_eq!(after.paged, before.paged, "paged");
+        assert_eq!(state.prefs, before, "the whole value, field for field");
+    }
+
+    #[test]
+    fn every_opcode_the_panel_sends_is_one_this_build_understands() {
+        // The other half of O4: the no-op must be reserved for opcodes that do not
+        // exist. If an arm were lost, the panel would go silent instead of wiping
+        // the settings, and this is the assertion that says so.
+        let mut state = NovelState::new();
+        state.prefs = exotic_prefs();
+        for op in 0..=18 {
+            assert!(
+                state.apply_edit(op, 0.5, "#123456") != ReaderEdit::Ignored,
+                "opcode {op} is one ReaderSettings sends"
+            );
+        }
+    }
+
+    /// A body with 800 blocks, one of them carrying ruby, so the two reflowing
+    /// opcodes have something to change.
+    fn eight_hundred_blocks() -> Document {
+        let mut body = String::new();
+        for i in 0..799 {
+            body.push_str(&format!("第{i}段。[[rb:漢字 > かんじ]]の行。\n\n"));
+        }
+        body.push_str("最后一段。");
+        parse::parse(&body, &std::collections::BTreeMap::new())
+    }
+
+    #[test]
+    fn a_restyle_keeps_the_body_model_and_a_reflow_rebuilds_it() {
+        // Plan R10 §2.3 O5, the acceptance as a count: on an 800-block document a
+        // colour edit must not rebuild the rows, ten consecutive drags must not
+        // either, and only the opcodes whose *text* changes may replace the model.
+        // `ReaderEdit::Reflowed` is the only answer that touches `blocks` inside
+        // `NovelState::apply_edit`, so counting it counts `rows_from` + `set_vec`.
+        let mut state = NovelState::new();
+        state.prefs = exotic_prefs();
+        state.document = Some(eight_hundred_blocks());
+        state.build_body();
+
+        let mut rebuilds = 0;
+        let count = |edit: ReaderEdit, rebuilds: &mut u32| {
+            if edit == ReaderEdit::Reflowed {
+                *rebuilds += 1;
+            }
+        };
+
+        // One theme change: the paper changes, the paragraphs do not.
+        let paper_before = reader_view(
+            &state.prefs,
+            0,
+            "",
+            &ReaderDoc {
+                title: "",
+                chapter_meta: "",
+                prev: "",
+                next: "",
+            },
+            false,
+            false,
+        )
+        .paper;
+        count(state.apply_edit(0, 2.0, ""), &mut rebuilds);
+        let paper_after = reader_view(
+            &state.prefs,
+            0,
+            "",
+            &ReaderDoc {
+                title: "",
+                chapter_meta: "",
+                prev: "",
+                next: "",
+            },
+            false,
+            false,
+        )
+        .paper;
+        assert_ne!(paper_after, paper_before, "the theme edit reached the view");
+        assert_eq!(rebuilds, 0, "a theme change rebuilt the body");
+
+        // Ten font-size events, i.e. one slider drag. None may rebuild.
+        for _ in 0..10 {
+            count(state.apply_edit(4, 0.62, ""), &mut rebuilds);
+        }
+        assert_eq!(rebuilds, 0, "ten drag events rebuilt the body");
+
+        // The indent is flattened into each paragraph's text: it must rebuild.
+        count(state.apply_edit(8, 0.5, ""), &mut rebuilds);
+        assert_eq!(rebuilds, 1, "the indent is baked into the rows");
+        let indented = state.blocks.row_data(0).expect("a first row");
+        assert!(
+            indented.text.starts_with('\u{3000}'),
+            "the rebuilt paragraph carries its indent: {:?}",
+            indented.text
+        );
+
+        // Ruby flattening is the other one.
+        count(state.apply_edit(15, 0.0, ""), &mut rebuilds);
+        assert_eq!(rebuilds, 2, "the ruby mode is baked into the rows");
+        let hidden = state.blocks.row_data(0).expect("a first row");
+        assert!(
+            !hidden.text.contains('（'),
+            "ruby hidden: {:?}",
+            hidden.text
+        );
+
+        // And a colour edit after all of that still does not.
+        count(state.apply_edit(1, 0.0, "#102030"), &mut rebuilds);
+        assert_eq!(rebuilds, 2, "a custom background rebuilt the body");
     }
 
     #[test]
