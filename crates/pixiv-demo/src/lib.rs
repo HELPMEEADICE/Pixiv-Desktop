@@ -14,6 +14,12 @@
 //! Artwork is generated procedurally at request time, so the repository ships no
 //! third-party imagery and there is no copyright question.
 //!
+//! The novels arrive the same way: one eight-chapter series, one standalone work
+//! and one `isLoginOnly` row whose body a session-less client may not read, with
+//! the first chapter's body carrying every marker the novel grammar knows. Their
+//! covers are `demo://` URLs like the illustrations', so the repository ships no
+//! novel imagery either.
+//!
 //! # Determinism
 //!
 //! The catalogue is a pure function of a single integer seed (`catalog::SEED`)
@@ -26,7 +32,8 @@ mod prng;
 mod render;
 
 use pixiv_types::{
-    Id, Illust, PageMeta, RankingKind, RankingRow, SearchQuery, SearchResult, UserProfile,
+    Id, Illust, Novel, NovelSeries, NovelSummary, PageMeta, RankingKind, RankingRow, SearchQuery,
+    SearchResult, UserProfile,
 };
 
 /// Scheme marking every demo-owned URL.
@@ -52,6 +59,21 @@ pub fn render_placeholder(width: u32, height: u32, seed: u64) -> Vec<u8> {
     render::render(width, height, seed)
 }
 
+/// One novel in the demo catalogue.
+///
+/// The row and the document are kept side by side because the two are not the
+/// same list: `isLoginOnly` says a row exists while its body may not be read, and
+/// `NovelSummary` has no field to carry that.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DemoNovel {
+    /// What a list surface draws: search hits, a series' chapters, an artist's work.
+    pub summary: NovelSummary,
+    /// The document, body included. `None` when the work cannot be opened.
+    pub detail: Option<Novel>,
+    /// The wire flag `isLoginOnly`: the row exists, the body does not.
+    pub is_login_only: bool,
+}
+
 /// The demo catalogue.
 #[derive(Clone, Debug, Default)]
 pub struct DemoCatalog {
@@ -59,6 +81,10 @@ pub struct DemoCatalog {
     pub(crate) illusts: Vec<Illust>,
     /// The artists, as the profile page wants them.
     pub(crate) artists: Vec<UserProfile>,
+    /// Every novel, in a stable id order.
+    pub(crate) novels: Vec<DemoNovel>,
+    /// The one novel series.
+    pub(crate) series: Vec<NovelSeries>,
     /// Tags for the discovery page, most used first.
     pub(crate) trending: Vec<String>,
 }
@@ -138,17 +164,50 @@ impl DemoCatalog {
     pub fn bookmarks(&self) -> SearchResult {
         catalog::bookmarks(self)
     }
+
+    /// Every novel row, in a stable id order: the eight chapters of the series,
+    /// the standalone work, then the row a session-less client may not open.
+    #[must_use]
+    pub fn novels(&self) -> Vec<DemoNovel> {
+        catalog::novels(self)
+    }
+
+    /// One novel with its body.
+    ///
+    /// `None` means the id is not in the catalogue **or** the work is
+    /// `isLoginOnly`: a row that cannot be read has no document to hand out.
+    #[must_use]
+    pub fn novel(&self, id: Id) -> Option<Novel> {
+        catalog::novel(self, id)
+    }
+
+    /// Series metadata, for the reader's chapter panel.
+    #[must_use]
+    pub fn novel_series(&self, id: Id) -> Option<NovelSeries> {
+        catalog::novel_series(self, id)
+    }
+
+    /// One series' chapters, in reading order.
+    #[must_use]
+    pub fn novel_chapters(&self, series: Id) -> Vec<DemoNovel> {
+        catalog::novel_chapters(self, series)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
+    use pixiv_novel::{BlockKind, ImageInfo, Span};
     use pixiv_types::{
-        Id, Illust, IllustKind, RankingKind, SearchQuery, SearchTarget, SortOrder, TypeFilter,
+        Id, Illust, IllustKind, NovelSummary, RankingKind, SearchQuery, SearchTarget, SortOrder,
+        TypeFilter,
     };
 
-    use super::{DEMO_MARKER, DEMO_SCHEME, DemoCatalog, is_demo_url, render_placeholder};
+    use super::{
+        DEMO_MARKER, DEMO_SCHEME, DemoCatalog, DemoNovel, is_demo_url, render_placeholder,
+    };
+    use crate::catalog::{NOVEL_COVER_SIDE, NOVEL_ID_BASE, NOVEL_SERIES_ID};
 
     fn catalogue() -> DemoCatalog {
         DemoCatalog::new()
@@ -692,5 +751,288 @@ mod tests {
         let single = render_placeholder(1, 1, 0);
         let decoded = image::load_from_memory(&single).expect("png decodes");
         assert_eq!((decoded.width(), decoded.height()), (1, 1));
+    }
+    /// Every chapter of the demo series, in reading order.
+    fn series_rows(catalog: &DemoCatalog) -> Vec<NovelSummary> {
+        catalog
+            .novel_chapters(Id(NOVEL_SERIES_ID))
+            .into_iter()
+            .map(|row| row.summary)
+            .collect()
+    }
+
+    #[test]
+    fn the_series_has_eight_chapters_in_reading_order() {
+        let catalog = catalogue();
+        let series = catalog
+            .novel_series(Id(NOVEL_SERIES_ID))
+            .expect("the series exists");
+        let rows = series_rows(&catalog);
+
+        assert_eq!(rows.len(), 8, "the series has {} chapters", rows.len());
+        assert_eq!(
+            series.total, 8,
+            "the header disagrees with the chapter list"
+        );
+        assert_eq!(series.first_novel, rows.first().map(|row| row.id));
+        assert_eq!(series.latest_novel, rows.last().map(|row| row.id));
+
+        // Order is 1..=8 with no gap and no repeat.
+        let orders: Vec<u32> = rows.iter().map(|row| row.series_order).collect();
+        assert_eq!(
+            orders,
+            (1..=8).collect::<Vec<u32>>(),
+            "orders are not 1..=8"
+        );
+
+        let titles: BTreeSet<&String> = rows.iter().map(|row| &row.title).collect();
+        assert_eq!(titles.len(), 8, "two chapters share a title");
+
+        for (index, row) in rows.iter().enumerate() {
+            let order = u32::try_from(index + 1).unwrap_or(0);
+            assert_eq!(row.id, Id(NOVEL_ID_BASE + u64::from(order)));
+            assert_eq!(row.series_id, Some(Id(NOVEL_SERIES_ID)));
+            assert_eq!(row.series_title, series.title);
+            assert_eq!(row.series_order, order);
+            assert!(
+                row.title.starts_with(DEMO_MARKER),
+                "unmarked {:?}",
+                row.title
+            );
+            assert!(row.character_count > 0, "chapter {order} has no text");
+        }
+
+        // The reader nav chain agrees with the list at both ends and in the middle.
+        let nav_of = |order: u64| {
+            catalog
+                .novel(Id(NOVEL_ID_BASE + order))
+                .expect("a chapter document")
+                .series
+                .expect("a chapter is in the series")
+        };
+        let first = nav_of(1);
+        assert_eq!(first.order, 1);
+        assert!(first.prev.is_none(), "chapter one has a previous chapter");
+        assert_eq!(first.next, Some(Id(NOVEL_ID_BASE + 2)));
+        assert!(first.prev_title.is_empty());
+
+        let middle = nav_of(4);
+        assert_eq!(middle.prev, Some(Id(NOVEL_ID_BASE + 3)));
+        assert_eq!(middle.next, Some(Id(NOVEL_ID_BASE + 5)));
+        assert!(middle.prev_title.starts_with(DEMO_MARKER));
+        assert!(middle.next_title.starts_with(DEMO_MARKER));
+
+        let last = nav_of(8);
+        assert_eq!(last.order, 8);
+        assert!(last.next.is_none(), "the last chapter has a next chapter");
+        assert_eq!(last.prev, Some(Id(NOVEL_ID_BASE + 7)));
+        assert!(last.next_title.is_empty());
+    }
+
+    #[test]
+    fn the_first_chapter_exercises_every_block_and_span_kind() {
+        let catalog = catalogue();
+        let chapter = catalog.novel(Id(NOVEL_ID_BASE + 1)).expect("chapter one");
+        let images: BTreeMap<String, ImageInfo> = chapter
+            .images
+            .iter()
+            .map(|image| {
+                (
+                    image.id.clone(),
+                    ImageInfo {
+                        small: image.small.clone(),
+                        large: image.large.clone(),
+                    },
+                )
+            })
+            .collect();
+        let document = pixiv_novel::parse(&chapter.body, &images);
+
+        for kind in [
+            BlockKind::Paragraph,
+            BlockKind::Heading,
+            BlockKind::Separator,
+            BlockKind::PageBreak,
+            BlockKind::Image,
+        ] {
+            assert!(
+                document.blocks.iter().any(|block| block.kind == kind),
+                "the fixture carries no {kind:?} block"
+            );
+        }
+
+        let mut ruby = 0_usize;
+        let mut work_ref: Option<String> = None;
+        let mut hrefs: Vec<String> = Vec::new();
+        for span in document.blocks.iter().flat_map(|block| &block.spans) {
+            match span {
+                Span::Ruby { base, reading } => {
+                    assert!(!base.is_empty() && !reading.is_empty(), "an empty ruby run");
+                    ruby += 1;
+                }
+                Span::WorkRef { id, .. } => work_ref = Some(id.clone()),
+                Span::Link { href, .. } => hrefs.push(href.clone()),
+                Span::Text(_) => {}
+            }
+        }
+        assert_eq!(ruby, 1, "expected exactly one ruby run");
+        assert!(
+            hrefs.iter().any(|href| href.starts_with("https://")),
+            "no external link: {hrefs:?}"
+        );
+        assert!(
+            hrefs.iter().any(|href| href.starts_with("jump:")),
+            "no site jump: {hrefs:?}"
+        );
+
+        // The image marker resolved through the map: an unresolved one would draw
+        // a placeholder instead of the embedded illustration.
+        let image_block = document
+            .blocks
+            .iter()
+            .find(|block| block.kind == BlockKind::Image)
+            .expect("an image block");
+        assert!(
+            !image_block.missing,
+            "the image map did not resolve the body"
+        );
+        assert_eq!(document.images.len(), 1, "expected one embedded image");
+
+        // A marker the grammar does not know stays literal: deleting it would lose
+        // content the author wrote.
+        assert!(
+            document.plain.contains("[fontsize:18]"),
+            "an unknown marker was deleted: {:?}",
+            document.plain
+        );
+        assert!(
+            document.blocks.iter().any(|block| block.spans.iter().any(
+                |span| matches!(span, Span::Text(text) if text.contains("[fontsize:18]この行"))
+            )),
+            "the unknown marker did not stay inside a text span"
+        );
+
+        // The ids the body names exist in this same catalogue, so the reader link
+        // and the jump open something instead of an empty page.
+        let work = work_ref.expect("a work reference");
+        let work_id: u64 = work.parse().expect("a numeric work id");
+        assert!(
+            catalog.detail(Id(work_id)).is_some(),
+            "work {work} is not in the catalogue"
+        );
+        let jump = hrefs
+            .iter()
+            .find_map(|href| href.strip_prefix("jump:"))
+            .expect("a jump href");
+        let jump_id: u64 = jump.parse().expect("a numeric jump id");
+        assert!(
+            catalog.detail(Id(jump_id)).is_some(),
+            "jump {jump} is not in the catalogue"
+        );
+
+        // The API sends the length of the markup, not of the text a reader sees,
+        // so the fixture counts what it ships.
+        assert_eq!(
+            usize::try_from(chapter.character_count).unwrap_or(0),
+            chapter.body.chars().count()
+        );
+    }
+
+    #[test]
+    fn the_standalone_work_and_the_login_only_row_are_distinguishable() {
+        let catalog = catalogue();
+        let rows = catalog.novels();
+        assert_eq!(rows.len(), 10, "8 chapters + 1 standalone + 1 locked");
+
+        let standalone: Vec<&DemoNovel> = rows
+            .iter()
+            .filter(|row| row.summary.series_id.is_none())
+            .collect();
+        assert_eq!(
+            standalone.len(),
+            2,
+            "one standalone work and one locked row"
+        );
+        let open = standalone
+            .iter()
+            .find(|row| !row.is_login_only)
+            .expect("one readable standalone work");
+        assert!(open.detail.is_some(), "the standalone work has no body");
+        assert!(!open.is_login_only);
+
+        let locked: Vec<&DemoNovel> = rows.iter().filter(|row| row.is_login_only).collect();
+        assert_eq!(locked.len(), 1, "expected one isLoginOnly row");
+        let locked = locked[0];
+        assert!(
+            locked.detail.is_none(),
+            "a login-only row handed out a body"
+        );
+        assert!(
+            catalog.novel(locked.summary.id).is_none(),
+            "the login-only row resolved to a document"
+        );
+        // The row is still drawable: a list has to be able to show it.
+        assert!(locked.summary.cover.is_some());
+        assert!(locked.summary.title.starts_with(DEMO_MARKER));
+
+        // Every row is labelled and every URL is a demo URL, so the catalogue can
+        // neither be mistaken for real data nor reach the network.
+        for row in &rows {
+            assert!(
+                row.summary.title.starts_with(DEMO_MARKER),
+                "unmarked {:?}",
+                row.summary.title
+            );
+            let cover = row.summary.cover.as_deref().expect("every row has a cover");
+            assert!(is_demo_url(cover), "cover {cover} leaked");
+            assert!(row.summary.tags.len() >= 2, "a novel with no tags");
+            if let Some(detail) = &row.detail {
+                assert_eq!(detail.id, row.summary.id);
+                assert!(detail.title.starts_with(DEMO_MARKER));
+                assert!(detail.caption.starts_with(DEMO_MARKER));
+                assert!(detail.author.avatar.as_deref().is_some_and(is_demo_url));
+                for image in &detail.images {
+                    assert!(is_demo_url(&image.small) && is_demo_url(&image.large));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_novels_are_a_pure_function_of_the_build() {
+        let first = catalogue();
+        let second = catalogue();
+        assert_eq!(first.novels(), second.novels(), "two builds disagree");
+        assert_eq!(
+            first.novel_series(Id(NOVEL_SERIES_ID)),
+            second.novel_series(Id(NOVEL_SERIES_ID))
+        );
+        for row in first.novels() {
+            let id = row.summary.id;
+            assert_eq!(first.novel(id), second.novel(id), "novel {id} is unstable");
+        }
+
+        // The cover is drawn, not shipped: the id seeds the existing procedural
+        // renderer, and the same id always produces the same bytes at the size the
+        // cover URL declares.
+        for row in first.novels() {
+            let id = row.summary.id;
+            let cover = row.summary.cover.as_deref().expect("a cover");
+            assert!(
+                cover.contains(&id.to_string()),
+                "cover {cover} does not name {id}"
+            );
+            let bytes = render_placeholder(NOVEL_COVER_SIDE, NOVEL_COVER_SIDE, id.get());
+            assert_eq!(
+                bytes,
+                render_placeholder(NOVEL_COVER_SIDE, NOVEL_COVER_SIDE, id.get()),
+                "cover bytes for {id} are not stable"
+            );
+            let decoded = image::load_from_memory(&bytes).expect("png decodes");
+            assert_eq!(
+                (decoded.width(), decoded.height()),
+                (NOVEL_COVER_SIDE, NOVEL_COVER_SIDE)
+            );
+        }
     }
 }

@@ -4,19 +4,22 @@
 //! clock, no entropy and no I/O, so two runs — on two machines — produce the
 //! byte-identical catalogue. The shapes are chosen to exercise the UI: three
 //! aspect ratios, three illustration kinds, a mix of page counts, and stats with
-//! enough spread that sorting and ranking look plausible.
+//! enough spread that sorting and ranking look plausible. The novels are the
+//! second half: one eight-chapter series whose first body carries every marker the
+//! novel grammar knows, one standalone work, and one `isLoginOnly` row — enough
+//! data that the reader can be photographed, and no more.
 
 use std::cmp::Ordering;
 
 use pixiv_types::domain::Tag;
 use pixiv_types::{
-    Author, Bookmark, BookmarkRestrict, Id, Illust, IllustKind, IllustStats, IllustUrls, PageMeta,
-    PageUrls, RankingKind, RankingRow, SearchQuery, SearchResult, SortOrder, TypeFilter,
-    UserProfile,
+    Author, Bookmark, BookmarkRestrict, Id, Illust, IllustKind, IllustStats, IllustUrls, Novel,
+    NovelImage, NovelSeries, NovelSeriesNav, NovelSummary, PageMeta, PageUrls, RankingKind,
+    RankingRow, SearchQuery, SearchResult, SortOrder, TypeFilter, UserProfile,
 };
 
 use crate::prng::{Rng, mix};
-use crate::{DEMO_MARKER, DEMO_SCHEME, DemoCatalog};
+use crate::{DEMO_MARKER, DEMO_SCHEME, DemoCatalog, DemoNovel};
 
 /// Master seed. Changing it reseeds the whole catalogue.
 pub(crate) const SEED: u64 = 0x5EED_1DEA_D3A0_2024;
@@ -119,6 +122,91 @@ const PORTRAIT_WIDTHS: [u32; 3] = [720, 900, 1024];
 const LANDSCAPE_HEIGHTS: [u32; 3] = [720, 900, 1024];
 const SQUARE_SIDES: [u32; 3] = [800, 1000, 1200];
 
+/// First novel id. Chapters occupy `base + 1 ..= base + 8`, so a chapter's order
+/// is readable straight off its id.
+pub(crate) const NOVEL_ID_BASE: u64 = 810_000_000;
+/// The one series in the catalogue.
+pub(crate) const NOVEL_SERIES_ID: u64 = 810_000_500;
+/// Side of a generated novel cover. Pixiv serves novel covers square, and the
+/// cover is drawn by the same procedural renderer the illustrations use, so the
+/// fixture ships no image file.
+pub(crate) const NOVEL_COVER_SIDE: u32 = 480;
+/// Offset of the standalone work, past the chapter block.
+const STANDALONE_ID_OFFSET: u64 = 100;
+/// Offset of the row a session-less client may not open.
+const LOGIN_ONLY_ID_OFFSET: u64 = 101;
+/// The uploaded image every chapter's body refers to, resolved through
+/// `Novel::images` the way `textEmbeddedImages` resolves it over the wire.
+const UPLOADED_IMAGE_ID: &str = "26247899";
+/// Artists who publish the demo novels, as indices into [`ARTISTS`].
+const SERIES_AUTHOR: usize = 0;
+const STANDALONE_AUTHOR: usize = 3;
+const LOGGED_OUT_AUTHOR: usize = 6;
+
+const CHAPTER_TITLES: [&str; 8] = [
+    "第一章　硝子の海",
+    "第二章　灯りをともす",
+    "第三章　雨のあとで",
+    "第四章　古い写真",
+    "第五章　白い鳥",
+    "第六章　遠い祭り",
+    "第七章　冬の手紙",
+    "終章　水平線",
+];
+
+/// Chapter one's body, and the reason this fixture exists: it carries every
+/// marker the grammar knows, in one document.
+///
+/// * `[chapter:...]` on its own line — a heading (a section of this chapter, not
+///   the chapter title itself).
+/// * `***` on its own line — a separator.
+/// * `[[rb:硝子 > がらす]]` — ruby, base and reading.
+/// * `[[jumpuri:label > url]]` — a link. The URL is under the reserved `.invalid`
+///   TLD, so a demo build that ever tried to fetch it would fail immediately
+///   instead of reaching a third party.
+/// * `[[jump:700000001]]` — an in-site jump, kept as a `jump:` href.
+/// * `[pixivimage:700000018-2]` — page 2 of a work in this very catalogue, so the
+///   reader's artwork link resolves.
+/// * `[uploadedimage:26247899]` — an embedded image, resolved through
+///   [`UPLOADED_IMAGE_ID`]; on its own line it becomes an image block.
+/// * `[newpage]` — a page break.
+/// * `[fontsize:18]` — a marker this client does not implement. It must survive as
+///   literal text; deleting it would lose content the author wrote.
+const SERIES_CHAPTER_ONE: &str = "\
+[chapter:一節　朝の海]
+静かな朝だった。窓の外では、[[rb:硝子 > がらす]]のように透けた海がまだ眠っている。
+***
+その日、ぼくは[[jumpuri:古い日記 > https://example.invalid/demo/diary]]を開いた。
+[[jump:700000001]]の頁に、少女の写真が挟まっていた。
+[pixivimage:700000018-2]を、どこかで見た気がした。
+[uploadedimage:26247899]
+[fontsize:18]この行の頭には、この端末が解釈しない指定が付いている。
+[newpage]
+[chapter:二節　港の灯り]
+港の灯りが、ひとつずつ消えていく。ぼくは名前を書かないまま、頁を閉じた。";
+
+/// One body per chapter. Chapter one is the coverage document above; the others
+/// exist so the series panel has eight real chapters to list, and so a reader
+/// that opens chapter five does not open chapter one's text again.
+const SERIES_CHAPTER_BODIES: [&str; 8] = [
+    SERIES_CHAPTER_ONE,
+    "灯りをともすと、窓にぼくの顔が映った。\n\n海はもう起きていた。",
+    "雨のあとで、砂浜には貝がらが増えている。\n\nひとつ拾って、耳に当てた。",
+    "古い写真の裏には、読めない字で日付だけが書かれていた。",
+    "白い鳥が一羽、桟橋の杭にとまって、しばらく動かなかった。",
+    "遠い祭りの音が、風に乗ってここまで届く夜がある。",
+    "冬の手紙は、まだ封を切っていない。\n\n切るのが惜しかった。",
+    "水平線が、思っていたより近かった。\n\nここが終わりではない。",
+];
+
+const STANDALONE_TITLE: &str = "短編集　雨と猫";
+const STANDALONE_BODY: &str = "\
+雨の音で目が覚めた。[[rb:雨音 > あまおと]]は、窓を叩くたびに少しずつ違う。
+猫が一匹、濡れたまま、軒下に座っている。";
+
+/// A row whose body a session-less client may not read (`isLoginOnly`).
+const LOGIN_ONLY_TITLE: &str = "会員限定　書きかけの頁";
+
 /// An artist before the catalogue counts its works.
 struct ArtistSeed {
     id: Id,
@@ -146,10 +234,13 @@ pub(crate) fn build() -> DemoCatalog {
         .map(|artist| build_profile(artist, &illusts, &mut rng))
         .collect();
 
+    let (novels, series) = build_novels();
     let trending = trending_tags_of(&illusts);
     DemoCatalog {
         illusts,
         artists: profiles,
+        novels,
+        series,
         trending,
     }
 }
@@ -402,6 +493,236 @@ fn fit(width: u32, height: u32, long_edge: u32) -> (u32, u32) {
 }
 
 // ---------------------------------------------------------------------------
+// Novels
+// ---------------------------------------------------------------------------
+
+/// Build the novels: one eight-chapter series, one standalone work, and one row
+/// a session-less client may not open.
+///
+/// Nothing here draws on [`SEED`]: the bodies are literals and every derived
+/// number comes from the work id itself, so the novel half of the catalogue is
+/// deterministic for a reason a reader can check by eye.
+fn build_novels() -> (Vec<DemoNovel>, Vec<NovelSeries>) {
+    let series_id = Id(NOVEL_SERIES_ID);
+    let series_title = format!("{DEMO_MARKER}硝子の海");
+    let author = author_at(SERIES_AUTHOR);
+    let chapters = SERIES_CHAPTER_BODIES.len();
+
+    let mut novels: Vec<DemoNovel> = Vec::with_capacity(chapters + 2);
+    for order in 1..=chapters {
+        let id = Id(NOVEL_ID_BASE + u64::try_from(order).unwrap_or(0));
+        let previous =
+            (order > 1).then(|| Id(NOVEL_ID_BASE + u64::try_from(order - 1).unwrap_or(0)));
+        let following =
+            (order < chapters).then(|| Id(NOVEL_ID_BASE + u64::try_from(order + 1).unwrap_or(0)));
+        let nav = NovelSeriesNav {
+            id: series_id,
+            title: series_title.clone(),
+            order: u32::try_from(order).unwrap_or(0),
+            prev: previous,
+            next: following,
+            prev_title: if order > 1 {
+                chapter_title_of(order - 1)
+            } else {
+                String::new()
+            },
+            next_title: if order < chapters {
+                chapter_title_of(order + 1)
+            } else {
+                String::new()
+            },
+            concluded: true,
+        };
+        let body = SERIES_CHAPTER_BODIES
+            .get(order - 1)
+            .copied()
+            .unwrap_or_default();
+        let day = DAY_BASE + i64::try_from(order - 1).unwrap_or(0) * 3;
+        let novel = build_novel(id, &chapter_title_of(order), &author, body, Some(nav), day);
+        novels.push(readable(novel));
+    }
+
+    let series = NovelSeries {
+        id: series_id,
+        title: series_title,
+        caption: format!(
+            "{DEMO_MARKER}デモモード用の連載です。全{chapters}章、実在の作品・作者とは関係ありません。"
+        ),
+        author: author.clone(),
+        cover: Some(novel_cover_url(series_id)),
+        tags: novel_tags(),
+        total: u32::try_from(chapters).unwrap_or(0),
+        total_characters: novels.iter().map(|row| row.summary.character_count).sum(),
+        total_reading_time: novels.iter().map(|row| row.summary.reading_time).sum(),
+        first_novel: Some(Id(NOVEL_ID_BASE + 1)),
+        latest_novel: Some(Id(NOVEL_ID_BASE + u64::try_from(chapters).unwrap_or(0))),
+        concluded: true,
+    };
+
+    let standalone = build_novel(
+        Id(NOVEL_ID_BASE + STANDALONE_ID_OFFSET),
+        STANDALONE_TITLE,
+        &author_at(STANDALONE_AUTHOR),
+        STANDALONE_BODY,
+        None,
+        DAY_BASE + 40,
+    );
+    novels.push(readable(standalone));
+
+    // The isLoginOnly row: the row is real, the document is not. NOVEL-READER
+    // section 1 point 6 records that an unreadable work answers an error
+    // envelope, so there is no body to hand out and the template below never
+    // leaves this function.
+    let locked = build_novel(
+        Id(NOVEL_ID_BASE + LOGIN_ONLY_ID_OFFSET),
+        LOGIN_ONLY_TITLE,
+        &author_at(LOGGED_OUT_AUTHOR),
+        "",
+        None,
+        DAY_BASE + 41,
+    );
+    novels.push(DemoNovel {
+        summary: summary_of(&locked),
+        detail: None,
+        is_login_only: true,
+    });
+
+    (novels, vec![series])
+}
+
+fn build_novel(
+    id: Id,
+    title: &str,
+    author: &Author,
+    body: &str,
+    series: Option<NovelSeriesNav>,
+    day: i64,
+) -> Novel {
+    let characters = u32::try_from(body.chars().count()).unwrap_or(u32::MAX);
+    // Counters ride on the same id-derived value the cover uses, so a build
+    // cannot produce two disagreeing totals.
+    let noise = u32::try_from(seed_for_id(id) % 1_000).unwrap_or(0);
+    Novel {
+        id,
+        title: format!("{DEMO_MARKER}{title}"),
+        author: author.clone(),
+        cover: Some(novel_cover_url(id)),
+        caption: format!(
+            "{DEMO_MARKER}デモモード用の本文です。実在の作品・作者とは関係ありません。"
+        ),
+        tags: novel_tags(),
+        body: body.to_owned(),
+        images: novel_images(),
+        // The API characterCount is the length of the markup, not of the text a
+        // reader sees (NOVEL-READER section 1 point 3), so the demo counts the
+        // body it ships.
+        character_count: characters,
+        word_count: characters / 2,
+        reading_time: (characters / 400).max(1),
+        page_count: new_page_count(body),
+        views: 600 + noise.saturating_mul(5),
+        bookmarks: 20 + noise % 300,
+        likes: 5 + noise % 90,
+        upload_date: novel_date(day),
+        is_original: true,
+        x_restrict: 0,
+        language: "ja".to_owned(),
+        series,
+        bookmarked: false,
+    }
+}
+
+fn readable(novel: Novel) -> DemoNovel {
+    DemoNovel {
+        summary: summary_of(&novel),
+        detail: Some(novel),
+        is_login_only: false,
+    }
+}
+
+/// The row shape of a document: what every list surface draws.
+fn summary_of(novel: &Novel) -> NovelSummary {
+    let series = novel.series.as_ref();
+    NovelSummary {
+        id: novel.id,
+        title: novel.title.clone(),
+        author: novel.author.clone(),
+        cover: novel.cover.clone(),
+        tags: novel.tags.clone(),
+        caption: novel.caption.clone(),
+        character_count: novel.character_count,
+        reading_time: novel.reading_time,
+        series_id: series.map(|nav| nav.id),
+        series_title: series.map(|nav| nav.title.clone()).unwrap_or_default(),
+        series_order: series.map(|nav| nav.order).unwrap_or(0),
+        upload_date: novel.upload_date.clone(),
+        bookmarked: novel.bookmarked,
+        x_restrict: novel.x_restrict,
+    }
+}
+
+fn author_at(index: usize) -> Author {
+    let id = Id(USER_ID_BASE + u64::try_from(index).unwrap_or(0));
+    let (name, account) = ARTISTS.get(index).copied().unwrap_or_default();
+    Author {
+        id,
+        name: name.to_owned(),
+        account: account.to_owned(),
+        avatar: Some(avatar_url(id)),
+    }
+}
+
+fn chapter_title_of(order: usize) -> String {
+    let title = CHAPTER_TITLES
+        .get(order.saturating_sub(1))
+        .copied()
+        .unwrap_or_default();
+    format!("{DEMO_MARKER}{title}")
+}
+
+/// A cover URL in the same demo:// grammar as the illustrations: nothing
+/// fetches it, and the bytes come from [`crate::render_placeholder`] seeded by
+/// the id.
+fn novel_cover_url(id: Id) -> String {
+    let side = NOVEL_COVER_SIDE;
+    format!("{DEMO_SCHEME}novel/{id}/{side}x{side}/cover.png")
+}
+
+/// The embedded image, resolved the way textEmbeddedImages resolves it.
+fn novel_images() -> Vec<NovelImage> {
+    vec![NovelImage {
+        id: UPLOADED_IMAGE_ID.to_owned(),
+        small: format!("{DEMO_SCHEME}novel/image/{UPLOADED_IMAGE_ID}/480x480/small.png"),
+        large: format!("{DEMO_SCHEME}novel/image/{UPLOADED_IMAGE_ID}/1200x1200/large.png"),
+    }]
+}
+
+/// Tags taken from the illustration pool, so the demo never invents vocabulary
+/// the rest of the catalogue does not also use.
+fn novel_tags() -> Vec<Tag> {
+    // オリジナル, 風景, 海.
+    [0_usize, 2, 16]
+        .into_iter()
+        .filter_map(|index| TAG_POOL.get(index))
+        .map(|(name, translated)| Tag {
+            name: (*name).to_owned(),
+            translated: translated.map(str::to_owned),
+        })
+        .collect()
+}
+
+/// Pages in a body: every explicit [newpage] marker starts one.
+fn new_page_count(body: &str) -> u32 {
+    u32::try_from(body.matches("[newpage]").count() + 1).unwrap_or(1)
+}
+
+/// A publication date as a novel row carries it: YYYY-MM-DD.
+fn novel_date(day: i64) -> String {
+    let (year, month, day_of_month) = civil_from_days(day);
+    format!("{year:04}-{month:02}-{day_of_month:02}")
+}
+
+// ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
 
@@ -646,4 +967,39 @@ pub(crate) fn bookmarks(catalog: &DemoCatalog) -> SearchResult {
         last_page: last_page_for(items.len(), SEARCH_PAGE_SIZE),
         items,
     }
+}
+/// Every novel row, in a stable id order: the series chapters, then the
+/// standalone work, then the row a session-less client may not open.
+pub(crate) fn novels(catalog: &DemoCatalog) -> Vec<DemoNovel> {
+    catalog.novels.clone()
+}
+
+/// One novel with its body. `isLoginOnly` rows resolve to `None`: the row exists,
+/// the document does not.
+pub(crate) fn novel(catalog: &DemoCatalog, id: Id) -> Option<Novel> {
+    catalog
+        .novels
+        .iter()
+        .find(|row| row.summary.id == id)
+        .and_then(|row| row.detail.clone())
+}
+
+pub(crate) fn novel_series(catalog: &DemoCatalog, id: Id) -> Option<NovelSeries> {
+    catalog
+        .series
+        .iter()
+        .find(|series| series.id == id)
+        .cloned()
+}
+
+/// One series chapter list, in reading order.
+pub(crate) fn novel_chapters(catalog: &DemoCatalog, series: Id) -> Vec<DemoNovel> {
+    let mut rows: Vec<DemoNovel> = catalog
+        .novels
+        .iter()
+        .filter(|row| row.summary.series_id == Some(series))
+        .cloned()
+        .collect();
+    rows.sort_by_key(|row| row.summary.series_order);
+    rows
 }

@@ -12,3 +12,10 @@ image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+
+# Test-only. A demo body is only worth shipping if the parser turns it into the
+# blocks it claims to cover, so the test module reads the fixture back through
+# the real grammar instead of trusting the doc comment. pixiv-novel has no
+# dependencies of its own, so this adds nothing to the build.
+[dev-dependencies]
+pixiv-novel.workspace = true

@@ -3762,6 +3762,7 @@ name = "pixiv-demo"
 version = "0.1.0"
 dependencies = [
  "image",
+ "pixiv-novel",
  "pixiv-types",
  "serde",
  "serde_json",
