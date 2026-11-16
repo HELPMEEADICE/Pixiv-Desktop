@@ -717,6 +717,9 @@ impl App {
             return;
         };
         let artist = illust.author.id;
+        // The work and the epoch the reply will be an answer about (B4).
+        let work = illust.id;
+        let epoch = self.detail_epoch;
         self.ui().set_detail_busy(true);
         let rt = self.rt.clone();
         rt.spawn(async move {
@@ -732,6 +735,17 @@ impl App {
                 let Ok(app) = shared.try_borrow() else {
                     return;
                 };
+                // A reply about another work, or about a page that has since moved
+                // on, writes nothing at all (B4); the open that replaced this page
+                // already cleared the slot it took.
+                if !detail_reply_lands(
+                    app.detail_epoch,
+                    epoch,
+                    app.detail.as_ref().map(|detail| detail.id),
+                    work,
+                ) {
+                    return;
+                }
                 app.ui().set_detail_busy(false);
                 match outcome {
                     Ok((target, confirmed)) => {
@@ -1250,6 +1264,30 @@ async fn load_film_bytes(
 mod tests {
     use super::*;
     use pixiv_types::domain::PageUrls;
+
+    /// B4 · A's follow reply must not rewrite B's button.
+    ///
+    /// `toggle_follow`'s landing compared neither the epoch nor the route, so a slow
+    /// follow of work A set `detail-following` on whatever work was open when the
+    /// answer arrived. The plant that makes this red is [`detail_reply_lands`]
+    /// answering `true` for every reply - the rule it had.
+    #[test]
+    fn b4_a_follow_reply_lands_only_on_the_work_that_asked() {
+        let asked = Id(11);
+        assert!(detail_reply_lands(7, 7, Some(asked), asked), "same page, same work");
+        assert!(
+            !detail_reply_lands(7, 7, Some(Id(12)), asked),
+            "same epoch is not enough: the page now shows another work"
+        );
+        assert!(
+            !detail_reply_lands(8, 7, Some(asked), asked),
+            "the page moved on while the follow was in flight"
+        );
+        assert!(
+            !detail_reply_lands(7, 7, None, asked),
+            "no work on screen is nobody's reply"
+        );
+    }
 
     /// B3 · a batch of verdicts patches the cards it names, not the feed.
     ///

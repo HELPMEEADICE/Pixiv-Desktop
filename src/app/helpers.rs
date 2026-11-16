@@ -334,6 +334,26 @@ pub(crate) enum ReplySurface {
     Profile(u64),
 }
 
+/// Does a reply about one work still belong to the illustration page on screen?
+///
+/// [`reply_lands`] answers "is this the same page"; the illustration page also has to
+/// ask "is it still the same work". Both halves are needed because the epoch is
+/// bumped by every open *and* the page can be re-shown from its own route, so an
+/// epoch can agree while the work has changed. The animation path has guarded both
+/// since F1 (`load_film` compares the detail epoch and the playback epoch); the
+/// follow reply guarded neither, so A's answer rewrote B's button (B4).
+pub(crate) fn detail_reply_lands(
+    showing_epoch: u64,
+    asked_epoch: u64,
+    showing_id: Option<Id>,
+    asked_id: Id,
+) -> bool {
+    reply_lands(
+        ReplySurface::Detail(showing_epoch),
+        ReplySurface::Detail(asked_epoch),
+    ) && showing_id == Some(asked_id)
+}
+
 /// Does the reply `asked` still belong to the surface `showing`?
 ///
 /// A key never repeats: `detail_epoch` only grows and a profile page's key is the
