@@ -1366,8 +1366,97 @@ measured accessibility floor yet either: they join `tools/verify-a11y.ps1`'s lis
 one page set (`tools/page-set.ps1`, G32) in round eleven, and the floors are pinned by
 that round's first measured run.
 
----
+## 18. Round eleven — one page set, one walk, and the failures that had been quiet
 
+### 18a. Five files, one list
+
+`tools/page-set.ps1` is the only place a page list lives now. It states the destinations
+`ui/main.slint`’s `Destination` enum declares, the capture states that are a destination plus
+a forced state, and one launch recipe per page — which environment keys open it, which
+fixture puts it in a named state. Four verifiers and the accessibility budget ask it instead of
+writing a list down (`Get-PageSet -For a11y|layout|focus|visual|budget`), and
+`Compare-PageSet` re-reads each consumer’s own text — the derivation, or a literal
+`$Pages = @("…")` — and names the pair that disagrees rather than reporting a count.
+`tools/selftest-gates.ps1` case `page-set` runs that comparison on the tree and then hands
+`verify-a11y.ps1` a literal list with `settings` deleted; the pair (`a11y\budget`) and the
+page have to be named.
+
+The reason this was worth a round: five lists had already drifted, and the three novel
+destinations — in the shell since round ten — were named by no gate at all. Every
+verifier printed “every page” while measuring three fewer than the enum declares. The same
+round put them in the accessibility and layout sets and measured them for the first time;
+`tools/a11y-budget.json`’s floors for those pages are what that run produced, and they
+ratchet. A measured floor is not a baseline: see 18f.
+
+### 18b. The keyboard reached the card, and the page follows it
+
+Round nine made “focusable but unreachable” measurable. Round eleven closed the other
+half. `IllustCard.gained-focus` reports the card’s own `y` inside the scroll body (the
+grid adds its own offset), the page-level callback is `card-focused(string, length)`, and
+`src/app/callbacks/feed.rs` turns that into a scroll position: `card_scroll_offset` keeps
+one `Theme.space-3` of lead, never scrolls above the top, and treats a non-finite value as
+zero. The offset is remembered per route (`remember_scroll`) and written to whichever
+scroll property the current page uses. Two guards keep it from doing harm: a card whose
+grid belongs to a route the user is not looking at is not chased, and an id that is not in
+the loaded model is ignored. The unit test is
+`a_focused_card_scrolls_in_with_one_lead_step_and_never_past_the_top`, and README limit 10
+— which had said the opposite since round nine — was rewritten in round twelve.
+
+The round also registered a search vocabulary it did not wire. `SortOrder`/`SearchTarget`
+grew labels, `ALL` and `as_param()`, and `ui/pages/gallery.slint` declares
+`sort-labels`/`sort-index`/`mode-index`/`sort-chosen`/`mode-chosen`/`related-tags`/
+`related-tag-chosen`. `3f76aaf`’s own message says the Rust half of that wiring is
+registered, not done: `sort_chosen`, `mode_chosen` and `related_tag` have no reader under
+`src/`. A seam with two ends and one of them empty is worse than no seam, because the round
+can report it as landed and be literally right.
+
+### 18c. Failures that had been silent
+
+A failed request used to become a smaller truth rather than a visible one. The patterns and
+what replaced them:
+
+* the detail page’s failed page-list request is a page state carrying a sentence
+  (`App::fail_detail`, `src/app/detail.rs`) instead of a work that silently has one image;
+* a failed avatar no longer drops its loading key and leaves the row spinning forever
+  (`src/app/feed/avatars.rs` records the shape it used to have);
+* the image gate hands a permit to the waiter it wakes, so a cancelled waiter returns it
+  through `Drop` rather than leaving the queue a slot short - a counter would have hidden
+  the same bug (`crates/pixiv-image/src/gate.rs`).
+
+### 18d. What the crate layer had to hand back
+
+Three of those are not UI defects at all. `DiskTier::open` sweeps `.part` files that no
+current process owns, because a killed download leaves them behind and `bytes()` could not
+count them (`crates/pixiv-image/src/disk.rs`). The novel progress index became
+`(series_id, updated_at DESC)` with an `EXPLAIN QUERY PLAN` assertion in the shape the file
+already used (`crates/pixiv-store/src/novel.rs`). And the ugoira export bounds its output at
+the ceiling instead of assembling frames until memory runs out. None of these has a pixel
+to photograph; each is asserted where it lives.
+
+### 18e. What the new guards can and cannot decide
+
+`page-set` decides that five lists agree and that a name is a destination or a capture
+state. It cannot decide that a page renders, that a recipe still opens the page it names, or
+that the list is *right* — a page added to the enum and to all five lists would satisfy it
+while measuring nothing new. The coverage assertion decides reachability, not worth. The
+prose rule decides that a document does not restate a number a run prints; it says nothing
+about whether the number the run prints is correct. `-Twice` decides that two captures of one
+state are identical; it cannot decide that the state is the one a user sees.
+
+### 18f. What is still not verified here
+
+The novel reader has measured floors and no pixel baseline: `G33` in
+`docs/OPTIMIZATION-PLAN-R11.md` was not landed, `docs/screenshots/baseline` carries no reader
+state, and `tools/page-set.ps1`’s unbaselined list is what keeps the visual gate from
+claiming it. The silent-failure scan (`G41` — every `unwrap_or_else(|_`, `.ok()` and
+`let _ =` either reaches a page state or a log) is also not in the tree; the three fixes in
+18c were made by reading the call sites, not by a rule that would find the next one.
+Whether Windows delivers `Ctrl`/`Shift` inside `TouchArea.pointer-event` was not measured.
+And the novel pages were measured at one size, on this desktop, at one scale: the DPI ladder
+still walks the home page only, which is why `16h`’s note about the ladder above 150 % has
+not moved.
+
+---
 ## Appendix: round-one limits (kept for the record)
 
 ### Not verified in round one
