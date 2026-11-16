@@ -471,7 +471,6 @@ export component AppWindow inherits Window {
     callback open-author(string);
     /// Author link on a *card*, which carries the work id rather than the user id
     /// so the profile can be opened without a lookup.
-    callback open-card-author(string);
     callback open-profile(string);
     callback toggle-bookmark(string);
     callback open-tag(string);
@@ -559,7 +558,6 @@ export component AppWindow inherits Window {
     callback novel-open-author();
     callback novel-toggle-bookmark();
     callback novel-retry();
-    callback novel-detail-back();
     callback novel-external();
 
     // Reader.

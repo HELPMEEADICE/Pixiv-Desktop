@@ -102,10 +102,6 @@ pub(crate) fn install(app: &Shared) {
     }
     {
         let shared = app.clone();
-        ui.on_novel_detail_back(move || App::travel(&shared, true));
-    }
-    {
-        let shared = app.clone();
         ui.on_novel_external(move || {
             let id = shared.borrow().route.novel_id().unwrap_or(0);
             if id > 0 {

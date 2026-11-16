@@ -12,12 +12,6 @@ pub(crate) fn install(app: &Shared) {
 
     {
         let shared = app.clone();
-        // A card's author link knows the user id, so it can go straight there.
-        ui.on_open_card_author(move |id| App::open_profile(&shared, id.as_str()));
-    }
-
-    {
-        let shared = app.clone();
         ui.on_open_profile(move |id| App::open_profile(&shared, id.as_str()));
     }
 
