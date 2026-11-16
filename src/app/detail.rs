@@ -545,7 +545,7 @@ impl App {
                     ui.set_detail_bookmarked(bookmarked);
                 }
                 self.notify(2, "演示模式：收藏状态只在本机切换，不会提交到 Pixiv");
-                self.resync_bookmarks();
+                self.patch_bookmark_card(illust_id, bookmarked);
             }
             Mode::Real => {
                 if !self.session.is_authenticated() {
@@ -633,6 +633,43 @@ impl App {
     }
 }
 
+/// Write one card's `bookmarked` flag, if it disagrees. Returns whether it wrote.
+///
+/// This is the whole of a bookmark publish now (B3). `resync_bookmarks` walked every
+/// column, read every row and wrote back every row whose flag differed, and
+/// `apply_batch_bookmarks` called it once per work: fifty works over five hundred
+/// rows was ~25 000 row clones on the UI thread inside one reply, and every patch
+/// that *did* write dropped that row's hover and focus. A verdict names one work, so
+/// one row is what the feed is asked for.
+pub(crate) fn patch_card_bookmark<M: Model<Data = IllustItem>>(
+    model: &M,
+    row: usize,
+    bookmarked: bool,
+) -> bool {
+    let Some(mut item) = model.row_data(row) else {
+        return false;
+    };
+    if item.bookmarked == bookmarked {
+        return false;
+    }
+    item.bookmarked = bookmarked;
+    model.set_row_data(row, item);
+    true
+}
+
+impl App {
+    /// Write one card's bookmark flag, addressed by the cell the feed already holds.
+    pub(crate) fn patch_bookmark_card(&self, id: Id, bookmarked: bool) -> bool {
+        let Some((column, row)) = self.index.get(&id.to_string()).copied() else {
+            return false;
+        };
+        let Some(model) = self.columns.get(column) else {
+            return false;
+        };
+        patch_card_bookmark(model, row, bookmarked)
+    }
+}
+
 impl App {
     /// Adopt the server's bookmark verdict everywhere the illustration appears.
     ///
@@ -654,33 +691,12 @@ impl App {
             // menu that claims a state the server never accepted.
             ui.set_bookmark_restrict(restrict_code(state.restrict));
         }
-        self.resync_bookmarks();
+        // One card, not the feed (B3).
+        self.patch_bookmark_card(id, state.bookmarked);
     }
 }
 
-impl App {
-    /// Push the in-memory bookmark state back into the visible cards.
-    pub(crate) fn resync_bookmarks(&mut self) {
-        let map: HashMap<String, bool> = self
-            .items
-            .iter()
-            .map(|i| (i.id.to_string(), i.bookmark.bookmarked))
-            .collect();
-        for column in &self.columns {
-            for row in 0..column.row_count() {
-                let Some(mut item) = column.row_data(row) else {
-                    continue;
-                };
-                if let Some(flag) = map.get(item.id.as_str())
-                    && item.bookmarked != *flag
-                {
-                    item.bookmarked = *flag;
-                    column.set_row_data(row, item);
-                }
-            }
-        }
-    }
-}
+
 
 impl App {
     /// Toggle the follow state for the current author.
@@ -1123,7 +1139,7 @@ impl App {
                     "演示模式：已设为公开收藏（只在本机）"
                 },
             );
-            self.resync_bookmarks();
+            self.patch_bookmark_card(illust_id, true);
             return;
         }
 
@@ -1234,6 +1250,64 @@ async fn load_film_bytes(
 mod tests {
     use super::*;
     use pixiv_types::domain::PageUrls;
+
+    /// B3 · a batch of verdicts patches the cards it names, not the feed.
+    ///
+    /// `apply_batch_bookmarks` called `resync_bookmarks` once per work, and that
+    /// walked every column, read every row and rewrote every row whose flag
+    /// differed: fifty works over five hundred rows is 25 000 reads on the UI thread
+    /// inside one reply, plus a lost hover on every row it did touch. The plant that
+    /// makes this red is [`patch_card_bookmark`] walking the model the way
+    /// `resync_bookmarks` did.
+    #[test]
+    fn b3_a_batch_of_fifty_verdicts_patches_fifty_rows() {
+        use crate::app::helpers::testkit::{CountingModel, bare_card};
+
+        const ROWS: usize = 500;
+        const BATCH: usize = 50;
+        let model = CountingModel::new(
+            (0..ROWS)
+                .map(|index| bare_card(&format!("id{index}")))
+                .collect::<Vec<_>>(),
+        );
+
+        // The batch: fifty verdicts, each naming one work the feed shows.
+        let mut wrote = 0;
+        for index in 0..BATCH {
+            if patch_card_bookmark(&model, index, true) {
+                wrote += 1;
+            }
+        }
+        assert_eq!(model.reads(), BATCH, "one read per changed card");
+        assert_eq!(model.writes(), BATCH, "one write per changed card");
+        assert_eq!(wrote, BATCH, "every verdict changed its own card");
+
+        // A verdict that changes nothing writes nothing at all.
+        model.reset();
+        assert!(!patch_card_bookmark(&model, 0, true), "the flag already says so");
+        assert_eq!(model.writes(), 0);
+        assert_eq!(model.reads(), 1, "one row is read to know that");
+
+        // ...and the shape this replaced, measured in the same test so the claim is a
+        // number rather than a sentence: the old path read every row, per verdict.
+        model.reset();
+        for _ in 0..BATCH {
+            for row in 0..ROWS {
+                let Some(mut item) = model.row_data(row) else {
+                    continue;
+                };
+                if item.bookmarked != true {
+                    item.bookmarked = true;
+                    model.set_row_data(row, item);
+                }
+            }
+        }
+        assert_eq!(
+            model.reads(),
+            ROWS * BATCH,
+            "the old resync read every row of every column, once per work"
+        );
+    }
 
     /// B1 · a failed read belongs to the page that asked for it.
     ///

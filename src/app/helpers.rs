@@ -417,3 +417,112 @@ pub(crate) fn now_secs() -> i64 {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
 }
+// ------------------------------------------------------- counted models (tests)
+
+/// Instruments for track B's "O(changed), not O(rows)" assertions.
+///
+/// Six of this round's rows are one sentence: a publish costs O(rows) where it
+/// should cost O(changed). The honest way to assert that is to count what a model
+/// is asked to do, and Slint exposes exactly that - every row a surface draws goes
+/// through the `Model` trait, so a `Vec` behind two counters is enough. No window,
+/// no renderer, no timing: the number is what the real `VecModel` receives.
+///
+/// A `cfg(test)` module in an existing file rather than a file of its own: a new
+/// file needs `git add`, and this round's commit rule keeps that out of the tracks'
+/// hands.
+#[cfg(test)]
+pub(crate) mod testkit {
+    use std::cell::{Cell, RefCell};
+
+    use slint::Model;
+
+    use crate::app::IllustItem;
+
+    /// A model that records how many rows were read and how many were written.
+    pub(crate) struct CountingModel<T> {
+        rows: RefCell<Vec<T>>,
+        reads: Cell<usize>,
+        writes: Cell<usize>,
+        /// The trait requires a tracker even for a model nothing observes.
+        notify: slint::ModelNotify,
+    }
+
+    impl<T: Clone> CountingModel<T> {
+        pub(crate) fn new(rows: Vec<T>) -> Self {
+            Self {
+                rows: RefCell::new(rows),
+                reads: Cell::new(0),
+                writes: Cell::new(0),
+                notify: slint::ModelNotify::default(),
+            }
+        }
+
+        /// How many `row_data` calls this model has answered.
+        pub(crate) fn reads(&self) -> usize {
+            self.reads.get()
+        }
+
+        /// How many `set_row_data` calls this model has taken.
+        pub(crate) fn writes(&self) -> usize {
+            self.writes.get()
+        }
+
+        /// Forget both counters, so one test can measure a shape before and after.
+        pub(crate) fn reset(&self) {
+            self.reads.set(0);
+            self.writes.set(0);
+        }
+    }
+
+    impl<T: Clone> Model for CountingModel<T> {
+        type Data = T;
+
+        fn row_count(&self) -> usize {
+            self.rows.borrow().len()
+        }
+
+        fn row_data(&self, row: usize) -> Option<T> {
+            self.reads.set(self.reads.get() + 1);
+            self.rows.borrow().get(row).cloned()
+        }
+
+        fn set_row_data(&self, row: usize, data: T) {
+            self.writes.set(self.writes.get() + 1);
+            if let Some(slot) = self.rows.borrow_mut().get_mut(row) {
+                *slot = data;
+            }
+            self.notify.row_changed(row);
+        }
+
+        fn model_tracker(&self) -> &dyn slint::ModelTracker {
+            &self.notify
+        }
+    }
+
+    /// A card with nothing in it but its id.
+    ///
+    /// `IllustItem` is generated from `ui/components.slint` and has twelve fields; the
+    /// counted-model tests care about one (`bookmarked`) or two (`selected`,
+    /// `selectable`), so the rest hold the values an empty card has.
+    pub(crate) fn bare_card(id: &str) -> IllustItem {
+        IllustItem {
+            id: id.into(),
+            title: "".into(),
+            author: "".into(),
+            author_id: "".into(),
+            cover: slint::Image::default(),
+            kind: 0,
+            page_count: 1,
+            bookmarked: false,
+            rank: 0,
+            width: 0,
+            height: 0,
+            state: 0,
+            author_avatar: slint::Image::default(),
+            author_avatar_url: "".into(),
+            author_avatar_state: 0,
+            selected: false,
+            selectable: false,
+        }
+    }
+}
