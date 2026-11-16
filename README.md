@@ -263,8 +263,9 @@ pwsh -File tools/verify-a11y.ps1          # -Report to measure without failing
 pwsh -File tools/verify-focus.ps1          # -MinPixels to force the failure path
 
 # the DPI ladder, both halves: four real scale factors measured from the app's own
-# trace, and a numeric sweep (1060 points, 168-300 logical px, 1/1.25/1.5/2x) that
-# fails any row whose decode target is below the drawn card. Reads the two constants
+# trace, and a numeric sweep across the card range at every requested scale, which
+# fails any row whose decode target is below the drawn card and prints how many points
+# it compared. Reads the two constants
 # out of src/images.rs by name (a mirror that cannot be parsed exits 77 rather than
 # guessing). Exits 77 (SKIP) when the app cannot start at all, or when fewer scales
 # were measured than requested - a gate that cannot run here did not fail.

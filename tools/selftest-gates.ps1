@@ -658,12 +658,14 @@ $completePlantedShown = if ($completePlanted.Count) { $completePlanted -join " /
 Add-Case -Name "page-set" -Wanted "five sets agree; planted a11y list names a11y\budget + settings; a photographed page is never unmeasured" -Ok ($agreeNow.Count -eq 0 -and $namesPair -and $revertedDiffs.Count -eq 0 -and $completeNow.Count -eq 0 -and $completePlanted.Count -eq 1 -and $detailMeasured) -Evidence ("agree now={0} [{1}]; planted difference=[{2}]; reverted={3}; completeness now={4}; pre-E6 exclusion planted=[{5}]; detail in a11y/layout/budget={6}" -f $agreeNow.Count, $agreeShown, $plantedShown, $revertedDiffs.Count, $completeNow.Count, $completePlantedShown, $detailMeasured)
 
 <#
-  A number a gate prints, restated in prose. Four of them exist and each has one owner: the
+  A number a gate prints, restated in prose. Six of them exist and each has one owner: the
   test count (cargo test), the uiaudit rule count (src/uiaudit.rs, printed by its own
-  test), the capture count (tools/verify-visual.ps1 prints "N captures within ...") and the
-  layout check count (tools/verify-layout.ps1 prints "N checks, M not OK"). README stated
-  two of them - "diffs 20 forced-demo captures" and "24 checks: 8 pages x 3 sizes" - and
-  both had been wrong for rounds, because nothing compared them with the run.
+  test), the capture count (tools/verify-visual.ps1 prints "N captures within ..."), the
+  layout check count (tools/verify-layout.ps1 prints "N checks, M not OK"), the size count
+  the same run prints, and the point count of tools/verify-dpi.ps1's numeric sweep. README
+  stated two of them - "diffs 20 forced-demo captures" and "24 checks: 8 pages x 3 sizes" -
+  and both had been wrong for rounds, because nothing compared them with the run. Round
+  twelve found a third, "1060 points", in the same state.
 
   The rule is narrow on purpose: prose carries none of the four. A gate cannot know the
   live count without running the thing it counts, so "update the number" is not a fix that
@@ -685,6 +687,13 @@ function Find-ProseNumber {
         # is a rule nobody can satisfy. The two word-number restatements that had survived
         # in README were removed by hand; a digit one cannot come back.
         @{ Kind = "page count"; Pattern = '\b\d+\s+pages?\b' }
+        # Round twelve (E8) adds two more on the strength of the same question: does any
+        # prose sentence restate a number a run prints? tools/verify-dpi.ps1 prints the
+        # size of its numeric sweep on every run ("N sampled rows, M-point sweep"), and
+        # tools/verify-layout.ps1 prints the sizes it walked, so "1060 points" and
+        # "8 pages x 3 sizes" are the same class of claim as "24 checks" was.
+        @{ Kind = "sweep point count"; Pattern = '\b\d+\s*-?\s*points?\b' }
+        @{ Kind = "size count"; Pattern = '\b\d+\s+sizes?\b' }
     )
     $hits = New-Object System.Collections.Generic.List[object]
     $number = 0
@@ -712,9 +721,9 @@ $prosePlanted = @(Find-ProseNumber -Text $plantedProse)
 # case tells "the line was named" apart from "the count changed".
 $plantedLine = ($plantedProse -split "\r?\n").Count
 $onPlantedLine = @($prosePlanted | Where-Object { $_.Line -eq $plantedLine })
-$lineReported = ($onPlantedLine.Count -ge 4) -and (@($prosePlanted | Where-Object { $_.Line -ne $plantedLine }).Count -eq $proseNow.Count)
+$lineReported = ($onPlantedLine.Count -ge 6) -and (@($prosePlanted | Where-Object { $_.Line -ne $plantedLine }).Count -eq $proseNow.Count)
 $liveShown = if ($proseNow.Count) { ($proseNow | ForEach-Object { "{0}:{1} {2}" -f "README.md", $_.Line, $_.Text }) -join " / " } else { "none" }
-Add-Case -Name "prose-numbers" -Wanted "README states none of the four; a planted line is named by line" -Ok ($proseNow.Count -eq 0 -and $lineReported) -Evidence ("live restatements={0} [{1}]; planted={2} hit(s), {3} of them on line {4}" -f $proseNow.Count, $liveShown, $prosePlanted.Count, $onPlantedLine.Count, $plantedLine)
+Add-Case -Name "prose-numbers" -Wanted "README states none of the six; a planted line is named by line" -Ok ($proseNow.Count -eq 0 -and $lineReported) -Evidence ("live restatements={0} [{1}]; planted={2} hit(s), {3} of them on line {4}" -f $proseNow.Count, $liveShown, $prosePlanted.Count, $onPlantedLine.Count, $plantedLine)
 
 Write-Host ""
 $bad = @($cases | Where-Object { -not $_.Ok })
