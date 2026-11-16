@@ -101,6 +101,15 @@ pub(crate) struct NovelState {
     pub(crate) prefs_saved_at: Option<std::time::Instant>,
     /// Decoded novel images by URL (covers and embedded illustrations).
     pub(crate) images: HashMap<String, slint::Image>,
+    /// Which body rows show which image URL, built with the body (B9).
+    ///
+    /// An arrival used to walk all 800 rows, clone each one and search the image
+    /// table linearly for the row's id; the index turns that into one row per
+    /// reference, which for a body with one illustration is one row.
+    pub(crate) block_images: HashMap<String, Vec<usize>>,
+    /// The id -> URL table the body was built from, kept so a reflow rebuilds the
+    /// index without asking the network for anything.
+    pub(crate) image_sources: std::collections::BTreeMap<String, parse::ImageInfo>,
     pub(crate) loading: HashSet<String>,
     /// The novel the reader currently holds.
     pub(crate) reader_novel: Option<u64>,
@@ -146,6 +155,8 @@ impl NovelState {
             saved_at: None,
             prefs_saved_at: None,
             images: HashMap::new(),
+            block_images: HashMap::new(),
+            image_sources: std::collections::BTreeMap::new(),
             loading: HashSet::new(),
             reader_novel: None,
         }
@@ -219,6 +230,8 @@ impl NovelState {
             return;
         };
         let rows = rows_from(document, &self.prefs);
+        // One pass, once per body: the arrival path reads this instead of the body (B9).
+        self.block_images = block_image_index(&rows, &self.image_sources);
         self.blocks.set_vec(rows);
     }
 
@@ -426,6 +439,63 @@ pub(crate) fn fixture_novel() -> Option<Novel> {
 // ---------------------------------------------------------------------
 
 /// One search row / recent-read row.
+/// The URL -> body row index for the block model that was just built (B9).
+///
+/// A body row names an image id, and an image id names up to two URLs (the thumbnail
+/// and the large one). Both are indexed against the row that shows them, so an
+/// arrival can be addressed by URL. Built once per body instead of searched once per
+/// arrival: 800 blocks is 800 clones and 800 comparisons per image the old way.
+pub(crate) fn block_image_index(
+    rows: &[NovelBlock],
+    sources: &std::collections::BTreeMap<String, parse::ImageInfo>,
+) -> HashMap<String, Vec<usize>> {
+    let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        if row.kind != K_IMAGE {
+            continue;
+        }
+        let Some(info) = sources.get(row.id.as_str()) else {
+            continue;
+        };
+        // One entry per URL: a row whose two URLs agree is still one row.
+        let mut seen: Vec<&String> = Vec::with_capacity(2);
+        for url in [&info.small, &info.large] {
+            if url.is_empty() || seen.contains(&url) {
+                continue;
+            }
+            seen.push(url);
+            index.entry(url.clone()).or_default().push(row_index);
+        }
+    }
+    index
+}
+
+/// Write one decoded image into the rows that show it. Returns how many rows it wrote.
+///
+/// Only the rows the index named are read, and a row that already holds a picture is
+/// left alone (a second arrival for the same URL is not a third paint).
+pub(crate) fn patch_block_image<M: Model<Data = NovelBlock>>(
+    model: &M,
+    rows: &[usize],
+    image: &slint::Image,
+) -> usize {
+    let mut written = 0;
+    for index in rows {
+        let Some(row) = model.row_data(*index) else {
+            continue;
+        };
+        if row.state == 0 {
+            continue;
+        }
+        let mut next = row;
+        next.image = image.clone();
+        next.state = 0;
+        model.set_row_data(*index, next);
+        written += 1;
+    }
+    written
+}
+
 /// Adopt one search page: merge it into the list and rebuild the rows from the whole
 /// list (B8).
 ///
@@ -1472,6 +1542,9 @@ impl App {
         // other caller is the two opcodes whose text changes. The URLs come from
         // the model that was just built, so there is one row list in one order.
         self.novel.document = Some(document);
+        // The index the arrival path reads is built from these URLs, so the body's
+        // builder has to see them (B9).
+        self.novel.image_sources = images.clone();
         self.novel.build_body();
         let urls = self.novel.image_urls(&images);
         let title = novel.title.clone();
@@ -1779,31 +1852,10 @@ impl App {
             self.publish_novel_view();
         }
 
-        // Reader body: only the image rows can change, so only they are rewritten.
-        let mut patched = false;
-        for row_index in 0..self.novel.blocks.row_count() {
-            let Some(row) = self.novel.blocks.row_data(row_index) else {
-                continue;
-            };
-            if row.kind != K_IMAGE || row.state == 0 {
-                continue;
-            }
-            let Some(info) = self
-                .novel
-                .novel
-                .as_ref()
-                .and_then(|novel| novel.images.iter().find(|info| info.id == row.id.as_str()))
-            else {
-                continue;
-            };
-            if info.large == url || info.small == url {
-                let mut next = row.clone();
-                next.image = image.clone();
-                next.state = 0;
-                self.novel.blocks.set_row_data(row_index, next);
-                patched = true;
-            }
-        }
+        // Reader body: the index built with the body names the rows that show this
+        // URL, so an arrival reads those rows and no others (B9).
+        let shown_at = self.novel.block_images.get(url).cloned().unwrap_or_default();
+        let patched = patch_block_image(&self.novel.blocks, &shown_at, &image) > 0;
         if patched {
             let ui = self.ui();
             ui.set_novel_blocks(ModelRc::from(self.novel.blocks.clone()));
@@ -1886,6 +1938,71 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B9 - an arriving illustration reads the row that shows it, not the body.
+    ///
+    /// Every embedded image that arrived walked 0..blocks.row_count(), cloned each row
+    /// and linearly searched the image table: an 800-block chapter paid 800 clones and
+    /// 800 comparisons per picture. The plant that makes this red is
+    /// [patch_block_image] walking the model, which is the shape it had.
+    #[test]
+    fn b9_an_arriving_image_patches_only_the_row_that_shows_it() {
+        use crate::app::helpers::testkit::CountingModel;
+
+        const IMAGE_ROW: usize = 500;
+        let rows: Vec<NovelBlock> = (0..800)
+            .map(|index| NovelBlock {
+                kind: if index == IMAGE_ROW { K_IMAGE } else { K_PARA },
+                text: "段".into(),
+                label: "".into(),
+                image: slint::Image::default(),
+                state: if index == IMAGE_ROW { 1 } else { 0 },
+                id: if index == IMAGE_ROW {
+                    "img1".into()
+                } else {
+                    "".into()
+                },
+            })
+            .collect();
+
+        let mut sources: std::collections::BTreeMap<String, parse::ImageInfo> =
+            std::collections::BTreeMap::new();
+        sources.insert(
+            "img1".to_string(),
+            parse::ImageInfo {
+                small: "https://i.pximg.net/novel/small.jpg".into(),
+                large: "https://i.pximg.net/novel/large.jpg".into(),
+            },
+        );
+        let index = block_image_index(&rows, &sources);
+        assert_eq!(
+            index.get("https://i.pximg.net/novel/large.jpg").map(Vec::as_slice),
+            Some([IMAGE_ROW].as_slice()),
+            "the big URL names the row that shows it"
+        );
+        assert_eq!(
+            index.get("https://i.pximg.net/novel/small.jpg").map(Vec::as_slice),
+            Some([IMAGE_ROW].as_slice())
+        );
+
+        let model = CountingModel::new(rows);
+        let shown_at = index
+            .get("https://i.pximg.net/novel/large.jpg")
+            .cloned()
+            .unwrap_or_default();
+        let image = slint::Image::default();
+        assert_eq!(patch_block_image(&model, &shown_at, &image), 1);
+        assert_eq!(model.reads(), 1, "one row read, not eight hundred");
+        assert_eq!(model.writes(), 1);
+
+        // The shape this replaced, measured on the same model: the whole body, per
+        // arriving image.
+        model.reset();
+        for row_index in 0..model.row_count() {
+            let _ = model.row_data(row_index);
+        }
+        assert_eq!(model.reads(), 800, "the old walk cloned every block");
+    }
 
     /// B8 - the second page extends the list instead of replacing it.
     ///
