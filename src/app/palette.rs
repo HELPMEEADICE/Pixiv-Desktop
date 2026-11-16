@@ -78,6 +78,7 @@ pub(crate) const PALETTE_ROWS: usize = 8;
 pub(crate) enum Target {
     Illust(u64),
     User(u64),
+    Novel(u64),
     /// Not a link and not an id: search for it.
     Search(String),
     /// Nothing to do at all (an empty query).
@@ -86,6 +87,7 @@ pub(crate) enum Target {
 
 const ARTWORK_KEYS: &[&str] = &["artworks", "artwork", "illust", "illusts", "i"];
 const USER_KEYS: &[&str] = &["users", "user", "u"];
+const NOVEL_KEYS: &[&str] = &["novel", "novels"];
 
 /// A positive decimal id, and nothing else.
 fn positive(text: &str) -> Option<u64> {
@@ -104,6 +106,16 @@ fn after_equals(text: &str) -> Option<u64> {
     positive(value.trim())
 }
 
+/// The `id` of a query string, when one of its pairs is `id=<number>`.
+///
+/// The pairs are split on both separators: a link pasted out of a share sheet can
+/// carry a fragment after the id, and an id followed by `&foo=1` is still the id.
+fn query_id(query: &str) -> Option<u64> {
+    query
+        .split(['&', '#'])
+        .find_map(|pair| after_equals(pair.trim()))
+}
+
 /// The work or artist a URL path names, if it names one.
 fn path_target(lower: &str) -> Option<Target> {
     let segments: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
@@ -116,6 +128,9 @@ fn path_target(lower: &str) -> Option<Target> {
         }
         if USER_KEYS.contains(segment) {
             return Some(Target::User(number));
+        }
+        if NOVEL_KEYS.contains(segment) {
+            return Some(Target::Novel(number));
         }
     }
     None
@@ -144,13 +159,21 @@ pub(crate) fn parse_target(input: &str) -> Target {
     // The fragment and the query string describe the page the link came from,
     // never the id: they have to fall away before the path is read.
     let head = text.split(['?', '#']).next().unwrap_or(text).trim();
+    // A novel page names its id in the query string, not in the path:
+    // `novel/show.php?id=1234`. The path is read first because `after_equals` on
+    // the whole text would answer "a work" for a novel link.
+    let lower = head.to_ascii_lowercase();
+    if lower.ends_with("novel/show.php") {
+        if let Some(number) = query_id(text.split_once('?').map_or("", |(_, query)| query)) {
+            return Target::Novel(number);
+        }
+    }
     if let Some(number) = after_equals(head) {
         return Target::Illust(number);
     }
     if let Some(number) = positive(head) {
         return Target::Illust(number);
     }
-    let lower = head.to_ascii_lowercase();
     path_target(&lower).unwrap_or_else(|| Target::Search(text.to_string()))
 }
 
@@ -372,6 +395,14 @@ impl App {
                 "users artist",
                 RowPlan::Target(Target::User(id)),
             )),
+            Target::Novel(id) => Some(PaletteRow::new(
+                &format!("小说 {id}"),
+                "直接打开",
+                "",
+                KIND_TARGET,
+                "novels novel text",
+                RowPlan::Target(Target::Novel(id)),
+            )),
             // A search is only offered when nothing else answers the query: the row
             // exists so Enter never does nothing, not to outrank a page the user named.
             Target::Search(word) => {
@@ -515,6 +546,7 @@ impl App {
             RowPlan::Recent(id) => App::open_detail(shared, &id.to_string()),
             RowPlan::Target(Target::Illust(id)) => App::open_detail(shared, &id.to_string()),
             RowPlan::Target(Target::User(id)) => App::open_profile(shared, &id.to_string()),
+            RowPlan::Target(Target::Novel(id)) => App::open_novel_from(shared, &id.to_string()),
             RowPlan::Target(Target::Search(word)) => App::submit_search(shared, &word),
             RowPlan::Target(Target::None) => {}
         }
@@ -635,7 +667,7 @@ mod tests {
     /// host without a scheme that read as a search for the whole URL.
     #[test]
     fn the_parser_table() {
-        let table: [(&str, Target); 15] = [
+        let table: [(&str, Target); 22] = [
             ("https://www.pixiv.net/artworks/1234", Target::Illust(1234)),
             // A link copied with its trailing slash.
             ("https://www.pixiv.net/artworks/1234/", Target::Illust(1234)),
@@ -660,6 +692,19 @@ mod tests {
                 Target::Illust(1234),
             ),
             ("/users/5678", Target::User(5678)),
+            (
+                "https://www.pixiv.net/novel/show.php?id=1234",
+                Target::Novel(1234),
+            ),
+            ("novel/show.php?id=1234&lang=zh", Target::Novel(1234)),
+            (
+                "https://www.pixiv.net/novel/show.php?id=1234#top",
+                Target::Novel(1234),
+            ),
+            ("https://www.pixiv.net/novel/1234", Target::Novel(1234)),
+            ("/novel/1234", Target::Novel(1234)),
+            ("novels/1234", Target::Novel(1234)),
+            ("https://www.pixiv.net/novels/1234/", Target::Novel(1234)),
             ("users/5678", Target::User(5678)),
             ("https://www.pixiv.net/en/users/5678/", Target::User(5678)),
             // A handle is not an id: search for the person.
