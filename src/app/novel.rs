@@ -73,6 +73,10 @@ pub(crate) struct NovelState {
     pub(crate) word: String,
     pub(crate) page: u32,
     pub(crate) last_page: u32,
+    /// One page at a time (B8): a second "load more" while one is in flight used to
+    /// bump the cursor again, so two answers raced and the page that arrived second
+    /// replaced the page that arrived first.
+    pub(crate) loading_more: bool,
     /// Bumped whenever the list is replaced, so a slow search cannot patch a newer one.
     pub(crate) epoch: u64,
 
@@ -116,6 +120,7 @@ impl NovelState {
             word: String::new(),
             page: 1,
             last_page: 1,
+            loading_more: false,
             epoch: 0,
             view: empty_view(),
             novel: None,
@@ -186,6 +191,29 @@ impl NovelState {
     /// The one place rows are produced: the mount (`App::adopt_document`) and the
     /// two reflowing opcodes, and nothing else. A colour edit therefore has nothing
     /// to call.
+    /// Take the "load more" slot and move the cursor, or refuse this click (B8).
+    ///
+    /// Returns false when a page is already in flight or the list has ended: the
+    /// cursor used to be bumped unconditionally, so two clicks asked for page 3
+    /// twice and the two answers raced into the same model.
+    pub(crate) fn take_more(&mut self) -> bool {
+        if self.loading_more || self.page >= self.last_page {
+            return false;
+        }
+        self.loading_more = true;
+        self.page = self.page.saturating_add(1);
+        true
+    }
+
+    /// Free the slot. A page that did not arrive puts the cursor back, because the
+    /// next attempt has to ask for the page that failed rather than skip it.
+    pub(crate) fn release_more(&mut self, landed: bool) {
+        self.loading_more = false;
+        if !landed {
+            self.page = self.page.saturating_sub(1).max(1);
+        }
+    }
+
     pub(crate) fn build_body(&mut self) {
         let Some(document) = self.document.as_ref() else {
             return;
@@ -398,6 +426,42 @@ pub(crate) fn fixture_novel() -> Option<Novel> {
 // ---------------------------------------------------------------------
 
 /// One search row / recent-read row.
+/// Adopt one search page: merge it into the list and rebuild the rows from the whole
+/// list (B8).
+///
+/// The rows used to be replaced by whichever page arrived last while the summaries
+/// accumulated, so the second "load more" erased the first: page 1 disappeared and
+/// the count said 48 while the model held the 24 rows that start at work 25. Deriving
+/// the rows from the merged list makes the model the whole answer by construction, so
+/// there is no ordering left to get wrong. Returns the rows and the covers still to
+/// decode, in load order.
+pub(crate) fn adopt_novel_page(
+    summaries: &mut Vec<NovelSummary>,
+    page: Vec<NovelSummary>,
+    images: &HashMap<String, slint::Image>,
+) -> (Vec<NovelRow>, Vec<String>) {
+    if summaries.is_empty() {
+        *summaries = page;
+    } else {
+        summaries.extend(page);
+    }
+    // Derived from the merged list, which is what makes the model the whole answer.
+    let mut rows: Vec<NovelRow> = Vec::with_capacity(summaries.len());
+    let mut covers: Vec<String> = Vec::new();
+    for summary in summaries.iter() {
+        let mut row = summary_row(summary, 2);
+        if let Some(cover) = summary.cover.as_deref() {
+            covers.push(cover.to_string());
+            if let Some(image) = images.get(cover) {
+                row.cover = image.clone();
+                row.cover_state = 0;
+            }
+        }
+        rows.push(row);
+    }
+    (rows, covers)
+}
+
 fn summary_row(summary: &NovelSummary, cover_state: i32) -> NovelRow {
     let meta = [
         characters_label(summary.character_count),
@@ -926,8 +990,11 @@ impl App {
         let (page, epoch) = {
             let mut app = shared.borrow_mut();
             if next_page {
+                // One page at a time, and never past the last one (B8).
+                if !app.novel.take_more() {
+                    return;
+                }
                 app.publish_novels_state(1, "");
-                app.novel.page = app.novel.page.saturating_add(1);
             } else {
                 app.novel.epoch = app.novel.epoch.wrapping_add(1);
                 app.novel.page = 1;
@@ -949,29 +1016,23 @@ impl App {
                     return;
                 };
                 if app.novel.epoch != epoch {
+                    // A newer list replaced this one; the slot must not stay taken.
+                    app.novel.release_more(true);
                     return;
                 }
                 match result {
                     Ok(found) => {
+                        app.novel.release_more(true);
                         app.novel.last_page = found.last_page.max(1);
-                        let mut rows: Vec<NovelRow> = Vec::with_capacity(found.novels.len());
-                        let mut covers: Vec<String> = Vec::new();
-                        for summary in &found.novels {
-                            let mut row = summary_row(summary, 2);
-                            if let Some(cover) = summary.cover.as_deref() {
-                                covers.push(cover.to_string());
-                                if let Some(image) = app.novel.images.get(cover) {
-                                    row.cover = image.clone();
-                                    row.cover_state = 0;
-                                }
-                            }
-                            rows.push(row);
-                        }
-                        if app.novel.summaries.is_empty() {
-                            app.novel.summaries = found.novels;
-                        } else {
-                            app.novel.summaries.extend(found.novels);
-                        }
+                        // The rows are the merged list, not the page that arrived (B8).
+                        let (rows, covers) = {
+                            // Two fields of one state, borrowed apart: the summaries
+                            // grow while the decoded covers are read.
+                            let NovelState {
+                                summaries, images, ..
+                            } = &mut app.novel;
+                            adopt_novel_page(summaries, found.novels, images)
+                        };
                         app.novel.rows.set_vec(rows);
                         let count = app.novel.rows.row_count();
                         let empty = count == 0;
@@ -994,6 +1055,8 @@ impl App {
                         app.spawn_novel_images(covers);
                     }
                     Err(error) => {
+                        // The cursor goes back: the next attempt asks for this page.
+                        app.novel.release_more(false);
                         let message = novel_error_text(&error);
                         app.publish_novels_state(3, &message);
                     }
@@ -1823,6 +1886,69 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B8 - the second page extends the list instead of replacing it.
+    ///
+    /// The rows were rebuilt from the page that just arrived while the summaries
+    /// accumulated them, so "load more" erased what was on screen. The plant that
+    /// makes this red is [adopt_novel_page] deriving the rows from the arriving page,
+    /// which is the shape it had.
+    #[test]
+    fn b8_a_second_page_keeps_the_first_on_screen() {
+        let images: HashMap<String, slint::Image> = HashMap::new();
+        let mut summaries: Vec<NovelSummary> = (1..=24).map(novel).collect();
+
+        let second_page: Vec<NovelSummary> = (25..=48).map(novel).collect();
+        let (rows, _) = adopt_novel_page(&mut summaries, second_page, &images);
+
+        assert_eq!(rows.len(), 48, "both pages are on screen");
+        assert_eq!(rows[0].id.as_str(), "1", "page one is still the top of the list");
+        assert_eq!(rows[47].id.as_str(), "48", "and page two is below it");
+        assert_eq!(summaries.len(), 48, "the list the model is built from agrees");
+    }
+
+    /// B8 - one page in flight, and a page that failed asks for itself again.
+    ///
+    /// next_page had no slot and no rollback: two clicks asked the server for the
+    /// same page twice, and a failure left the cursor one page ahead, so the page
+    /// that never arrived could not be requested again.
+    #[test]
+    fn b8_the_more_slot_takes_one_page_at_a_time() {
+        let mut state = NovelState::new();
+        state.page = 1;
+        state.last_page = 3;
+
+        assert!(state.take_more(), "the first click asks for page 2");
+        assert_eq!(state.page, 2);
+        assert!(
+            !state.take_more(),
+            "the second click is dropped while one is in flight"
+        );
+        assert_eq!(state.page, 2, "the cursor did not move twice");
+
+        // The page failed: the cursor goes back so the retry asks for page 2 again.
+        state.release_more(false);
+        assert!(!state.loading_more);
+        assert_eq!(state.page, 1);
+
+        // The page landed: the cursor stays where the answer put it.
+        assert!(state.take_more());
+        state.release_more(true);
+        assert_eq!(state.page, 2);
+
+        // The end of the list is not a page to ask for.
+        state.page = 3;
+        assert!(!state.take_more());
+    }
+
+    /// One search-result summary whose title names its position.
+    fn novel(id: u64) -> NovelSummary {
+        NovelSummary {
+            id: Id(id),
+            title: format!("n{id}"),
+            ..NovelSummary::default()
+        }
+    }
 
     #[test]
     fn thousands_groups_every_three_digits() {
