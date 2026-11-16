@@ -2956,4 +2956,41 @@ last in its component:\n{}",
         );
     }
 
+    /// G51 — the indeterminate progress bar animates, and from `Theme.motion`.
+    ///
+    /// A bar that says "still working" and does not move is the one thing the widget may
+    /// not do: every running download showed the same static 30 % block, so a queue of six
+    /// looked like six stalls. The fix is an `animate` whose duration is the theme's motion
+    /// token and whose loop is the animation engine's (`iteration-count: -1` with
+    /// `direction: alternate`), not a timer element: no tick, no extra property, and the
+    /// 150 ms ceiling the style contract sets is the one already in `Theme.motion`.
+    #[test]
+    fn an_indeterminate_progress_bar_loops_from_the_motion_token() {
+        let source = read(&ui_dir().join("components.slint"));
+        let at = source
+            .lines()
+            .position(|line| line.contains("component ProgressBar "))
+            .expect("the shared progress bar must exist");
+        let body = component_body(&source, at);
+        assert!(
+            body.contains("indeterminate"),
+            "ProgressBar is the component this rule is about; it must still declare the flag"
+        );
+        assert!(
+            body.lines().any(|line| line.trim_start().starts_with("animate x")),
+            "the indeterminate thumb has to move: without an `animate x` the bar is a still \
+             picture of progress"
+        );
+        assert!(
+            body.contains("duration: Theme.motion"),
+            "the motion has to be the theme's: no animate in this tree carries a literal \
+             duration (see the motion-token rule)"
+        );
+        assert!(
+            body.contains("iteration-count"),
+            "and it has to loop: one transition would leave the thumb parked at the end of \
+             the track, which is a worse lie than standing still"
+        );
+    }
+
 }

@@ -1186,9 +1186,15 @@ export component InfoBar inherits Rectangle {
     }
 }
 
-/// Determinate progress bar. `indeterminate` shows a static 30% thumb rather
-/// than animating: a perpetually moving element would keep the compositor busy
-/// for no information gain, which is the wrong trade for an idle desktop app.
+/// Determinate progress bar. While `indeterminate` the 30% thumb travels the track and
+/// back instead of standing still.
+///
+/// A7: it used to be a static block at the left edge, which is the one thing a "still
+/// working" bar may not look like — every running download showed the same 30% and a queue
+/// of six looked like six stalls. The loop is one `animate` and no timer element:
+/// `iteration-count: -1` with `direction: alternate` repeats the transition for as long as
+/// the property holds its value, and the duration is `Theme.motion`, like every other
+/// animation here (uiaudit's G51 fails if this animate goes away or takes a literal).
 export component ProgressBar inherits Rectangle {
     in property <float> progress: 0.0;
     in property <bool> indeterminate: false;
@@ -1198,7 +1204,7 @@ export component ProgressBar inherits Rectangle {
     background: Theme.layer-sunken;
 
     Rectangle {
-        x: 0px;
+        x: root.indeterminate ? parent.width - self.width : 0px;
         width: root.indeterminate
             ? parent.width * 0.3
             : parent.width * Math.max(0.0, Math.min(1.0, root.progress));
@@ -1206,6 +1212,8 @@ export component ProgressBar inherits Rectangle {
         border-radius: Theme.radius-pill;
         background: Theme.accent-fill;
         visible: root.indeterminate || root.progress > 0.0;
+        animate x { duration: Theme.motion; easing: ease-in-out;
+            iteration-count: -1; direction: alternate; }
     }
 }
 
