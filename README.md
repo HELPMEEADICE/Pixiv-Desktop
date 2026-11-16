@@ -419,6 +419,10 @@ both of which had silently removed the affordance (see `docs/UI-NOTES.md` § 11)
 [Microsoft Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons)
 (MIT). Only the path geometry is embedded, emitted as Slint `Path` elements, so icons
 inherit theme colour and stay crisp at any DPI. No emoji, no hand-drawn substitutes.
+The script is not a one-off: `-Check` re-derives the file from the tracked raw SVGs (no
+network, no writes) and compares, and `tools/gates.ps1` runs it, so `ui/icons.slint` cannot
+drift from its own generator. Rebuild it with the same script without `-Check`, and read
+the diff before committing.
 
 A glyph is never positioned by hand: `IconPresenter` centres one inside a box the
 caller owns, `IconSlot` centres one on the row it sits in, and a test fails the build

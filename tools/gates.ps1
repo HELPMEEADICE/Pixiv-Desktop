@@ -193,6 +193,16 @@ Invoke-Gate "worktree paths contain no literal percent sign (F8)" {
     }
 } | Out-Null
 
+# ---- 0.5 the generated half of the UI: ui/icons.slint is what its generator derives ----
+# E10: tools/fetch_icons.ps1 was the only script that could rebuild the icon geometry and
+# nothing referenced it, so the file every glyph in the app draws from could drift from
+# its own source with no run to say so. -Check derives it from the tracked
+# assets/icons/raw/*.svg - no network, no writes - and is here, with the path gate, before
+# anything is compiled: it is one comparison over one generated file.
+Invoke-Gate "tools/fetch_icons.ps1 -Check (ui/icons.slint matches its generator)" {
+    pwsh -NoProfile -File tools/fetch_icons.ps1 -Check 2>&1 | Out-Host
+} | Out-Null
+
 # ---- 1. formatting: cheap, and the only gate that is fixed mechanically ----
 Invoke-Gate "cargo fmt --check" { cargo fmt --all -- --check 2>&1 | Out-Host } | Out-Null
 

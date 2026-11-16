@@ -408,6 +408,31 @@ $scanShown = if ($scanHits.Count) { $scanHits -join " | " } else { "none" }
 Add-Case -Name "child-exit" -Wanted "no child pipe dropped; layout and icons say CAPTURE and exit 1 without an exe" -Ok ($scanHits.Count -eq 0 -and $plantedHits.Count -eq 1 -and $layoutCode -eq 1 -and $layoutText -match "CAPTURE" -and $iconsCode -eq 1 -and $iconsText -match "CAPTURE") -Evidence ("unchecked child pipes={0} [{1}]; planted control={2}; layout exit={3} [{4}]; icons exit={5} [{6}]" -f $scanHits.Count, $scanShown, $plantedHits.Count, $layoutCode, $layoutRow.Trim(), $iconsCode, $iconsRow.Trim())
 
 
+# ---- case icon-geometry: E10 - the generated icon file matches its generator ----
+# ui/icons.slint is checked in and every glyph in the app draws from it, and until round
+# twelve the script that emits it was referenced by nothing. -Check derives the file from
+# the tracked raw SVGs (no network, no writes) and compares; this case runs it on the
+# shipped file, then on a copy with one attribute changed, so "matches" cannot be a
+# sentence the script prints unconditionally.
+$iconsScript = Join-Path (Split-Path -Parent $VerifyScript) "fetch_icons.ps1"
+$iconOut = Join-Path $WorkDir "icons"
+if (Test-Path $iconOut) { Remove-Item $iconOut -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $iconOut | Out-Null
+$iconClean = & pwsh -NoProfile -File $iconsScript -Check 2>&1 | Out-String
+$iconCleanCode = $LASTEXITCODE
+$iconDrift = Join-Path $iconOut "icons-drift.slint"
+$iconText = Get-Content "ui/icons.slint" -Raw
+$iconDrifted = $iconText.Replace("viewbox-width: 24", "viewbox-width: 25")
+if ($iconDrifted -eq $iconText) {
+    throw "case icon-geometry: ui/icons.slint no longer carries 'viewbox-width: 24', so the drift cannot be planted"
+}
+Set-Content -Path $iconDrift -Value $iconDrifted -Encoding utf8
+$iconRun = & pwsh -NoProfile -File $iconsScript -Check -OutSlint $iconDrift 2>&1 | Out-String
+$iconRunCode = $LASTEXITCODE
+$iconRow = @($iconRun -split "\r?\n" | Where-Object { $_ -match "first difference|icons match" }) -join " / "
+Add-Case -Name "icon-geometry" -Wanted "the shipped ui/icons.slint matches its generator; one changed attribute is a FAIL naming the line" -Ok ($iconCleanCode -eq 0 -and $iconClean -match "icons match" -and $iconRunCode -eq 1 -and $iconRun -match "first difference at line") -Evidence ("shipped exit={0} [{1}]; drifted copy exit={2} [{3}]" -f $iconCleanCode, $iconClean.Trim(), $iconRunCode, $iconRow.Trim())
+
+
 # ---------------------------------------------------------------- round nine
 
 <#
