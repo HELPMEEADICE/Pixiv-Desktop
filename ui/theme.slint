@@ -121,6 +121,20 @@ export global Theme {
     /// on top of somebody's artwork, where the theme has no opinion.
     out property <color> cover-scrim-top: #00000026;
     out property <color> cover-scrim-bottom: #00000099;
+    /// Hover veil, badge scrim and ink drawn directly on top of artwork. Fixed
+    /// rather than themed for the same reason as the cover scrims above: the theme
+    /// has no opinion about pixels it did not choose, so these cannot follow
+    /// light/dark. They were literals in `components.slint` until round ten (U9):
+    /// the style contract said the theme is the only place that may name a raw
+    /// colour, and nothing enforced it, so six literals had accumulated there.
+    out property <color> artwork-hover: #00000012;
+    out property <color> artwork-scrim: #000000a6;
+    out property <color> artwork-ink: #ffffff;
+    /// The bookmark pill's surface, and the unmarked glyph it carries. Fixed for
+    /// the same reason: the pill floats on artwork, and a surface that *can* equal
+    /// the ink erases it (`Theme.layer` is #2b2b2b in dark mode, 1.00:1).
+    out property <color> pill-surface: #ffffffd9;
+    out property <color> pill-ink: #2b2b2b;
     /// Ink for the *marked* state of a control whose surface is a fixed near-white
     /// pill (the bookmark toggle). Also fixed, for the same reason the pill is: the
     /// pair floats on artwork. It cannot follow the theme, because `accent-fill` is

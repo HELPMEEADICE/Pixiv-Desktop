@@ -908,6 +908,15 @@ mod tests {
     /// and the pair was never in the WCAG table above. This rule asks the question
     /// the table cannot: if a component fills a surface with the accent, what colour
     /// does it put on top?
+    ///
+    /// Round ten took the last hex literal off that fill (round ten U9: the six
+    /// artwork-overlay literals moved into the theme), which would have emptied this
+    /// rule's sample and turned its own non-vacuity assertion red. The sample is
+    /// therefore no longer *a literal ink on the accent fill* but *any ink on the
+    /// accent fill* - the question that can still be answered wrongly once the ink
+    /// is a token. The two conditions that kept the false positives out are the ones
+    /// that matter and they are unchanged: a `background:` fill (not a border, not a
+    /// selection bar) **and** text drawn through one of the app's text primitives.
     #[test]
     fn text_drawn_on_the_accent_fill_uses_the_ink_token() {
         let source = read(&ui_dir().join("components.slint"));
@@ -920,45 +929,61 @@ mod tests {
             let body = component_body(&source, index);
             // A *surface*, not any mention: `accent-fill` is also a border and a
             // focused-ring colour, and asking about every mention flagged five
-            // components that ink nothing on it (TextField sets it as its focus
-            // border, NavItem as its selection bar). The question is what sits on
-            // the fill.
-            let mut fills_with_accent = false;
-            let mut draws_text = false;
-            let mut literal_ink = false;
+            // components that ink nothing on it. The question is what sits *on* the
+            // fill, and that is decided structurally: the text primitive has to be
+            // inside the same `{ }` block as the `background:` line. Indentation
+            // cannot answer it - Slint puts a component's properties and its children
+            // at the same level, so the ranking badge's fill and its `rank-label` start
+            // in the same column. Measured against this tree the answer is one
+            // component, and not the three shapes that made earlier versions of this
+            // rule wrong: TextField's 2 px focus rule, NavItem's 3 px selection bar and
+            // its 8 px compact badge are all `background: Theme.accent-fill` inside a
+            // block that draws no text.
+            let lines: Vec<&str> = source.lines().collect();
+            let block_of = |start: usize| -> (usize, usize) {
+                let mut depth = 0isize;
+                let mut open = start;
+                for at in (0..=start).rev() {
+                    let code = lines[at].split("//").next().unwrap_or("");
+                    depth += code.matches('}').count() as isize;
+                    depth -= code.matches('{').count() as isize;
+                    if depth < 0 {
+                        open = at;
+                        break;
+                    }
+                }
+                let mut depth = 0isize;
+                let mut close = start;
+                for at in open..lines.len() {
+                    let code = lines[at].split("//").next().unwrap_or("");
+                    depth += code.matches('{').count() as isize;
+                    depth -= code.matches('}').count() as isize;
+                    if depth <= 0 && at > open {
+                        close = at;
+                        break;
+                    }
+                }
+                (open, close)
+            };
             for line_index in component_range(&source, index) {
-                let text = source.lines().nth(line_index).unwrap_or("");
-                let code = text.split("//").next().unwrap_or("");
-                if code.contains("background:") && code.contains("Theme.accent-fill") {
-                    fills_with_accent = true;
+                let code = lines[line_index].split("//").next().unwrap_or("");
+                if !(code.contains("background:") && code.contains("Theme.accent-fill")) {
+                    continue;
                 }
-                // Label and BodyText are the app's text primitives (components.slint),
-                // so a component that draws through them draws text just as much as one
-                // that names Text directly. Without this line the rule silently stopped
-                // seeing the primitive the same commit standardised on, and a rule that
-                // checks nothing cannot fail.
-                if code.contains("Text {")
-                    || code.contains("Label {")
-                    || code.contains("BodyText {")
-                {
-                    draws_text = true;
+                let (open, close) = block_of(line_index);
+                let draws_text = lines[open..=close].iter().any(|line| {
+                    let code = line.split("//").next().unwrap_or("");
+                    code.contains("Text {")
+                        || code.contains("Label {")
+                        || code.contains("BodyText {")
+                });
+                if !draws_text {
+                    continue;
                 }
-                // The decidable half: ink written as a literal on a surface the
-                // theme owns. A token is a judgement this rule cannot make (it
-                // would flag NavItem's selection bar, which carries no text at
-                // all); a hex literal on an accent-filled component is the defect
-                // this rule exists for.
-                let writes_ink = code.contains("color:") || code.contains("ink:");
-                if writes_ink && code.contains("#") {
-                    literal_ink = true;
+                checked += 1;
+                if !body.contains("Theme.on-accent") {
+                    offenders.push(format!("components.slint:{}: {component}", index + 1));
                 }
-            }
-            if !fills_with_accent || !draws_text || !literal_ink {
-                continue;
-            }
-            checked += 1;
-            if !body.contains("Theme.on-accent") {
-                offenders.push(format!("components.slint:{}: {component}", index + 1));
             }
         }
         assert!(

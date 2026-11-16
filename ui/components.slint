@@ -1537,14 +1537,14 @@ component BookmarkPill inherits Rectangle {
     height: 28px;
     border-radius: Theme.radius-pill;
     // The surface is fixed in both themes and does not react to hover. The
-    // unmarked glyph is a fixed `#2b2b2b` — this pill floats on somebody's
+    // unmarked glyph is a fixed `Theme.pill-ink` — this pill floats on somebody's
     // artwork, where the theme has no opinion, so neither colour may follow it —
     // and a hover surface that *can* equal that ink erases it: `Theme.layer` is
     // #2b2b2b in dark mode, contrast 1.00:1. Hover is carried by the border,
     // which changes nothing inside the pill and cannot reach the glyph.
     // `bookmark_pill_keeps_its_glyph_visible` in `src/uiaudit.rs` fails if this
     // surface ever becomes hover- or theme-dependent again.
-    background: #ffffffd9;
+    background: Theme.pill-surface;
     border-width: 1px;
     border-color: ta.has-hover ? Theme.border-strong : transparent;
 
@@ -1558,7 +1558,7 @@ component BookmarkPill inherits Rectangle {
         // fixed, because the surface under them is: `accent-fill` is #4cb0f5 in dark
         // mode and reaches 2.38:1 on the near-white pill, so the marked state uses
         // `pill-ink-marked` (5.07:1 in both themes).
-        tint: root.marked ? Theme.pill-ink-marked : #2b2b2b;
+        tint: root.marked ? Theme.pill-ink-marked : Theme.pill-ink;
     }
 
     ta := TouchArea {
@@ -1747,7 +1747,7 @@ export component IllustCard inherits Rectangle {
             // Hover: a soft scrim inside the cover. It cannot reflow anything and
             // it is drawn under the pill and the badges.
             Rectangle {
-                background: ta.has-hover ? #00000012 : transparent;
+                background: ta.has-hover ? Theme.artwork-hover : transparent;
                 border-radius: Theme.radius-lg;
             }
 
@@ -1758,7 +1758,7 @@ export component IllustCard inherits Rectangle {
                 width: rank-label.width + 10px;
                 height: 20px;
                 border-radius: Theme.radius-sm;
-                background: root.item.rank <= 3 ? Theme.accent-fill : #000000a6;
+                background: root.item.rank <= 3 ? Theme.accent-fill : Theme.artwork-scrim;
 
                 rank-label := Text {
                     x: 5px;
@@ -1768,10 +1768,10 @@ export component IllustCard inherits Rectangle {
                     // `on-accent`, not `#ffffff`: on `accent-fill` the two are not
                     // interchangeable. Dark accent-fill is #4cb0f5, where white
                     // measures 2.38:1 and on-accent (#101010) measures 8.01:1 — the
-                    // pair those tokens exist for. The literal stays only on the
-                    // #000000a6 fallback, which is an artwork overlay and must not
-                    // follow the theme.
-                    color: root.item.rank <= 3 ? Theme.on-accent : #ffffff;
+                    // pair those tokens exist for. The other branch is
+                    // `artwork-ink` on `artwork-scrim` — an artwork overlay, which must
+                    // not follow the theme.
+                    color: root.item.rank <= 3 ? Theme.on-accent : Theme.artwork-ink;
                     font-size: Theme.font-caption;
                     font-weight: Type.semibold;
                     vertical-alignment: center;
@@ -1785,7 +1785,7 @@ export component IllustCard inherits Rectangle {
                 width: type-label.width + 10px;
                 height: 20px;
                 border-radius: Theme.radius-sm;
-                background: #000000a6;
+                background: Theme.artwork-scrim;
 
                 type-label := Text {
                     x: 5px;
@@ -1794,7 +1794,7 @@ export component IllustCard inherits Rectangle {
                     text: (root.item.kind == 1) ? "漫画"
                         : (root.item.kind == 2) ? "动图"
                         : ("共" + root.item.page-count + "张");
-                    color: #ffffff;
+                    color: Theme.artwork-ink;
                     font-size: Theme.font-caption;
                     font-weight: Type.medium;
                     vertical-alignment: center;
