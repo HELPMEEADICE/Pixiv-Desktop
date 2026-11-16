@@ -124,10 +124,19 @@ component PrefSlider inherits Rectangle {
 
             track := TouchArea {
                 mouse-cursor: pointer;
+                // A2: a move is a hover until the button is down. Without this guard a
+                // pointer sweep across the settings panel rewrote every slider it crossed
+                // — seven persisted preferences, no click anywhere — because `moved` fires
+                // on any motion over the area. The image viewer's pan handler has always
+                // had the guard; uiaudit's
+                // `a_moved_handler_that_writes_a_value_guards_on_pressed` now asks it of
+                // both.
                 moved => {
-                    root.ratio = Math.max(0.0, Math.min(1.0,
-                        (self.mouse-x - 7px) / max(1px, track.width - 14px)));
-                    root.changed(root.ratio);
+                    if (track.pressed) {
+                        root.ratio = Math.max(0.0, Math.min(1.0,
+                            (self.mouse-x - 7px) / max(1px, track.width - 14px)));
+                        root.changed(root.ratio);
+                    }
                 }
                 clicked => {
                     root.ratio = Math.max(0.0, Math.min(1.0,

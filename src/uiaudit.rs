@@ -2509,6 +2509,98 @@ last in its component:\n{}",
         })
     }
 
+    /// The body of the handler that begins at `at`: everything between its opening
+    /// brace and that brace's partner.
+    ///
+    /// `moved => { ... }` is the only handler shape these rules ask about, and the body
+    /// has to be walked by braces rather than by line: the slider's is three lines and the
+    /// viewer's is six, and a line-based read would decide the question on whichever
+    /// fragment happened to come first.
+    fn handler_body(source: &str, at: usize) -> String {
+        let Some(open) = source[at..].find('{').map(|offset| at + offset) else {
+            return String::new();
+        };
+        let mut depth = 0usize;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[open + 1..open + offset].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        String::new()
+    }
+
+    /// True when the body assigns to a property: `root.x = …`, `self.x = …`,
+    /// `parent.x = …`. A comparison is not an assignment.
+    fn assigns_a_property(body: &str) -> bool {
+        body.lines().any(|line| {
+            let code = line.split("//").next().unwrap_or("").trim();
+            ["root.", "self.", "parent."].iter().any(|prefix| {
+                let Some(rest) = code.strip_prefix(prefix) else {
+                    return false;
+                };
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                let after = rest[name.len()..].trim_start();
+                !name.is_empty() && after.starts_with('=') && !after.starts_with("==")
+            })
+        })
+    }
+
+    /// G46 — a `moved =>` handler that writes a value must guard on `pressed`.
+    ///
+    /// `moved` fires whenever the pointer moves anywhere over the area — a hover, not a
+    /// drag. A handler that assigns from `self.mouse-x` therefore rewrites its property on
+    /// every pointer sweep across it: the novel reader's seven preference sliders were
+    /// driven by `moved` alone, so sweeping the pointer down the settings panel changed
+    /// font size, line height, letter spacing, paragraph spacing, indent, margins and
+    /// measure — seven persisted settings, no click anywhere. The image viewer next door
+    /// has always had the guard, which is why the same mistake in one file and not the
+    /// other is worth a rule rather than a review note.
+    #[test]
+    fn a_moved_handler_that_writes_a_value_guards_on_pressed() {
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            for (at, _) in source.match_indices("moved =>") {
+                let line_start = source[..at].rfind('\n').map_or(0, |index| index + 1);
+                if source[line_start..at].contains("//") {
+                    continue;
+                }
+                let body = handler_body(&source, at);
+                if !assigns_a_property(&body) {
+                    continue;
+                }
+                checked += 1;
+                if body.contains(".pressed") {
+                    continue;
+                }
+                let line = source[..at].matches('\n').count() + 1;
+                offenders.push(format!("{name}:{line}: a moved handler assigns without a pressed guard"));
+            }
+        }
+        assert!(
+            checked >= 2,
+            "expected the viewer's pan handler and the slider's drag handler, found {checked}"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a pointer move alone is a hover: a handler that writes there has to ask \
+             after-pressed first:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// G45 — a hover surface declared after a pointer target eats that target's press.
     ///
     /// Slint hit-tests in reverse declaration order, and a `TouchArea` claims the mouse on
