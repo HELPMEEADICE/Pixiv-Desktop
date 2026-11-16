@@ -723,6 +723,14 @@ export component AppWindow inherits Window {
                     root.focus-search();
                 } else if (root.suggest-visible) {
                     root.suggest-dismissed();
+                } else if (detail-page.restrict-open) {
+                    // A9: the bookmark-visibility flyout is an overlay, so Escape is spent
+                    // closing it here — before selection and before Back — rather than by the
+                    // shell's history. Reaching the shell meant "go back": the page left, its
+                    // zoom and scroll went with it, and `restrict-open` was still true when
+                    // the work was reopened, so the menu came back on the way in.
+                    // `close-restrict` also hands the keyboard back to the chevron.
+                    detail-page.close-restrict();
                 } else {
                     root.shell-shortcut("escape");
                 }
@@ -1290,7 +1298,7 @@ export component AppWindow inherits Window {
                         edit(op, value, text) => { root.reader-prefs-edit(op, value, text); }
                     }
 
-                    DetailPage {
+                    detail-page := DetailPage {
                         width: parent.width;
                         height: parent.height;
                         visible: root.page == Destination.Detail;

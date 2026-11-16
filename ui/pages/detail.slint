@@ -736,7 +736,10 @@ export component DetailPage inherits Rectangle {
     // column in the wide layout and inside the page scroll in the narrow one, and a
     // flyout that inherits either clip cannot be reached. The panel reports the
     // chevron's screen position; the page subtracts its own to place the menu.
-    property <bool> restrict-open: false;
+    /// Readable from the shell: Escape has to see this menu the way it sees the palette and
+    /// the suggestion panel (A9). `out` rather than `in-out` because nothing outside this
+    /// page opens or closes it — the chevron and `close-restrict` do.
+    out property <bool> restrict-open: false;
     property <length> restrict-anchor-x: 0px;
     property <length> restrict-anchor-y: 0px;
     /// U21: bumped every time the menu closes; both InfoBody instances watch it and
