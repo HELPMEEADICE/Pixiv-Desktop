@@ -28,6 +28,12 @@ export component ProfilePage inherits Rectangle {
     in property <bool> self: false;
     in property <[ProfileStatItem]> stats: [];
 
+    /// 互相关注 / 已回关 / 我的 pixiv 好友, from the profile's own two flags (F3).
+    ///
+    /// One string, produced by Rust, because the three cases are one label: a page
+    /// that concatenated two booleans would print 互相 · 回关 twice over. Empty draws
+    /// nothing at all, which is the ordinary case - most profiles have neither flag.
+    in property <string> mutual-label: "";
     // ---- follow ----
     in property <bool> followed: false;
     /// Disabled while a follow request is in flight, so a double click cannot
@@ -100,8 +106,11 @@ export component ProfilePage inherits Rectangle {
     /// like every other gesture.
     public function request-select-all() { root.select-all(); }
     callback card-clicked(string, bool, bool);
-    /// U3: which card the Tab walk arrived on, by work id (see `ArtworkGrid`).
-    callback card-focused(string);
+    /// U3/U-f: which card the Tab walk arrived on, by work id, and where it sits in
+    /// the scroll body (see `ArtworkGrid`). The second argument is the card's
+    /// content-space y: the shell scrolls the focus into view with it, and a page
+    /// that reported only the id left the shell with nothing to chase.
+    callback card-focused(string, length);
 
     background: Theme.canvas;
 
@@ -230,6 +239,27 @@ export component ProfilePage inherits Rectangle {
                                 vertical-alignment: center;
                             }
                         }
+
+                        // F3. The same pill, on the accent wash instead of the accent
+                        // fill: this is a relationship, not a paid tier. It shares the
+                        // name's line on purpose - the identity block is a fixed 46 px
+                        // here, and a third line would have run under the bio.
+                        if root.mutual-label != "" : Rectangle {
+                            width: mutual-label.width + 12px;
+                            height: 18px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-subtle;
+
+                            mutual-label := Text {
+                                x: 6px;
+                                y: 0px;
+                                height: parent.height;
+                                text: root.mutual-label;
+                                color: Theme.accent-ink;
+                                font-size: Theme.font-caption;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
 
                     Label {
@@ -350,7 +380,7 @@ export component ProfilePage inherits Rectangle {
             open-author(id) => { root.open-author(id); }
             toggle-bookmark(id) => { root.toggle-bookmark(id); }
             card-clicked(id, ctrl, shift) => { root.card-clicked(id, ctrl, shift); }
-            card-focused(id) => { root.card-focused(id); }
+            card-focused(id, y) => { root.card-focused(id, y); }
         }
 
         if root.state == 1 : HorizontalLayout {

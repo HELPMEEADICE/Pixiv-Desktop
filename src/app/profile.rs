@@ -79,10 +79,15 @@ impl App {
         };
 
         rt.spawn(async move {
-            let (profile, ids) =
-                tokio::join!(client.user_profile(target), client.user_illust_ids(target));
-            let profile = match profile {
-                Ok(profile) => profile,
+            // F3: one document, one fetch. `profile_bundle` reads `/profile/all`
+            // once and derives both halves of the answer from it - the counts and the
+            // id list - because the two calls this replaced asked for the same 94 KB
+            // id map twice through the rate limiter, one for each half. The follower
+            // figure is a third request and only for the signed-in account, which is
+            // the only session Pixiv lets read a follower list.
+            let bundle = client.profile_bundle(target).await;
+            let (profile, ids) = match bundle {
+                Ok(pair) => pair,
                 Err(error) => {
                     let message = describe_session_error(&error);
                     on_ui(move |shared| {
@@ -97,21 +102,13 @@ impl App {
                     return;
                 }
             };
-            // A failed id list is not an empty account. `unwrap_or_default` turned
-            // the error into "no works", which the page then rendered as a statement
-            // about the artist (plan §2.3 R18). Keep the Result and carry the real
-            // message to the page.
-            let (ids, ids_error) = match ids {
-                Ok(ids) => (ids, None),
-                Err(error) => (Vec::new(), Some(describe_session_error(&error))),
-            };
             let first: Vec<Id> = ids.iter().take(PROFILE_PAGE).copied().collect();
-            // Nothing to ask for when the id list itself failed: an empty request
+            // Nothing to ask for when the account published nothing: an empty request
             // would answer "no works" and overwrite the reason with a second lie.
             // A failed work list is a failure too: `unwrap_or_default` turned it into
             // "no works", which is a statement about the artist rather than about the
             // request (T2).
-            let (works, works_error) = if ids_error.is_some() {
+            let (works, works_error) = if first.is_empty() {
                 (Vec::new(), None)
             } else {
                 match client.user_works(target, &first).await {
@@ -142,7 +139,12 @@ impl App {
                     ids,
                     loaded: first.len(),
                     works: works.clone(),
-                    ids_error,
+                    // The bundle is one document, so there is no longer a case where
+                    // the id list failed and the header did not: one request failing
+                    // fails the whole page (`fail_profile` above). The field stays
+                    // because "the header is here and the works are not" is still a
+                    // state the page draws (T1/T2), and it is still set below.
+                    ids_error: None,
                 };
                 app.profile = Some(state);
                 app.feed_owner = Some(route);
@@ -270,43 +272,9 @@ impl App {
         ui.set_profile_avatar(image);
         ui.set_profile_avatar_state(avatar_state);
 
-        // Figures the server actually sent. A count it did not send is shown as
-        // a dash rather than as a zero, because zero is a claim.
-        let mut stats: Vec<ProfileStatItem> = vec![
-            ProfileStatItem {
-                label: "插画".into(),
-                value: profile.illust_count.to_string().into(),
-            },
-            ProfileStatItem {
-                label: "漫画".into(),
-                value: profile.manga_count.to_string().into(),
-            },
-            ProfileStatItem {
-                label: "关注".into(),
-                value: profile.followees.to_string().into(),
-            },
-            ProfileStatItem {
-                label: "粉丝".into(),
-                value: profile
-                    .followers
-                    .map(|count| count.to_string())
-                    .unwrap_or_else(|| "—".to_string())
-                    .into(),
-            },
-        ];
-        if !profile
-            .webpage
-            .clone()
-            .unwrap_or_default()
-            .trim()
-            .is_empty()
-        {
-            stats.push(ProfileStatItem {
-                label: "主页".into(),
-                value: profile.webpage.clone().unwrap_or_default().into(),
-            });
-        }
-        ui.set_profile_stats(ModelRc::from(Rc::new(VecModel::from(stats))));
+        ui.set_profile_stats(ModelRc::from(Rc::new(VecModel::from(profile_stats(
+            profile,
+        )))));
 
         let total = state.ids.len();
         ui.set_profile_count_label(if total == 0 {
@@ -332,6 +300,54 @@ impl App {
             );
         }
     }
+}
+
+/// The statistics row of the profile card.
+///
+/// Figures the server actually sent, and a dash for the one it did not: a count of
+/// zero is a claim, and 关注者 is not even readable for anybody but the signed-in
+/// account - Pixiv answers a follower list only for the session that owns it, so
+/// another artist's page has no number to print and must not print 0 (F3).
+///
+/// A function of the profile rather than of the window, because the two answers it
+/// has to keep apart - "the server said 0" and "the server would not say" - are the
+/// whole point, and a test can hold both without a window.
+pub(crate) fn profile_stats(profile: &UserProfile) -> Vec<ProfileStatItem> {
+    let mut stats = vec![
+        ProfileStatItem {
+            label: "插画".into(),
+            value: profile.illust_count.to_string().into(),
+        },
+        ProfileStatItem {
+            label: "漫画".into(),
+            value: profile.manga_count.to_string().into(),
+        },
+        ProfileStatItem {
+            label: "关注".into(),
+            value: profile.followees.to_string().into(),
+        },
+        ProfileStatItem {
+            label: "关注者".into(),
+            value: profile
+                .followers
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "—".to_string())
+                .into(),
+        },
+    ];
+    if !profile
+        .webpage
+        .clone()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        stats.push(ProfileStatItem {
+            label: "主页".into(),
+            value: profile.webpage.clone().unwrap_or_default().into(),
+        });
+    }
+    stats
 }
 
 impl App {
@@ -554,6 +570,40 @@ mod tests {
             works: (1..=24).map(work).collect(),
             ids_error: None,
         }
+    }
+
+    /// F3: the follower figure is a number only where the server sent one, and a
+    /// dash everywhere else - another artist's page, and a signed-in session that
+    /// was not allowed to read the list.
+    #[test]
+    fn the_follower_figure_is_a_dash_where_the_server_would_not_say() {
+        let signed_in = UserProfile {
+            followers: Some(12_345),
+            ..UserProfile::default()
+        };
+        let row = profile_stats(&signed_in)
+            .into_iter()
+            .find(|stat| stat.label.as_str() == "关注者")
+            .expect("the row exists");
+        assert_eq!(row.value.as_str(), "12345");
+
+        // Somebody else's page: the list is not readable, so there is no number.
+        let row = profile_stats(&UserProfile::default())
+            .into_iter()
+            .find(|stat| stat.label.as_str() == "关注者")
+            .expect("the row is drawn either way");
+        assert_eq!(row.value.as_str(), "—", "a dash, never a 0");
+
+        // And a figure the server *did* send as zero is still a zero, not a dash.
+        let zero = UserProfile {
+            followers: Some(0),
+            ..UserProfile::default()
+        };
+        let row = profile_stats(&zero)
+            .into_iter()
+            .find(|stat| stat.label.as_str() == "关注者")
+            .expect("the row exists");
+        assert_eq!(row.value.as_str(), "0");
     }
 
     /// The cursor must not move when the page never arrived.
