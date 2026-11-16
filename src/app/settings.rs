@@ -2,8 +2,13 @@ use super::*;
 
 pub(crate) fn describe_session_error(error: &PixivError) -> String {
     match error {
+        // One sentence for the whole app (T2): every loader routes its error arm
+        // through this function, so an expired cookie says 重新登录 on the ranking,
+        // the search page, the bookmarks grid and the detail page too - not only
+        // on the sign-in form and the novel page.
         PixivError::Unauthorized => {
-            "Pixiv 不接受这个 PHPSESSID：它可能已经退出登录或过期，请到浏览器重新复制".to_string()
+            "登录已失效：Pixiv 不接受这个 PHPSESSID（可能已过期或已退出登录），请在设置页重新登录后再试"
+                .to_string()
         }
         PixivError::Forbidden => "这个页面只对它的主人开放：请用该账号登录后再看".to_string(),
         PixivError::Network(message) => format!("无法连接 Pixiv：{message}"),
@@ -53,7 +58,11 @@ pub(crate) fn verify_stored_session(app: &Shared) {
                 user_name: Some(account.name.clone()),
                 csrf_token: account.csrf_token.clone(),
             };
-            let _ = crate::session::save(&data_dir, &refreshed);
+            // A cookie that cannot be sealed is a login this machine will forget:
+            // the run still works, so it is a warn rather than a page state (G41).
+            if let Err(error) = crate::session::save(&data_dir, &refreshed) {
+                tracing::warn!(%error, "session cookie could not be saved");
+            }
             (account, refreshed)
         });
         on_ui(move |shared| {
@@ -316,7 +325,9 @@ impl App {
                     user_name: Some(account.name.clone()),
                     csrf_token: account.csrf_token.clone(),
                 };
-                let _ = crate::session::save(&data_dir, &verified);
+                if let Err(error) = crate::session::save(&data_dir, &verified) {
+                tracing::warn!(%error, "verified session could not be saved");
+            }
                 (account, verified)
             });
             on_ui(move |shared| {

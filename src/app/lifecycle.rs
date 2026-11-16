@@ -4,7 +4,35 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let rt =
         Arc::new(Runtime::new().map_err(|e| slint::PlatformError::Other(format!("tokio: {e}")))?);
     let ui = AppWindow::new()?;
-    let app: Shared = Rc::new(RefCell::new(App::new(ui.as_weak(), rt)));
+    // A launch that cannot open a single store still opens the window, on the
+    // sentence that says why: a panic here is a window that vanishes with no
+    // message on the screen at all (T8).
+    let app: Shared = match App::new(ui.as_weak(), rt) {
+        Ok(app) => Rc::new(RefCell::new(app)),
+        Err(error) => {
+            tracing::error!(%error, "no history store could be opened; the window reports it");
+            let message = format!(
+                "无法打开本地数据库：{error}。请检查数据目录是否可写，然后重新启动。"
+            );
+            // The home page is the destination this window starts on, and each of its
+            // bands draws its own state: the reason has to be on all four, or the only
+            // thing a user sees is a set of skeletons that never fill (T8).
+            ui.set_home_feed_state(3);
+            ui.set_home_feed_message(message.clone().into());
+            ui.set_home_latest_state(3);
+            ui.set_home_latest_message(message.clone().into());
+            ui.set_home_tags_state(3);
+            ui.set_home_tags_message(message.clone().into());
+            ui.set_home_artists_state(3);
+            ui.set_home_artists_message(message.clone().into());
+            ui.set_grid_state(3);
+            ui.set_grid_state_title("本地数据库无法打开".into());
+            ui.set_grid_state_glyph("warning".into());
+            ui.set_grid_message(message.clone().into());
+            ui.set_status_text("本地数据库不可用：这台机器上的记录无法保存".into());
+            return ui.run();
+        }
+    };
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
 
     install_callbacks(&app);
@@ -136,15 +164,49 @@ pub(crate) fn apply_window_size(app: &Shared) {
     ));
 }
 
-impl App {
-    pub(crate) fn new(ui: slint::Weak<AppWindow>, rt: Arc<Runtime>) -> Self {
-        let data_dir = data_dir();
-        let _ = std::fs::create_dir_all(&data_dir);
+/// Open the history database: the file first, memory second.
+///
+/// The `expect` this replaces was the round's second non-test panic (T8), and a
+/// panic on the UI thread is a window that disappears without a word. A disk that
+/// cannot be opened is not fatal - the session runs, it just will not be
+/// remembered - so it comes back as the sentence the shell shows; a store that
+/// cannot even be allocated is returned, and the caller opens the window on its
+/// own error state instead of throwing the process away.
+pub(crate) fn open_history_store(
+    path: &std::path::Path,
+) -> Result<(Store, Option<String>), pixiv_store::StoreError> {
+    match Store::open(path) {
+        Ok(store) => Ok((store, None)),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "the history database could not be opened; this session runs from memory"
+            );
+            let notice = format!(
+                "本地历史数据库无法打开（{error}）：本次使用内存记录，浏览历史与设置不会保存"
+            );
+            Store::open_in_memory().map(|store| (store, Some(notice)))
+        }
+    }
+}
 
-        // A broken database must never stop the app from starting.
-        let store = Store::open(&data_dir.join("pixiv-desktop.db"))
-            .or_else(|_| Store::open_in_memory())
-            .expect("in-memory store always opens");
+impl App {
+    pub(crate) fn new(
+        ui: slint::Weak<AppWindow>,
+        rt: Arc<Runtime>,
+    ) -> Result<Self, pixiv_store::StoreError> {
+        let data_dir = data_dir();
+        if let Err(error) = std::fs::create_dir_all(&data_dir) {
+            // Not fatal - the store open below reports the same directory - but a
+            // permission problem that only shows up as a missing history is a mystery
+            // (G41).
+            tracing::warn!(%error, dir = %data_dir.display(), "data directory could not be created");
+        }
+
+        // A broken database must never stop the app from starting, and it must not
+        // start silently either: the file is tried first, memory second, and the
+        // failure with no fallback is *returned* rather than unwrapped (T8).
+        let (store, store_notice) = open_history_store(&data_dir.join("pixiv-desktop.db"))?;
 
         // Cache budgets, defined once. Settings renders these numbers, and before
         // this the page showed a second hard-coded 192/1024 that merely happened to
@@ -160,7 +222,11 @@ impl App {
         let download_dir = persisted(&store, "download_dir")
             .map(PathBuf::from)
             .unwrap_or_else(downloads_dir);
-        let _ = std::fs::create_dir_all(&download_dir);
+        if let Err(error) = std::fs::create_dir_all(&download_dir) {
+            // Each download reports its own failure; this line is what explains why
+            // they all fail (G41).
+            tracing::warn!(%error, dir = %download_dir.display(), "download directory could not be created");
+        }
         let template = persisted(&store, "filename_template")
             .unwrap_or_else(|| "{illust_id}_p{page}_{title}".to_string());
 
@@ -195,7 +261,11 @@ impl App {
             let store = store.clone();
             rt.spawn(async move {
                 while let Some(entry) = view_rx.recv().await {
-                    let _ = store.record_view(&entry);
+                    // One history row fewer is the only consequence, which is exactly
+                    // why it has to be said somewhere (G41).
+                    if let Err(error) = store.record_view(&entry) {
+                        tracing::debug!(%error, "history row could not be written");
+                    }
                 }
             });
         }
@@ -253,7 +323,7 @@ impl App {
         // reader's preferences are one small row that has to be read once anyway.
         let reader_prefs_json = store.novel_setting("novel.reader.prefs").ok().flatten();
 
-        Self {
+        let app = Self {
             ui,
             rt,
             store,
@@ -319,7 +389,13 @@ impl App {
                 }
                 state
             },
+        };
+        // Said once, on the shell's own notice bar: a session that cannot remember
+        // anything must not look like one that can (T8).
+        if let Some(notice) = store_notice {
+            app.notify(2, notice);
         }
+        Ok(app)
     }
 }
 

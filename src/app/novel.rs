@@ -957,17 +957,42 @@ impl App {
     }
 }
 
+/// Read one novel's stored position, saying so when the read itself failed.
+///
+/// "Nothing stored" and "the database would not answer" both mean the reader opens
+/// at the beginning, which is fine - but only one of them is a failure, and a
+/// failure that reaches neither a state nor a log is what G41 exists to stop.
+fn stored_novel_progress(
+    store: &pixiv_store::Store,
+    id: u64,
+) -> Option<pixiv_store::NovelProgress> {
+    match store.novel_progress(&id.to_string()) {
+        Ok(progress) => progress,
+        Err(error) => {
+            tracing::debug!(%error, novel = id, "reading position could not be read");
+            None
+        }
+    }
+}
+
 /// One sentence a user can act on, per failure family.
 pub(crate) fn novel_error_text(error: &PixivError) -> String {
     match error {
-        PixivError::Unauthorized => "登录已失效：请在设置中重新登录后再试".to_string(),
-        PixivError::Network(_) => "无法连接 Pixiv：请检查网络或代理设置".to_string(),
-        PixivError::Decode(_) => "Pixiv 返回了无法解析的小说数据（接口可能已变更）".to_string(),
+        // The novel-specific readings first: a 404 here is about the novel, and a
+        // changed payload is about the reader's data.
         PixivError::Http { status, .. } if *status == 404 => {
             "这本小说不存在，或作者已删除/设为私密".to_string()
         }
-        PixivError::Api(message) if !message.is_empty() => message.clone(),
-        other => other.to_string(),
+        PixivError::Decode(_) => "Pixiv 返回了无法解析的小说数据（接口可能已变更）".to_string(),
+        // C6: a flagged non-auth 4xx now arrives as `Http { status, message }` -
+        // the crate layer stopped flattening it into `Api` - so the arm below no
+        // longer catches it and Pixiv's own sentence was being replaced by the
+        // generic one. It is the sentence the user needs: keep it verbatim.
+        PixivError::Http { message, .. } if !message.trim().is_empty() => message.clone(),
+        PixivError::Api(message) if !message.trim().is_empty() => message.clone(),
+        // Everything else is the app-wide sentence, so an expired cookie says
+        // 重新登录 here as it does on every other page (T2).
+        other => describe_session_error(other),
     }
 }
 
@@ -1032,7 +1057,7 @@ impl App {
         };
         rt.spawn(async move {
             let result = client.novel(Id(id)).await;
-            let progress = store.novel_progress(&id.to_string()).ok().flatten();
+            let progress = stored_novel_progress(&store, id);
             on_ui(move |shared| {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
@@ -1289,7 +1314,7 @@ impl App {
         };
         rt.spawn(async move {
             let result = client.novel(Id(id)).await;
-            let progress = store.novel_progress(&id.to_string()).ok().flatten();
+            let progress = stored_novel_progress(&store, id);
             on_ui(move |shared| {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;

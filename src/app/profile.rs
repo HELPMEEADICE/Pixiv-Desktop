@@ -84,7 +84,7 @@ impl App {
             let profile = match profile {
                 Ok(profile) => profile,
                 Err(error) => {
-                    let message = error.to_string();
+                    let message = describe_session_error(&error);
                     on_ui(move |shared| {
                         let Ok(mut app) = shared.try_borrow_mut() else {
                             return;
@@ -103,15 +103,21 @@ impl App {
             // message to the page.
             let (ids, ids_error) = match ids {
                 Ok(ids) => (ids, None),
-                Err(error) => (Vec::new(), Some(error.to_string())),
+                Err(error) => (Vec::new(), Some(describe_session_error(&error))),
             };
             let first: Vec<Id> = ids.iter().take(PROFILE_PAGE).copied().collect();
             // Nothing to ask for when the id list itself failed: an empty request
             // would answer "no works" and overwrite the reason with a second lie.
-            let works = if ids_error.is_some() {
-                Vec::new()
+            // A failed work list is a failure too: `unwrap_or_default` turned it into
+            // "no works", which is a statement about the artist rather than about the
+            // request (T2).
+            let (works, works_error) = if ids_error.is_some() {
+                (Vec::new(), None)
             } else {
-                client.user_works(target, &first).await.unwrap_or_default()
+                match client.user_works(target, &first).await {
+                    Ok(works) => (works, None),
+                    Err(error) => (Vec::new(), Some(describe_session_error(&error))),
+                }
             };
 
             on_ui(move |shared| {
@@ -141,11 +147,11 @@ impl App {
                 app.profile = Some(state);
                 app.feed_owner = Some(route);
                 app.publish_profile();
-                if let Some(message) = app
-                    .profile
-                    .as_ref()
-                    .and_then(|state| state.ids_error.clone())
-                {
+                if let Some(message) = works_error.or_else(|| {
+                    app.profile
+                        .as_ref()
+                        .and_then(|state| state.ids_error.clone())
+                }) {
                     // The header loaded, the works did not: say so on both bands
                     // instead of leaving the grid on a skeleton with no way back.
                     app.fail_profile_works(&message);
@@ -194,6 +200,10 @@ impl App {
                 };
                 app.avatar_loading.remove(&url);
                 let Some(raw) = raw else {
+                    // The banner has no state property of its own - it is an `image`
+                    // and nothing else - so the log line is the whole record, and the
+                    // header keeps the initials it drew (T10).
+                    tracing::debug!(url = %url, "profile background fetch failed");
                     return;
                 };
                 let image = raw.to_slint();

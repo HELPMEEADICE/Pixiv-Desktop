@@ -85,7 +85,17 @@ impl App {
                     return;
                 };
                 let mut app = shared.borrow_mut();
-                app.install_detail(illust, pages, epoch);
+                app.install_detail_with_follow(
+                    DetailPayload {
+                        illust,
+                        pages,
+                        pages_failed: false,
+                        // The demo catalogue has no follow state of its own; it is
+                        // the demo, and the page says so.
+                        following: FollowState::NotFollowing,
+                    },
+                    epoch,
+                );
             }
             Mode::Real => {
                 let app = shared.borrow();
@@ -100,27 +110,42 @@ impl App {
                     // Detail, pages and follow-state in one round trip batch: the
                     // page used to show a single page for every real artwork
                     // because the page list was never fetched.
-                    let detail = client.illust_detail(illust_id).await;
-                    let (illust, pages, following) = match detail {
-                        Ok(illust) => {
-                            let pages = client
-                                .illust_pages(illust_id)
-                                .await
-                                .unwrap_or_else(|_| Vec::new());
-                            let following = client
-                                .user_profile(illust.author.id)
-                                .await
-                                .map(|profile| profile.is_followed)
-                                .unwrap_or(false);
-                            (illust, pages, following)
-                        }
+                    let illust = match client.illust_detail(illust_id).await {
+                        Ok(illust) => illust,
                         Err(error) => {
                             on_ui(move |shared| {
-                                App::fail_detail(shared, &error.to_string());
+                                App::fail_detail(shared, &describe_session_error(&error));
                             });
                             return;
                         }
                     };
+                    // T1: the two side reads keep their Results. A failed page list
+                    // used to be `Vec::new()` and a failed profile read `false`, so a
+                    // 30-page work rendered as one page and an unread artist was
+                    // reported as 「未关注」.
+                    let pages = match client.illust_pages(illust_id).await {
+                        Ok(pages) => Ok(pages),
+                        Err(error) => {
+                            tracing::warn!(
+                                illust = illust_id.get(),
+                                %error,
+                                "page list failed; the payload's page count stands"
+                            );
+                            Err(error)
+                        }
+                    };
+                    let follow = match client.user_profile(illust.author.id).await {
+                        Ok(profile) => Ok(profile.is_followed),
+                        Err(error) => {
+                            tracing::warn!(
+                                artist = illust.author.id.get(),
+                                %error,
+                                "follow state could not be read"
+                            );
+                            Err(error)
+                        }
+                    };
+                    let payload = read_detail(illust, pages, follow);
                     on_ui(move |shared| {
                         let Ok(mut app) = shared.try_borrow_mut() else {
                             return;
@@ -128,7 +153,7 @@ impl App {
                         if app.detail_epoch != epoch {
                             return;
                         }
-                        app.install_detail_with_follow(illust, pages, following, epoch);
+                        app.install_detail_with_follow(payload, epoch);
                     });
                 });
             }
@@ -145,24 +170,109 @@ impl App {
     }
 }
 
-impl App {
-    pub(crate) fn install_detail(&mut self, illust: Illust, pages: Vec<PageMeta>, epoch: u64) {
-        let following = false;
-        self.install_detail_with_follow(illust, pages, following, epoch);
+/// What the three detail requests answered, failures included.
+pub(crate) struct DetailPayload {
+    pub illust: Illust,
+    /// Page metadata, empty when the page-list read failed.
+    pub pages: Vec<PageMeta>,
+    /// True when the page list could not be read: the viewer still draws
+    /// `illust.page_count` cells and the page says where the pages went (T1).
+    pub pages_failed: bool,
+    pub following: FollowState,
+}
+
+/// What the page knows about the author's follow state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FollowState {
+    Following,
+    NotFollowing,
+    /// The profile read failed, so the page must not claim either state (T1).
+    Unknown,
+}
+
+impl FollowState {
+    /// The value `detail-following` can carry; `None` when the page does not know.
+    ///
+    /// `detail-following` is a bool and `ui/` is not this track's to change, so an
+    /// unknown state is published through `detail-message` plus one shell notice
+    /// rather than by drawing 「未关注」 (see the track report: a tri-state property
+    /// is the honest home for it).
+    pub(crate) fn known(self) -> Option<bool> {
+        match self {
+            Self::Following => Some(true),
+            Self::NotFollowing => Some(false),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// Assemble the detail payload, keeping both side reads' answers.
+///
+/// The page list and the profile read used to be collapsed into `Vec::new()` and
+/// `false` (T1), which is how a 30-page work came back looking one page long and
+/// every unread artist looked unfollowed. Both Results are kept: a failure is a
+/// failure, and the page has a sentence for each.
+pub(crate) fn read_detail(
+    illust: Illust,
+    pages: Result<Vec<PageMeta>, PixivError>,
+    follow: Result<bool, PixivError>,
+) -> DetailPayload {
+    let (pages, pages_failed) = match pages {
+        Ok(pages) => (pages, false),
+        Err(_) => (Vec::new(), true),
+    };
+    let following = match follow {
+        Ok(true) => FollowState::Following,
+        Ok(false) => FollowState::NotFollowing,
+        Err(_) => FollowState::Unknown,
+    };
+    DetailPayload {
+        illust,
+        pages,
+        pages_failed,
+        following,
+    }
+}
+
+/// How many cells the viewer draws for one payload.
+///
+/// The payload's own count is the floor: a work Pixiv says has 30 pages draws 30
+/// cells even when the page list never arrived (T1).
+pub(crate) fn viewer_page_count(page_count: u32, pages: usize) -> usize {
+    (page_count.max(1) as usize).max(pages)
+}
+
+/// The sentence the page carries for whatever did not arrive (T1).
+pub(crate) fn detail_note(pages_failed: bool, following: FollowState) -> Option<String> {
+    let mut notes: Vec<&'static str> = Vec::new();
+    if pages_failed {
+        notes.push("分页列表没有读到：这里按作品标称的页数画出占位，可能只有第一页有图");
+    }
+    if following == FollowState::Unknown {
+        notes.push("关注状态未知：画师资料没有读到，这里不会显示你是否已关注");
+    }
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join("；"))
     }
 }
 
 impl App {
-    pub(crate) fn install_detail_with_follow(
-        &mut self,
-        illust: Illust,
-        pages: Vec<PageMeta>,
-        following: bool,
-        epoch: u64,
-    ) {
+    /// Put one work on the detail page.
+    ///
+    /// The follow state is an enum now: `false` used to mean both 「未关注」 and
+    /// 「没读到」 (T1).
+    pub(crate) fn install_detail_with_follow(&mut self, payload: DetailPayload, epoch: u64) {
         if self.detail_epoch != epoch {
             return;
         }
+        let DetailPayload {
+            illust,
+            pages,
+            pages_failed,
+            following,
+        } = payload;
 
         {
             let ui = self.ui();
@@ -180,7 +290,10 @@ impl App {
             // F4: the restriction the *reply* reported, never one inferred from a
             // click. A private bookmark draws its lock glyph from this alone.
             ui.set_bookmark_restrict(restrict_code(illust.bookmark.restrict));
-            ui.set_detail_following(following);
+            // The button's label is a claim about the artist, so it is only drawn
+            // from a read that actually answered (T1).
+            ui.set_detail_following(following.known().unwrap_or(false));
+            ui.set_detail_message(detail_note(pages_failed, following).unwrap_or_default().into());
             ui.set_detail_ugoira_hint(
                 if illust.kind == IllustKind::Ugoira {
                     "正在准备内置播放；也能导出为 GIF 保存在下载目录。"
@@ -238,7 +351,7 @@ impl App {
         }
 
         // Page skeletons, sized from the real page metadata when we have it.
-        let count = (illust.page_count.max(1) as usize).max(pages.len());
+        let count = viewer_page_count(illust.page_count, pages.len());
         let skeletons: Vec<ViewerPage> = (0..count)
             .map(|index| {
                 let meta = pages.get(index);
@@ -287,6 +400,12 @@ impl App {
         match self.detail_author_avatar_url.clone() {
             Some(url) => self.spawn_avatars(vec![url]),
             None => self.backfill_author_avatars(),
+        }
+        // A partly loaded page says which half is missing, above the shell's status
+        // bar as well as in `detail-message`, because that property is only drawn in
+        // the loading and error states (T1).
+        if let Some(note) = detail_note(pages_failed, following) {
+            self.notify(2, note);
         }
         self.refresh_chrome();
     }
@@ -380,6 +499,15 @@ impl App {
     }
 }
 
+/// A toggle that is already in flight owns its button; the second click is dropped.
+///
+/// Two clicks used to send two requests, each computed from the same stale state,
+/// so the second undid the first and the page kept whichever reply landed last
+/// (T13). `toggle_follow` has always held this slot; the bookmark toggle did not.
+pub(crate) fn toggle_allowed(busy: bool) -> bool {
+    !busy
+}
+
 impl App {
     pub(crate) fn toggle_bookmark(&mut self, id: &str) {
         let Ok(raw) = id.parse::<u64>() else {
@@ -409,6 +537,16 @@ impl App {
                 let Some(client) = self.client.clone() else {
                     return;
                 };
+                // One request at a time, decided once: the busy flag the follow
+                // button uses is the same slot, so a double click sends one POST and
+                // the reply it draws belongs to the state this click saw (T13).
+                {
+                    let ui = self.ui();
+                    if !toggle_allowed(ui.get_detail_busy()) {
+                        return;
+                    }
+                    ui.set_detail_busy(true);
+                }
                 // Decide the direction from what the server last told us, and
                 // carry the current visibility so a private bookmark stays
                 // private.
@@ -431,6 +569,8 @@ impl App {
                         let Ok(mut app) = shared.try_borrow_mut() else {
                             return;
                         };
+                        // The slot is free again whatever the answer was (T13).
+                        app.ui().set_detail_busy(false);
                         match result {
                             Ok(state) => {
                                 // Apply the state the server reported, not the

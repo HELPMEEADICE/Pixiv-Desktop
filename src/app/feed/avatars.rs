@@ -132,7 +132,109 @@ pub(crate) fn patch_avatar_row(
     patched
 }
 
+/// The same one-row patch, for a face that did not arrive.
+///
+/// A failed fetch used to drop its loading key and return, which left the row on
+/// `BAND_LOADING` for the life of the page: a spinner that never stops is a
+/// promise the app cannot keep (T10). The row moves to the state the pages draw
+/// for "no face" - 2, failed or absent - and keeps the initial it already had.
+pub(crate) fn fail_avatar_row(
+    model: &ModelRc<RecommendUserItem>,
+    users: &[RecommendUser],
+    url: &str,
+) -> usize {
+    let mut patched = 0;
+    for (row, user) in users.iter().enumerate() {
+        if user.avatar.as_deref() != Some(url) {
+            continue;
+        }
+        let Some(mut item) = model.row_data(row) else {
+            continue;
+        };
+        if item.avatar_state == BAND_EMPTY {
+            continue;
+        }
+        item.avatar_state = BAND_EMPTY;
+        model.set_row_data(row, item);
+        patched += 1;
+    }
+    patched
+}
+
+/// The card half of the same rule (T10).
+pub(crate) fn fail_card_avatar_row(
+    model: &ModelRc<IllustItem>,
+    works: &[Illust],
+    url: &str,
+) -> usize {
+    let mut patched = 0;
+    for (row, illust) in works.iter().enumerate() {
+        if illust.author.avatar.as_deref() != Some(url) {
+            continue;
+        }
+        let Some(mut item) = model.row_data(row) else {
+            continue;
+        };
+        if item.author_avatar_state == BAND_EMPTY {
+            continue;
+        }
+        item.author_avatar_state = BAND_EMPTY;
+        model.set_row_data(row, item);
+        patched += 1;
+    }
+    patched
+}
+
 impl App {
+    /// Park every row that was waiting for this face in its failure state.
+    ///
+    /// Returns how many surfaces were written, which is what the debug line at the
+    /// call site reports: a failure that reaches neither a page state nor a log is
+    /// exactly the defect T10 names.
+    pub(crate) fn fail_avatars(&mut self, url: &str) -> usize {
+        let mut patched = 0;
+        if self.account_avatar.as_deref() == Some(url) {
+            self.ui().set_account_avatar_state(BAND_EMPTY);
+            patched += 1;
+        }
+        if self
+            .profile
+            .as_ref()
+            .and_then(|state| state.profile.avatar.clone())
+            .as_deref()
+            == Some(url)
+        {
+            self.ui().set_profile_avatar_state(BAND_EMPTY);
+            patched += 1;
+        }
+        if self.detail_author_avatar_url.as_deref() == Some(url) {
+            self.ui().set_detail_author_avatar_state(BAND_EMPTY);
+            patched += 1;
+        }
+        let model = self.ui().get_home_artists();
+        patched += fail_avatar_row(&model, &self.home.artists, url);
+        let model = self.ui().get_discovery_users();
+        patched += fail_avatar_row(&model, &self.discovery.users, url);
+        let model = self.ui().get_home_latest();
+        patched += fail_card_avatar_row(&model, &self.home.latest, url);
+        for column in &self.columns {
+            for row in 0..column.row_count() {
+                let Some(mut item) = column.row_data(row) else {
+                    continue;
+                };
+                if item.author_avatar_url.as_str() != url
+                    || item.author_avatar_state == BAND_EMPTY
+                {
+                    continue;
+                }
+                item.author_avatar_state = BAND_EMPTY;
+                column.set_row_data(row, item);
+                patched += 1;
+            }
+        }
+        patched
+    }
+
     // ------------------------------------------------------------- avatars
 
     /// Take one URL to a decoded image, so a card, a header and the top bar can
@@ -188,6 +290,14 @@ impl App {
                     };
                     app.avatar_loading.remove(&url);
                     let Some(raw) = raw else {
+                        // T10: the row leaves BAND_LOADING instead of waiting for a
+                        // face that is not coming, and the reason survives in the log.
+                        let parked = app.fail_avatars(&url);
+                        tracing::debug!(
+                            url = %url,
+                            parked,
+                            "avatar fetch failed; the rows that wanted it are done loading"
+                        );
                         return;
                     };
                     let image = raw.to_slint();
@@ -318,11 +428,15 @@ impl App {
         let rt = self.rt.clone();
         rt.spawn(async move {
             for author in wanted {
-                let found = client
-                    .user_profile(Id(author))
-                    .await
-                    .ok()
-                    .and_then(|profile| profile.avatar);
+                let found = match client.user_profile(Id(author)).await {
+                    Ok(profile) => profile.avatar,
+                    Err(error) => {
+                        // No face is a row that keeps its initial, which is not worth
+                        // a page state - but it is worth a line (G41).
+                        tracing::debug!(%error, artist = author, "author avatar lookup failed");
+                        None
+                    }
+                };
                 on_ui(move |shared| {
                     let Ok(mut app) = shared.try_borrow_mut() else {
                         return;
@@ -554,5 +668,85 @@ mod tests {
         }
         assert_eq!(avatars.len(), 1);
         assert_eq!(order.len(), 1);
+    }
+
+    /// T10 - a face that did not arrive parks its row instead of spinning forever.
+    ///
+    /// The fetch used to drop its loading key and return, leaving the row on
+    /// BAND_LOADING for the life of the page. On the old tree there is no failure
+    /// state to assert and the row stays at BAND_LOADING: that is the assertion that
+    /// fails.
+    #[test]
+    fn t10_a_failed_avatar_parks_the_row_in_its_failure_state() {
+        let url = "https://i.pximg.net/face.jpg";
+        let users = vec![user(1, Some(url)), user(2, Some("https://i.pximg.net/other.jpg"))];
+        let rows: Vec<RecommendUserItem> = users
+            .iter()
+            .map(|user| RecommendUserItem {
+                id: user.id.to_string().into(),
+                name: user.name.clone().into(),
+                account: user.account.clone().into(),
+                comment: "".into(),
+                avatar: slint::Image::default(),
+                avatar_url: user.avatar.clone().unwrap_or_default().into(),
+                preview: slint::Image::default(),
+                followed: false,
+                premium: false,
+                avatar_state: BAND_LOADING,
+            })
+            .collect();
+        let model = Rc::new(VecModel::from(rows));
+        let published = ModelRc::from(model.clone());
+
+        assert_eq!(fail_avatar_row(&published, &users, url), 1);
+        assert_eq!(
+            model.row_data(0).unwrap().avatar_state,
+            BAND_EMPTY,
+            "the row leaves BAND_LOADING when the fetch fails"
+        );
+        assert_eq!(
+            model.row_data(1).unwrap().avatar_state,
+            BAND_LOADING,
+            "another row's face is not touched"
+        );
+        // The patch is idempotent: a second failure of the same URL writes nothing.
+        assert_eq!(fail_avatar_row(&published, &users, url), 0);
+
+        // The card half of the same rule.
+        let works = vec![
+            work_with_face(1, Some(url)),
+            work_with_face(2, Some("https://i.pximg.net/other.jpg")),
+        ];
+        let cards: Vec<IllustItem> = works
+            .iter()
+            .map(|illust| IllustItem {
+                id: illust.id.to_string().into(),
+                title: "".into(),
+                author: "".into(),
+                author_id: "".into(),
+                cover: slint::Image::default(),
+                kind: 0,
+                page_count: 1,
+                bookmarked: false,
+                rank: 0,
+                width: 0,
+                height: 0,
+                state: 0,
+                author_avatar: slint::Image::default(),
+                author_avatar_url: illust.author.avatar.clone().unwrap_or_default().into(),
+                author_avatar_state: BAND_LOADING,
+                selected: false,
+                selectable: false,
+            })
+            .collect();
+        let cards = Rc::new(VecModel::from(cards));
+        let published_cards = ModelRc::from(cards.clone());
+        assert_eq!(fail_card_avatar_row(&published_cards, &works, url), 1);
+        assert_eq!(
+            cards.row_data(0).unwrap().author_avatar_state,
+            BAND_EMPTY,
+            "the card's author face leaves BAND_LOADING too"
+        );
+        assert_eq!(cards.row_data(1).unwrap().author_avatar_state, BAND_LOADING);
     }
 }

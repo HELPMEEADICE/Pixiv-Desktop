@@ -54,7 +54,23 @@ pub(crate) fn forced_demo() -> bool {
     std::env::var_os("PIXIV_DESKTOP_DEMO").is_some()
 }
 
+/// The window, when the UI thread still owns one.
+///
+/// `App::ui()` used to be `upgrade().expect("window alive")`, and every landing of
+/// a background result went through that accessor, so a decode or a network answer
+/// that arrived after the window was dropped panicked the event loop (T8). The
+/// accessor stays the short form for code that provably runs with a window on
+/// screen; the one place a result can land *without* one - `on_ui` - asks this
+/// first and drops the single result instead.
+pub(crate) fn live_window(ui: &slint::Weak<AppWindow>) -> Option<AppWindow> {
+    ui.upgrade()
+}
+
 /// Run `f` with the app handle on the UI thread.
+///
+/// A result that lands after the window is gone is dropped, with one debug line:
+/// every closure registered here ends up setting Slint properties, and a window
+/// that no longer exists has none to set.
 pub(crate) fn on_ui<F>(f: F)
 where
     F: FnOnce(&Shared) + Send + 'static,
@@ -62,8 +78,19 @@ where
     let _ = invoke_from_event_loop(move || {
         APP.with(|slot| {
             let borrowed = slot.borrow();
-            if let Some(shared) = borrowed.as_ref() {
+            let Some(shared) = borrowed.as_ref() else {
+                return;
+            };
+            // A borrow already held here means the UI thread is mid-mutation; that
+            // was never a dead window, so the old behaviour stands.
+            let alive = match shared.try_borrow() {
+                Ok(app) => app.ui_alive(),
+                Err(_) => true,
+            };
+            if alive {
                 f(shared);
+            } else {
+                tracing::debug!("dropping a result that landed after the window closed");
             }
         });
     });
@@ -124,8 +151,18 @@ impl RawImage {
 }
 
 impl App {
+    /// True while the window this app posts to still exists (T8).
+    pub(crate) fn ui_alive(&self) -> bool {
+        live_window(&self.ui).is_some()
+    }
+
+    /// The window.
+    ///
+    /// Sound for every caller that runs with a window on screen - a Slint callback,
+    /// a repaint, a timer that already checked - and for the landing of a result,
+    /// because `on_ui` refuses to run a closure once the window is gone.
     pub(crate) fn ui(&self) -> AppWindow {
-        self.ui.upgrade().expect("window alive")
+        live_window(&self.ui).expect("window alive")
     }
 }
 
@@ -227,7 +264,15 @@ pub(crate) fn ranking_index(kind: RankingKind) -> i32 {
 }
 
 pub(crate) fn persisted(store: &Store, key: &str) -> Option<String> {
-    store.get_setting(key).ok().flatten()
+    match store.get_setting(key) {
+        Ok(value) => value,
+        Err(error) => {
+            // Absent and unreadable mean the same default, but only one of them is
+            // worth a line (G41).
+            tracing::debug!(%error, key, "stored setting could not be read; using the default");
+            None
+        }
+    }
 }
 
 pub(crate) fn human_bytes(bytes: u64) -> String {

@@ -225,8 +225,10 @@ impl App {
                                     pixiv_types::domain::history_suggestions(&history, 5);
                                 app.suggest.active = -1;
                                 app.suggest.visible = true;
-                                app.suggest.note =
-                                    format!("联想服务不可用（{error}），以上为本机搜索记录");
+                                app.suggest.note = format!(
+                                    "联想服务不可用（{}），以上为本机搜索记录",
+                                    describe_session_error(&error)
+                                );
                             }
                         }
                         app.publish_suggestions();

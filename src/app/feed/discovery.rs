@@ -120,7 +120,7 @@ impl App {
             let mut quick_error: Option<String> = None;
             match quick {
                 Ok(rows) => works.extend(rows),
-                Err(error) => quick_error = Some(error.to_string()),
+                Err(error) => quick_error = Some(describe_session_error(&error)),
             }
             if let Ok(batch) = &pool {
                 works.extend(batch.works.iter().cloned());
@@ -142,7 +142,17 @@ impl App {
                 let mut stream = futures::stream::iter(targets)
                     .map(move |id| {
                         let client = detail_client.clone();
-                        async move { client.illust_detail(id).await.ok() }
+                        async move {
+                            match client.illust_detail(id).await {
+                                Ok(illust) => Some(illust),
+                                Err(error) => {
+                                    // One work fewer on the grid is not worth a page
+                                    // state, but it is worth a line (G41).
+                                    tracing::debug!(%error, id = id.get(), "discovery hydrate failed");
+                                    None
+                                }
+                            }
+                        }
                     })
                     .buffer_unordered(4);
                 while let Some(found) = stream.next().await {
