@@ -144,6 +144,18 @@ component SuggestRow inherits Rectangle {
         if (root.is-active) { root.became-active(root.index); }
     }
 
+    // U4 (plan R10 2.2): the only hit surface was a bare `TouchArea`, so the row this
+    // app *recommends* was the one row of the dropdown a screen reader could read and
+    // not act on. Same shape as `PaletteRowView` above: role, name and default action
+    // on the row. No `FocusScope`, for the same documented reason - this list is driven
+    // by the query field's cursor (`suggest-key`), and a Tab stop per suggestion would
+    // mean nine presses to leave a panel nobody asked to walk.
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: root.item.count == ""
+        ? root.item.label
+        : root.item.label + " · " + root.item.count;
+    accessible-action-default => { root.choose(); }
+
     height: 34px;
     background: root.item.active ? Theme.accent-subtle
         : (row.has-hover ? Theme.layer-alt : transparent);
