@@ -158,13 +158,42 @@ impl CoverLoader {
     where
         I: IntoIterator<Item = (String, String)>,
     {
+        // The owned form, kept for the changed-sets that are built anyway: an upgrade
+        // list, a re-plan's stale ids. The render path uses the borrowed one below.
+        let items: Vec<(String, String)> = items.into_iter().collect();
+        self.plan_borrowed(
+            items.iter().map(|(id, url)| (id.as_str(), url.as_str())),
+            target,
+            cached,
+        )
+    }
+
+    /// Decide which covers to start now, from borrowed ids (B11).
+    ///
+    /// The render path holds its ids in a buffer it refills and its URLs in the feed,
+    /// so a work whose cover the feed already has costs no copy at all: only a request
+    /// that is actually started owns a string. The owned form above exists for the
+    /// small sets that are materialised anyway.
+    pub fn plan_borrowed<'a, I>(
+        &mut self,
+        items: I,
+        target: u32,
+        cached: impl Fn(&str) -> bool,
+    ) -> Vec<CoverRequest>
+    where
+        I: IntoIterator<Item = (&'a str, &'a str)>,
+    {
         let mut requests = Vec::new();
         for (id, url) in items {
-            if url.is_empty() || cached(&id) || self.inflight.contains_key(&id) {
+            if url.is_empty() || cached(id) || self.inflight.contains_key(id) {
                 continue;
             }
-            self.inflight.insert(id.clone(), target);
-            requests.push(CoverRequest { id, url, target });
+            self.inflight.insert(id.to_string(), target);
+            requests.push(CoverRequest {
+                id: id.to_string(),
+                url: url.to_string(),
+                target,
+            });
         }
         requests
     }

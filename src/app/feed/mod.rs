@@ -74,8 +74,21 @@ impl App {
         // site and a feed that is extended is never replaced (plan §2.3 R13).
         // `keep` is counted from the top of the feed, so what a column rebuild can
         // paint without waiting is exactly what survives.
-        let ids = self.items.iter().map(|illust| illust.id.to_string());
-        prune_covers(&mut self.covers, ids, COVERS_KEEP);
+        // One id buffer for the whole render (B11): refilled in place, pruned from
+        // here, and planned from by the column builder that runs below. A render used
+        // to materialise every id twice and drop both - a 512-entry set of owned ids
+        // and a 500-element Vec of (id, url) pairs, about 1 500 strings.
+        {
+            let App {
+                items,
+                covers,
+                cover_ids,
+                ..
+            } = self;
+            let mut ids = cover_ids.borrow_mut();
+            refill_ids(&mut ids, items.as_slice());
+            prune_covers(covers, ids.iter().map(String::as_str), COVERS_KEEP);
+        }
         // A new page extends the columns it finds. Rebuilding them re-ran the
         // balancer over the whole feed, so every card above silently moved to a
         // different column - the opposite of what `layout::distribute` is documented
@@ -376,12 +389,28 @@ pub(crate) fn rank_in(ranks: &HashMap<u64, i32>, illust: &Illust) -> i32 {
 impl App {
     /// Start cover loads for every item of the current feed.
     pub(crate) fn spawn_covers(&mut self) {
-        let urls: Vec<(String, String)> = self
-            .items
-            .iter()
-            .map(|illust| (illust.id.to_string(), illust.urls.grid().to_string()))
-            .collect();
-        self.request_covers(urls, false);
+        let target = self.cover_target();
+        let plan = {
+            let App {
+                items,
+                covers,
+                loader,
+                cover_ids,
+                ..
+            } = self;
+            // The buffer the prune filled, refilled only by what changed (B11): the
+            // ids are borrowed, and the loader copies one only for a request it starts.
+            let mut ids = cover_ids.borrow_mut();
+            refill_ids(&mut ids, items.as_slice());
+            loader.plan_borrowed(
+                ids.iter()
+                    .zip(items.iter())
+                    .map(|(id, illust)| (id.as_str(), illust.urls.grid())),
+                target,
+                |id| covers.contains_key(id),
+            )
+        };
+        self.spawn_cover_requests(plan);
     }
 
     /// Decode these covers at the tier the current geometry asks for.
@@ -404,8 +433,20 @@ impl App {
             }
         }
         let target = self.cover_target();
-        let cached = &self.covers;
-        let plan = self.loader.plan(urls, target, |id| cached.contains_key(id));
+        let plan = {
+            let App { covers, loader, .. } = self;
+            // The owned form: this caller's pairs were built anyway (an upgrade
+            // list, a re-plan's stale ids), and it is the one place that owns them.
+            loader.plan(urls, target, |id| covers.contains_key(id))
+        };
+        self.spawn_cover_requests(plan);
+    }
+
+    /// Start the decodes a plan asked for.
+    ///
+    /// Split out of [`App::request_covers`] so the render path, which plans from a
+    /// borrowed buffer (B11), shares one spawn half with every other caller.
+    fn spawn_cover_requests(&mut self, plan: Vec<crate::images::CoverRequest>) {
         if plan.is_empty() {
             return;
         }
@@ -841,6 +882,61 @@ mod tests {
         );
     }
 
+    /// B11 - one id buffer serves the prune and the plan, and a second render of the
+    /// same feed allocates nothing.
+    ///
+    /// A render materialised every id twice - a 512-entry set of owned ids for the
+    /// prune and a Vec of (id, url) pairs for the plan - and dropped both, about
+    /// 1 500 strings per page of covers. The plant that makes this red is
+    /// [refill_ids] rebuilding the buffer each time (500 new strings per render).
+    #[test]
+    fn b11_a_second_render_allocates_no_ids() {
+        let works: Vec<Illust> = (1..=500).map(work).collect();
+        let mut ids: Vec<String> = Vec::new();
+
+        assert_eq!(
+            refill_ids(&mut ids, &works),
+            500,
+            "the first render materialises each id once"
+        );
+        let pointers: Vec<*const u8> = ids.iter().map(|id| id.as_ptr()).collect();
+        let capacity = ids.capacity();
+
+        // The same feed again: the buffer and the strings in it are reused.
+        assert_eq!(refill_ids(&mut ids, &works), 0, "a second render allocates nothing");
+        assert_eq!(
+            ids.iter().map(|id| id.as_ptr()).collect::<Vec<_>>(),
+            pointers,
+            "the same 500 strings, not 500 new ones"
+        );
+        assert_eq!(ids.capacity(), capacity, "the buffer did not grow");
+
+        // A shorter feed truncates it without freeing anything.
+        assert_eq!(refill_ids(&mut ids, &works[..10]), 0);
+        assert_eq!(ids.len(), 10);
+        assert_eq!(ids.capacity(), capacity);
+
+        // A changed id is rewritten in place, so that row costs no allocation either.
+        let mut changed = works.clone();
+        changed[3].id = Id(99_999);
+        assert_eq!(refill_ids(&mut ids, &changed[..10]), 0);
+        assert_eq!(ids[3], "99999");
+
+        // The prune this buffer feeds keeps borrowed keys: the plan it also feeds
+        // starts nothing for a feed whose covers are all held.
+        let mut covers: HashMap<String, slint::Image> = HashMap::new();
+        for id in &ids {
+            covers.insert(id.clone(), slint::Image::default());
+        }
+        let before = covers.len();
+        assert_eq!(
+            prune_covers(&mut covers, ids.iter().map(String::as_str), COVERS_KEEP),
+            0,
+            "every cover the feed names stays"
+        );
+        assert_eq!(covers.len(), before);
+    }
+
     /// Pruning the cover map is not a column operation: the models keep their
     /// identity, their rows and their order (plan §2.3 R13).
     #[test]
@@ -856,7 +952,7 @@ mod tests {
         covers.insert("pruned".to_string(), slint::Image::default());
         // The append path prunes too now; the model above must survive it.
         assert_eq!(
-            prune_covers(&mut covers, std::iter::once("a".to_string()), COVERS_KEEP),
+            prune_covers(&mut covers, std::iter::once("a"), COVERS_KEEP),
             1
         );
 

@@ -223,20 +223,49 @@ pub(crate) fn retry_url(pages: &[PageMeta], largest: &str, index: usize) -> Opti
     }
 }
 
+/// Refill one id buffer for a render, reusing the strings already in it (B11).
+///
+/// Returns how many ids had to be allocated, which is what the tests assert on: a
+/// second render of the same feed answers 0. A render used to materialise every id
+/// twice - once for the prune's set and once for the plan's (id, url) pairs - and
+/// throw both away, about 1 500 strings per page of covers.
+pub(crate) fn refill_ids(ids: &mut Vec<String>, items: &[Illust]) -> usize {
+    let mut created = 0;
+    for (index, illust) in items.iter().enumerate() {
+        let fresh = illust.id.to_string();
+        match ids.get_mut(index) {
+            Some(slot) => {
+                if *slot != fresh {
+                    slot.clear();
+                    slot.push_str(&fresh);
+                }
+            }
+            None => {
+                ids.push(fresh);
+                created += 1;
+            }
+        }
+    }
+    ids.truncate(items.len());
+    created
+}
+
 /// Keep the covers the top of `order` still references; returns how many went.
 ///
 /// `covers` holds one decoded texture per work ever shown and nothing removed an
 /// entry, so an hour of browsing kept every cover alive for the rest of the
 /// session. `keep` bounds it even for an endless feed: the top of the feed is what
 /// a column rebuild can paint without waiting.
-pub(crate) fn prune_covers(
+pub(crate) fn prune_covers<'a>(
     covers: &mut HashMap<String, slint::Image>,
-    order: impl Iterator<Item = String>,
+    order: impl Iterator<Item = &'a str>,
     keep: usize,
 ) -> usize {
-    let live: HashSet<String> = order.take(keep).collect();
+    // Borrowed keys (B11): the set was 512 owned id strings, built and dropped on
+    // every render, next to the id buffer the plan needs anyway.
+    let live: HashSet<&str> = order.take(keep).collect();
     let before = covers.len();
-    covers.retain(|id, _| live.contains(id));
+    covers.retain(|id, _| live.contains(id.as_str()));
     before - covers.len()
 }
 

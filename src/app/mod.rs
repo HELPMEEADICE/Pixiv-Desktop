@@ -131,6 +131,12 @@ pub(crate) struct App {
     index: HashMap<String, (usize, usize)>,
     covers: HashMap<String, slint::Image>,
     loader: CoverLoader,
+    /// One id buffer per render, refilled in place (B11).
+    ///
+    /// The prune and the plan both need every id as a string, and a render used to
+    /// materialise them twice and drop both. Refilling this keeps the strings, so a
+    /// page of covers that is already held allocates nothing at all.
+    cover_ids: RefCell<Vec<String>>,
     /// Incremented on every feed reload; async results from an older epoch are
     /// dropped instead of being applied to the wrong page.
     epoch: u64,
@@ -805,7 +811,7 @@ mod tests {
         for id in ["a", "b", "c", "d"] {
             covers.insert(id.to_string(), slint::Image::default());
         }
-        let order = ["a", "b", "c"].iter().map(|id| id.to_string());
+        let order = ["a", "b", "c"].iter().copied();
         // Only the first `keep` entries of the feed survive, and an id the feed no
         // longer lists is dropped even when it would have fitted.
         assert_eq!(super::prune_covers(&mut covers, order, 2), 2);

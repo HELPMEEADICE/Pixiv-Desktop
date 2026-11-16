@@ -355,6 +355,7 @@ impl App {
             index: HashMap::new(),
             covers: HashMap::new(),
             loader: CoverLoader::new(),
+            cover_ids: RefCell::new(Vec::new()),
             epoch: 0,
             page_cursor: 1,
             reached_end: false,
