@@ -643,9 +643,19 @@ if ($plantedA11y -eq $a11yText) {
 $plantedDiffs = @(Compare-PageSet -Text @{ a11y = $plantedA11y })
 $revertedDiffs = @(Compare-PageSet -Text @{ a11y = $a11yText })
 $namesPair = @($plantedDiffs | Where-Object { $_.Pair -eq "a11y\budget" -and $_.Message -match "'settings'" }).Count -gt 0
+# G56 (E6): the other half of "the page set agrees with itself" - a page the capture set
+# photographs may not be excluded from every measurement set. Live, that is the shape
+# round twelve fixed (detail had a tracked baseline and no accessibility floor); the
+# plant hands the pre-E6 exclusion list back to the shipped predicate, so a re-merge of
+# the two lists is a FAIL that names the page, not a list that quietly agrees with
+# itself again.
+$completeNow = @(Test-PageSetCompleteness)
+$completePlanted = @(Test-PageSetCompleteness -Unmeasured @("detail", "user-profile"))
+$detailMeasured = ((Get-PageSet -For a11y) -contains "detail") -and ((Get-PageSet -For layout) -contains "detail") -and ((Get-PageSet -For budget) -contains "detail")
 $plantedShown = ($plantedDiffs | ForEach-Object { $_.Message }) -join " / "
 $agreeShown = if ($agreeNow.Count) { ($agreeNow | ForEach-Object { $_.Message }) -join " / " } else { "none" }
-Add-Case -Name "page-set" -Wanted "five sets agree; planted a11y list names a11y\budget + settings" -Ok ($agreeNow.Count -eq 0 -and $namesPair -and $revertedDiffs.Count -eq 0) -Evidence ("agree now={0} [{1}]; planted difference=[{2}]; reverted={3}" -f $agreeNow.Count, $agreeShown, $plantedShown, $revertedDiffs.Count)
+$completePlantedShown = if ($completePlanted.Count) { $completePlanted -join " / " } else { "none" }
+Add-Case -Name "page-set" -Wanted "five sets agree; planted a11y list names a11y\budget + settings; a photographed page is never unmeasured" -Ok ($agreeNow.Count -eq 0 -and $namesPair -and $revertedDiffs.Count -eq 0 -and $completeNow.Count -eq 0 -and $completePlanted.Count -eq 1 -and $detailMeasured) -Evidence ("agree now={0} [{1}]; planted difference=[{2}]; reverted={3}; completeness now={4}; pre-E6 exclusion planted=[{5}]; detail in a11y/layout/budget={6}" -f $agreeNow.Count, $agreeShown, $plantedShown, $revertedDiffs.Count, $completeNow.Count, $completePlantedShown, $detailMeasured)
 
 <#
   A number a gate prints, restated in prose. Four of them exist and each has one owner: the

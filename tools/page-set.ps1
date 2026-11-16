@@ -106,17 +106,25 @@ $script:PageLaunch = @{
     "novel-reader"    = @{ StartPage = "home"; Novel = "810000001"; Reader = $true }
 }
 
-# The two destinations no capture set opens. Both are reached only through a deep link
-# onto another page and neither has a measured accessibility floor or a tracked
-# baseline, so promoting one means measuring it first - which is a decision, and this is
-# where it is written.
-$script:PageUncaptured = @("detail", "user-profile")
-
 # The three pages the pixel baseline does not carry yet (G33): in the accessibility and
 # layout sets from round eleven, in the capture set once their baselines exist. Deleting
 # this line widens the capture set and turns the visual gate red until that is done,
 # which is the honest order.
 $script:PageUnbaselined = @("novels", "novel", "novel-reader")
+
+# The pages no *measurement* set reaches - not the same list, and until round twelve one
+# variable (PageUncaptured) held both, on the premise that "the two destinations no
+# capture set opens" were detail and user-profile. The visual set and the tracked
+# baselines contradicted half of it: detail-light, detail-dark and the ugoira pair have
+# been photographed since round seven, so detail had a baseline and no accessibility
+# floor and no gap check (G56/E6). The two lists are now separate declarations, and
+# tools/page-set.ps1's Test-PageSetCompleteness fails if a photographed page is in this
+# one.
+#
+# user-profile stays: it has no tracked baseline, no capture state, no launch recipe
+# that opens it without a signed-in account, and no measured floor. Promoting it means
+# measuring it first, which is a decision - and this is where it is written down.
+$script:PageUnmeasured = @("user-profile")
 
 # The three pages the focus gate walks. A full walk costs one capture and one pixel map
 # per stop (G22), so the ring is measured on every stop of one page and a sample on two:
@@ -146,11 +154,12 @@ function Select-Page {
 <#
   One consumer's page list.
 
-  `all` is the thirteen destinations. `a11y`, `layout` and `budget` are the same eleven
+  `all` is the thirteen destinations. `a11y`, `layout` and `budget` are the same twelve
   pages - the accessibility budget is keyed by the accessibility set, by definition, and
-  G32 exists because it stopped being true. `focus` is the three the focus gate walks.
-  `visual` is the nine destinations that have a tracked baseline plus the six capture
-  states.
+  G32 exists because it stopped being true. `detail` joined all three in round twelve
+  (E6): it has been photographed since round seven and had no floor. `focus` is the
+  three the focus gate walks. `visual` is the nine destinations that have a tracked
+  baseline plus the six capture states.
 #>
 function Get-PageSet {
     param(
@@ -159,12 +168,16 @@ function Get-PageSet {
     )
     switch ($For) {
         "all" { return @($script:PageSet) }
-        "a11y" { return @(Select-Page -Without $script:PageUncaptured) }
-        "layout" { return @(Select-Page -Without $script:PageUncaptured) }
-        "budget" { return @(Select-Page -Without $script:PageUncaptured) }
+        # G56/E6: two exclusions, not one. -Without $PageUnmeasured is a page nothing
+        # measures; -Without $PageUnbaselined is a page the pixel baseline lacks. A
+        # capture set and a measurement set may drop different pages, and merging the
+        # lists is how detail lost its floor.
+        "a11y" { return @(Select-Page -Without $script:PageUnmeasured) }
+        "layout" { return @(Select-Page -Without $script:PageUnmeasured) }
+        "budget" { return @(Select-Page -Without $script:PageUnmeasured) }
         "focus" { return @(Select-Page -Only $script:PageFocus) }
         "visual" {
-            $without = @($script:PageUnbaselined) + @("user-profile")
+            $without = @($script:PageUnbaselined) + @($script:PageUnmeasured)
             $out = @(Select-Page -Without $without)
             return @($out + @($script:PageState))
         }
@@ -270,6 +283,54 @@ function Get-PageListFromText {
         return [pscustomobject]@{ Source = "literal"; Line = $line; Pages = $pages }
     }
     return [pscustomobject]@{ Source = "none"; Line = 0; Pages = @() }
+}
+
+<#
+  G56: the page set agrees with itself.
+
+  Two questions, and neither is answered by any single list agreeing with itself.
+
+  1. No page the capture set photographs may sit in the unmeasured list. A page with a
+     tracked baseline and no accessibility floor is exactly the inconsistency round
+     twelve found: detail has been photographed since round seven, sat in the old
+     PageUncaptured, and had no floor and no gap check. This is the half that fails if
+     somebody re-merges the two exclusion lists.
+  2. The three measurement selections are the same pages. A page measured for layout and
+     not for accessibility is a page whose floors are missing for a reason nobody
+     wrote down.
+
+  The overrides exist for the negative experiment: tools/selftest-gates.ps1 hands the
+  pre-E6 shape in (-Unmeasured @("detail", "user-profile")) and this function - the
+  shipped one, not a copy - has to name detail.
+#>
+function Test-PageSetCompleteness {
+    param(
+        [string[]]$Unmeasured = $null,
+        [string[]]$Visual     = $null,
+        [string[]]$A11y       = $null,
+        [string[]]$Layout     = $null
+    )
+    if ($null -eq $Unmeasured) { $Unmeasured = @($script:PageUnmeasured) }
+    if ($null -eq $Visual) { $Visual = @(Get-PageSet -For visual) }
+    if ($null -eq $A11y) { $A11y = @(Get-PageSet -For a11y) }
+    if ($null -eq $Layout) { $Layout = @(Get-PageSet -For layout) }
+    $problems = New-Object System.Collections.Generic.List[string]
+    foreach ($page in $Visual) {
+        if ($Unmeasured -contains $page) {
+            $problems.Add(("'{0}' is photographed by the visual set and excluded from every measurement set ({1}): a page with a baseline and no floor is the inconsistency G56 is about" -f $page, ($Unmeasured -join ", ")))
+        }
+    }
+    foreach ($page in $A11y) {
+        if ($Layout -notcontains $page) {
+            $problems.Add(("'{0}' is measured for accessibility and not for layout: the two selections have to be one list" -f $page))
+        }
+    }
+    foreach ($page in $Layout) {
+        if ($A11y -notcontains $page) {
+            $problems.Add(("'{0}' is measured for layout and not for accessibility: the two selections have to be one list" -f $page))
+        }
+    }
+    return $problems.ToArray()
 }
 
 <#
