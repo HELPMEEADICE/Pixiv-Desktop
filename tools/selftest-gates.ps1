@@ -298,6 +298,72 @@ if (-not $restores) { $why += "RUSTFLAGS not restored" }
 if ($filters) { $why += "per-item lines filtered by ^(warning|error)" }
 Add-Case -Name "lint" -Wanted "declares -D warnings, restores it, no lossy filter" -Ok ($why.Count -eq 0) -Evidence ("declares={0} restores={1} lossyFilter={2}{3}" -f $declares, $restores, $filters, $(if ($why.Count) { " -> " + ($why -join "; ") } else { "" }))
 
+# ---- case child-exit: G57 - no gate discards a child's exit code ----
+# Two halves, and the second is the experiment. The static one is a rule over every
+# shipped script under tools/: a line that runs a child pwsh pipeline into Out-Null has
+# to be followed by a read of $LASTEXITCODE before the next two statements, or that
+# child's verdict is gone. The report is per line, because "one gate throws it away" is
+# only actionable with the file and the line.
+# The dynamic half runs both capture verifiers against an executable that does not
+# exist. No window is opened - the child fails before it can start one - so this needs
+# no desktop, and each verifier has to say CAPTURE and exit 1 instead of judging the
+# PNG and the sidecar the previous run left in the output directory.
+function Find-UncheckedChild {
+    param([string]$Text)
+    $lines = $Text -split "\r?\n"
+    $hits = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line.Trim() -like "#*") { continue }
+        if ($line -notmatch '&\s*pwsh\b') { continue }
+        if ($line -notmatch '\|\s*Out-Null') { continue }
+        # The next two statements, comments and blank lines skipped: the fix in
+        # tools/verify-visual.ps1 carries a three-line comment before its
+        # `$shotExit = $LASTEXITCODE`, and a rule that counted lines would call that
+        # correct code a defect.
+        $statements = 0
+        $checked = $false
+        for ($j = $i + 1; $j -lt $lines.Count -and $statements -lt 2 -and -not $checked; $j++) {
+            $next = $lines[$j]
+            if ($next.Trim() -eq "" -or $next.Trim() -like "#*") { continue }
+            $statements++
+            if ($next -match '\$LASTEXITCODE') { $checked = $true }
+        }
+        if (-not $checked) { $hits.Add(("line {0}: {1}" -f ($i + 1), $line.Trim())) }
+    }
+    return $hits.ToArray()
+}
+# This file is the one place that has to carry the shape the rule forbids - it is where
+# the planted control below lives - so it is out of its own sweep. Every other shipped
+# script is in it, which is what makes the rule about the gates rather than about a list.
+$toolsDir = Split-Path -Parent $VerifyScript
+$scanHits = @()
+$selfName = Split-Path -Leaf $PSCommandPath
+foreach ($script in @(Get-ChildItem (Join-Path $toolsDir "*.ps1") | Where-Object { $_.Name -notlike "_*" -and $_.Name -ne $selfName } | Sort-Object Name)) {
+    foreach ($hit in @(Find-UncheckedChild -Text (Get-Content $script.FullName -Raw))) {
+        $scanHits += ("{0} {1}" -f $script.Name, $hit)
+    }
+}
+# The control: the shape the two fixed scripts used to have. One hit, named by line, so
+# the rule cannot be satisfied by a scan that matches nothing.
+$plantedChild = (Get-Content $GatesScript -Raw) + [Environment]::NewLine +
+'& pwsh -File tools/nope.ps1 | Out-Null' + [Environment]::NewLine +
+'Write-Host "kept going"' + [Environment]::NewLine
+$plantedHits = @(Find-UncheckedChild -Text $plantedChild)
+
+$childDir = Join-Path $WorkDir "child"
+if (Test-Path $childDir) { Remove-Item $childDir -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $childDir | Out-Null
+$noExe = "target\debug\nope.exe"
+$layoutText = & pwsh -NoProfile -File (Join-Path $toolsDir "verify-layout.ps1") -Pages home -Sizes 1024x768 -Exe $noExe -OutDir (Join-Path $childDir "layout") 2>&1 | Out-String
+$layoutCode = $LASTEXITCODE
+$iconsText = & pwsh -NoProfile -File (Join-Path $toolsDir "verify-icons.ps1") -Exe $noExe -OutDir (Join-Path $childDir "icons") 2>&1 | Out-String
+$iconsCode = $LASTEXITCODE
+$layoutRow = @($layoutText -split "\r?\n" | Where-Object { $_ -match "CAPTURE" }) -join " / "
+$iconsRow = @($iconsText -split "\r?\n" | Where-Object { $_ -match "CAPTURE" }) -join " / "
+$scanShown = if ($scanHits.Count) { $scanHits -join " | " } else { "none" }
+Add-Case -Name "child-exit" -Wanted "no child pipe dropped; layout and icons say CAPTURE and exit 1 without an exe" -Ok ($scanHits.Count -eq 0 -and $plantedHits.Count -eq 1 -and $layoutCode -eq 1 -and $layoutText -match "CAPTURE" -and $iconsCode -eq 1 -and $iconsText -match "CAPTURE") -Evidence ("unchecked child pipes={0} [{1}]; planted control={2}; layout exit={3} [{4}]; icons exit={5} [{6}]" -f $scanHits.Count, $scanShown, $plantedHits.Count, $layoutCode, $layoutRow.Trim(), $iconsCode, $iconsRow.Trim())
+
 
 # ---------------------------------------------------------------- round nine
 

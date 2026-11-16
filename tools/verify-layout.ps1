@@ -14,6 +14,14 @@
 # client area and writes a sidecar JSON with the scale factor, which is what makes
 # the screenshots usable for pixel measurements afterwards.
 #
+# G57: the child's exit code and this run's own files decide a row. Round twelve
+# measured both halves of the old defect: `& pwsh @args | Out-Null` threw the exit
+# code away, and the row then read whatever `<page>-<size>.json` the *previous* run
+# had left in the output directory. A run with -Exe target\debug\nope.exe therefore
+# printed one OK row per page and exited 0, judging last round's trace. Both files of
+# a row are now removed before its capture, and a child that fails is that row's
+# CAPTURE verdict - the shape tools/verify-visual.ps1:282-323 already used.
+#
 # Usage:
 #   pwsh -File tools/verify-layout.ps1                       # full matrix
 #   pwsh -File tools/verify-layout.ps1 -Pages settings -Sizes 1024x768
@@ -60,13 +68,27 @@ foreach ($size in $Sizes) {
         # in tools/page-set.ps1. A page it can start on by name needs nothing extra.
         Set-PageLaunch -Page $page
         $out = Join-Path $OutDir ("{0}-{1}{2}.png" -f $page, $size, $suffix)
+        $metaPath = [System.IO.Path]::ChangeExtension($out, ".json")
+        # G57, first half: this row's two files are removed before its capture, so a
+        # trace that is on disk afterwards was written by this run. The purge is per
+        # row rather than per directory because $OutDir is shared with
+        # tools/verify-icons.ps1 - one gate must not delete another gate's evidence.
+        Remove-Item -Force $out, $metaPath -ErrorAction SilentlyContinue
         $mode = if ($size -eq "maximize") { "maximize" } else { "size" }
         $args = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $page, "-Mode", $mode,
             "-Size", $size, "-Out", $out, "-Exe", $Exe, "-Trace")
         if ($Dark) { $args += "-Dark" }
         & pwsh @args | Out-Null
+        # G57, second half: the child's verdict is the row's verdict. Without this the
+        # capture failed, the sidecar from the previous run was still there, and the
+        # matrix reported OK for a window that never opened.
+        $shotExit = $LASTEXITCODE
+        if ($shotExit -ne 0) {
+            Write-Host ("  {0,-10} {1,-10} CAPTURE  shot.ps1 exited {2}: nothing was captured, so no trace was read" -f $page, $size, $shotExit) -ForegroundColor Red
+            $results += [pscustomobject]@{ Page = $page; Size = $size; Gap = [double]::NaN; Verdict = "CAPTURE"; Line = "" }
+            continue
+        }
 
-        $metaPath = [System.IO.Path]::ChangeExtension($out, ".json")
         if (-not (Test-Path $metaPath)) {
             Write-Host ("  {0,-10} {1,-10} NO-CAPTURE" -f $page, $size) -ForegroundColor Red
             $results += [pscustomobject]@{ Page = $page; Size = $size; Gap = [double]::NaN; Verdict = "CAPTURE"; Line = "" }

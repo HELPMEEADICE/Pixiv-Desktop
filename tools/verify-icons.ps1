@@ -6,6 +6,11 @@
 # of the cross axis, so it renders ~10 logical px above its label — the declarations
 # look perfectly reasonable.
 #
+# G57: the capture's exit code and this run's own PNG decide the measurement. The
+# child used to go into "| Out-Null" and the only question asked afterwards was whether
+# a sidecar existed - so a failed capture measured last round's PNG and reported OK.
+# Both files are removed first and a child that fails is a named CAPTURE failure.
+#
 # Method: take a client-area capture (tools/shot.ps1), then find the ink runs
 # (contiguous rows containing a pixel that differs from the surface behind it)
 # inside a narrow column. Each run is one glyph or one text label; comparing run
@@ -32,13 +37,20 @@ $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $suffix = if ($Dark) { "-dark" } else { "" }
 $shot = Join-Path $OutDir ("icons-{0}{1}.png" -f $Size, $suffix)
+$metaPath = [System.IO.Path]::ChangeExtension($shot, ".json")
+# G57: this run's own files, gone before the capture. A sidecar on disk afterwards
+# was written by this run, not by the one before it.
+Remove-Item -Force $shot, $metaPath -ErrorAction SilentlyContinue
 $shotArgs = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", "home", "-Mode", "size",
     "-Size", $Size, "-Out", $shot, "-Exe", $Exe)
 if ($Dark) { $shotArgs += "-Dark" }
 & pwsh @shotArgs | Out-Null
-
-$metaPath = [System.IO.Path]::ChangeExtension($shot, ".json")
-if (-not (Test-Path $metaPath)) { throw "shot.ps1 did not write $metaPath" }
+$shotExit = $LASTEXITCODE
+if ($shotExit -ne 0) {
+    Write-Host ("CAPTURE: shot.ps1 exited {0} - no frame was captured, so no glyph geometry was measured" -f $shotExit) -ForegroundColor Red
+    exit 1
+}
+if (-not (Test-Path $metaPath)) { throw "shot.ps1 exited 0 and did not write $metaPath" }
 $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
 $scale = [double]$meta.scale
 
