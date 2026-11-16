@@ -224,8 +224,9 @@ pwsh -File tools/verify-layout.ps1        # 24 checks: 8 pages x 3 sizes
 # icon alignment, measured from pixels rather than from the Slint source
 pwsh -File tools/verify-icons.ps1         # add -Size 800x600 / -Dark
 
-# pixel regression: 20 captures (8 pages x light/dark, plus the detail page in
-# both its content and its error state) diffed against tracked baselines. The
+# pixel regression: every page-state the capture harness knows, in both themes,
+# diffed against tracked baselines. The run prints one row per capture and the total
+# it compared, so the count is read from the gate instead of remembered here. The
 # script forces PIXIV_DESKTOP_DEMO=1, which is what makes a baseline both
 # deterministic and free of the signed-in user's own feed. Re-baseline with
 # -Update after a deliberate visual change, and read the diff before committing. A
@@ -269,7 +270,7 @@ about layout.
 # every gate, in order, with per-gate timing - this is the list
 pwsh -File tools/gates.ps1
 
-# ...and the four measured UI gates as well. They are opt-in because they launch
+# ...and the measured UI gates as well - all of them. They are opt-in because they launch
 # the app, read its accessibility tree and copy the screen, which a CI runner
 # without an interactive desktop cannot do. A gate that exits 77 is reported as
 # SKIP, not FAIL.
@@ -277,9 +278,10 @@ pwsh -File tools/gates.ps1 -Ui
 
 # or one at a time
 cargo fmt --all -- --check
-cargo test --workspace --locked              # 327 tests: 17 uiaudit rules, 15 live tests
-                                            # that return early without PIXIV_LIVE_PHPSESSID,
-                                            # so a green run is 312 passes and 15 no-ops
+cargo test --workspace --locked              # the run prints its own case count. The design
+                                            # rules over ui/*.slint live in src/uiaudit.rs; the
+                                            # live suite returns early without PIXIV_LIVE_PHPSESSID
+                                            # instead of failing, so a green run names that number
 cargo build --release
 
 # lint (see limit 2 for why not `cargo clippy`)
@@ -289,10 +291,14 @@ cargo check --workspace --all-targets
 
 `.github/workflows/ci.yml` runs the host-independent gates on every push: `cargo fmt`
 (ubuntu), `actionlint` (a container), and on `windows-latest` `cargo check` over the
-three-OS matrix, `cargo clippy -- -D warnings` and the test suite. It does **not** run
-the release build (that is `.github/workflows/build.yml`) and it does **not** run any
-`tools/*.ps1` gate: those launch the app and read its window, which a runner without an
-interactive desktop cannot do. The live suite stays inert without
+three-OS matrix, `cargo clippy -- -D warnings` and the test suite. A `gates` job then runs
+`tools/gates.ps1 -SkipTest -SkipBuild`, which is what finally runs
+`tools/selftest-gates.ps1` - the negative experiment every gate change is accepted on -
+off this one machine, and the summary job depends on it, so a failing gate fails the one
+status branch protection watches. That job omits `-Ui` on purpose: the measured UI gates
+launch the app, read its accessibility tree and copy the screen, which a runner without
+an interactive desktop cannot do, so they stay opt-in locally. It does **not** run the
+release build (that is `.github/workflows/build.yml`). The live suite stays inert without
 `PIXIV_LIVE_PHPSESSID`, so CI never talks to pixiv.net.
 
 ### Live tests against the real service
