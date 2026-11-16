@@ -336,7 +336,9 @@ if ($Ui) {
     } | Out-Null
     # G17: verify-icons and verify-layout were described as gates by README.md and
     # UI-NOTES.md and invoked by nothing, so the one measurement that reads glyph ink
-    # and the 24-check layout matrix had not run since the round that wrote them.
+    # and the layout matrix had not run since the round that wrote them. (The count that
+    # used to sit in this sentence was one of the numbers G35 exists for: it is printed by
+    # the run, and a number in a comment is a number nobody re-measures.)
     Invoke-Gate "tools/verify-icons.ps1" {
         pwsh -File tools/verify-icons.ps1 2>&1 | Select-Object -Last 25 | Out-Host
     } | Out-Null

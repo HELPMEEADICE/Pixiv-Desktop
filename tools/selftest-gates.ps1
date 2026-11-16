@@ -50,6 +50,17 @@
 #   case ci-gates   - G25: .github/workflows/ci.yml runs the gate suite in its own job,
 #                     without -Ui, and the summary job depends on it.
 #
+# Round eleven adds two, both about lists and numbers that drifted because nothing read
+# them:
+#   case page-set      - G32: the destination enum, the four page lists and the budget's
+#                        keys are one set (tools/page-set.ps1). A consumer that writes
+#                        its own list again, or a budget key the set does not contain,
+#                        is a difference that names the pair ("a11y\budget") and the page.
+#   case prose-numbers - G35: README states none of the four counts a gate prints (tests,
+#                        uiaudit rules, captures, layout checks). It printed two of them
+#                        and both were wrong; the case names the line, so "which sentence"
+#                        is answered before "which number".
+#
 # Every fixture is built under target/selftest from a read-only copy of one tracked
 # baseline; docs/screenshots is never written. The gate under test is the real
 # tools/verify-visual.ps1 run as a child process against those fixtures
@@ -70,6 +81,8 @@ param(
     [string]$FixtureScript = "tools/fixture.ps1",
     [string]$WalkLib = "tools/walk-lib.ps1",
     [string]$FocusLib = "tools/focus-lib.ps1",
+    [string]$PageSetLib = "tools/page-set.ps1",
+    [string]$Readme = "README.md",
     [string]$CiConfig = ".github/workflows/ci.yml",
     [string]$WorkDir = "target/selftest",
     [string]$SourcePng = "docs/screenshots/baseline/home-light.png",
@@ -81,7 +94,7 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 Add-Type -AssemblyName System.Drawing
 try { [void][System.Reflection.Assembly]::Load("System.Private.Windows.GdiPlus") } catch { }
 
-foreach ($required in @($VerifyScript, $GatesScript, $A11yScript, $FocusScript, $FixtureScript, $WalkLib, $FocusLib, $CiConfig, $SourcePng)) {
+foreach ($required in @($VerifyScript, $GatesScript, $A11yScript, $FocusScript, $FixtureScript, $WalkLib, $FocusLib, $PageSetLib, $Readme, $CiConfig, $SourcePng)) {
     if (-not (Test-Path $required)) { throw "missing input: $required" }
 }
 # Absolute from here on: the gate under test is free to change directory (it
@@ -94,7 +107,13 @@ $SourcePng = (Resolve-Path $SourcePng).Path
 $A11yScript = (Resolve-Path $A11yScript).Path
 $FocusScript = (Resolve-Path $FocusScript).Path
 $FixtureScript = (Resolve-Path $FixtureScript).Path
+$Readme = (Resolve-Path $Readme).Path
 $CiConfig = (Resolve-Path $CiConfig).Path
+
+# G32: the page set and its comparison are the shipped ones. Compare-PageSet reads each
+# consumer's file and reports the pairs that disagree, so the case below is a live
+# measurement of the tree as well as a planted experiment.
+. (Resolve-Path $PageSetLib).Path
 
 # G21/G22: the stop identity, the walk engine and the two focus decisions are the
 # shipped functions, not a copy of them. The cases below drive these directly, which is
@@ -477,6 +496,90 @@ $guardsPlanted = @(Get-GateGuards -Text $plantedGuard).Count
 # row five reads as a six-gate suite that was satisfied.
 $countsAttempts = ($gatesText -match 'gates attempted')
 Add-Case -Name "gate-independence" -Wanted "no gate guarded by a previous verdict; summary counts attempts" -Ok ($guardsNow -eq 0 -and $guardsPlanted -eq 1 -and $countsAttempts) -Evidence ("guards in tools/gates.ps1={0}; planted control={1}; summary says attempted={2}" -f $guardsNow, $guardsPlanted, $countsAttempts)
+
+# ---- case page-set: G32 - five lists, one set ----
+# Two halves, and the second is the experiment the plan names. The live tree is measured
+# first: all four verifiers derive their list from tools/page-set.ps1 and the budget is
+# keyed by the accessibility set, so the comparison reports nothing. Then one consumer is
+# handed a literal list with one page deleted from it - "delete settings from
+# verify-a11y.ps1 only", in the shape the file would have if somebody stopped reading the
+# set - and the same shipped parser has to report the pair ("a11y\budget") and the page
+# ("settings"). Feeding the untouched text back has to be clean again, so the case cannot
+# be satisfied by a comparison that always finds something.
+$agreeNow = @(Compare-PageSet)
+$a11yText = Get-Content $A11yScript -Raw
+# A literal replacement, not -replace: the planted text is a PowerShell expression and
+# its parentheses are regex metacharacters. The whole derivation goes, list included, so
+# what the parser sees is exactly "this file carries its own list".
+$plantedA11y = $a11yText.Replace('@(Get-PageSet -For a11y)', '@("home","discovery","ranking","search","bookmarks","history","downloads")')
+if ($plantedA11y -eq $a11yText) {
+    throw "case page-set: $A11yScript no longer derives its list with Get-PageSet -For a11y, so the defect cannot be planted"
+}
+$plantedDiffs = @(Compare-PageSet -Text @{ a11y = $plantedA11y })
+$revertedDiffs = @(Compare-PageSet -Text @{ a11y = $a11yText })
+$namesPair = @($plantedDiffs | Where-Object { $_.Pair -eq "a11y\budget" -and $_.Message -match "'settings'" }).Count -gt 0
+$plantedShown = ($plantedDiffs | ForEach-Object { $_.Message }) -join " / "
+$agreeShown = if ($agreeNow.Count) { ($agreeNow | ForEach-Object { $_.Message }) -join " / " } else { "none" }
+Add-Case -Name "page-set" -Wanted "five sets agree; planted a11y list names a11y\budget + settings" -Ok ($agreeNow.Count -eq 0 -and $namesPair -and $revertedDiffs.Count -eq 0) -Evidence ("agree now={0} [{1}]; planted difference=[{2}]; reverted={3}" -f $agreeNow.Count, $agreeShown, $plantedShown, $revertedDiffs.Count)
+
+<#
+  A number a gate prints, restated in prose. Four of them exist and each has one owner: the
+  test count (cargo test), the uiaudit rule count (src/uiaudit.rs, printed by its own
+  test), the capture count (tools/verify-visual.ps1 prints "N captures within ...") and the
+  layout check count (tools/verify-layout.ps1 prints "N checks, M not OK"). README stated
+  two of them - "diffs 20 forced-demo captures" and "24 checks: 8 pages x 3 sizes" - and
+  both had been wrong for rounds, because nothing compared them with the run.
+
+  The rule is narrow on purpose: prose carries none of the four. A gate cannot know the
+  live count without running the thing it counts, so "update the number" is not a fix that
+  stays fixed - the run prints its own count and the README says so, which is what
+  README.md:229 already does for the captures. One hit per (line, count), so a planted
+  sentence that states all four names its line four times instead of once.
+#>
+function Find-ProseNumber {
+    param([string]$Text)
+    $patterns = @(
+        @{ Kind = "capture count"; Pattern = '\b\d+\s+(?:[A-Za-z-]+\s+){0,2}captures?\b' }
+        @{ Kind = "layout check count"; Pattern = '\b\d+\s+checks?\b' }
+        @{ Kind = "test count"; Pattern = '\b\d+\s+tests?\b' }
+        @{ Kind = "uiaudit rule count"; Pattern = '\b\d+\s+(?:uiaudit\s+)?rules?\b' }
+        # A fifth, for the same reason: verify-a11y prints how many pages met the budget
+        # and verify-layout's check count is pages x sizes, so "N pages" restates a number
+        # a run already printed. Digits only, on purpose - "three novel captures" is prose
+        # about three pictures, not a measurement, and a rule that models English numerals
+        # is a rule nobody can satisfy. The two word-number restatements that had survived
+        # in README were removed by hand; a digit one cannot come back.
+        @{ Kind = "page count"; Pattern = '\b\d+\s+pages?\b' }
+    )
+    $hits = New-Object System.Collections.Generic.List[object]
+    $number = 0
+    foreach ($line in ($Text -split "\r?\n")) {
+        $number++
+        foreach ($p in $patterns) {
+            if ($line -match $p.Pattern) {
+                $hits.Add([pscustomobject]@{ Line = $number; Kind = $p.Kind; Text = $line.Trim() })
+            }
+        }
+    }
+    return $hits.ToArray()
+}
+
+# ---- case prose-numbers: G35 - no gate-printed number is restated in README ----
+# The live half reads README.md; the experiment appends the sentence the plan names and
+# requires the same function to name the line it landed on. "Name the line" is the whole
+# difference between a rule somebody can act on and a count of hits.
+$readmeText = Get-Content $Readme -Raw
+$proseNow = @(Find-ProseNumber -Text $readmeText)
+$plantedProse = $readmeText + [Environment]::NewLine + "The suite runs 327 tests and 17 uiaudit rules, diffs 20 forced-demo captures, and reports 24 checks: 8 pages x 3 sizes."
+$prosePlanted = @(Find-ProseNumber -Text $plantedProse)
+# The sentence lands on the last line, so that is the line number the four hits have to
+# carry - and every hit above it has to be one the live README produced, which is how the
+# case tells "the line was named" apart from "the count changed".
+$plantedLine = ($plantedProse -split "\r?\n").Count
+$onPlantedLine = @($prosePlanted | Where-Object { $_.Line -eq $plantedLine })
+$lineReported = ($onPlantedLine.Count -ge 4) -and (@($prosePlanted | Where-Object { $_.Line -ne $plantedLine }).Count -eq $proseNow.Count)
+$liveShown = if ($proseNow.Count) { ($proseNow | ForEach-Object { "{0}:{1} {2}" -f "README.md", $_.Line, $_.Text }) -join " / " } else { "none" }
+Add-Case -Name "prose-numbers" -Wanted "README states none of the four; a planted line is named by line" -Ok ($proseNow.Count -eq 0 -and $lineReported) -Evidence ("live restatements={0} [{1}]; planted={2} hit(s), {3} of them on line {4}" -f $proseNow.Count, $liveShown, $prosePlanted.Count, $onPlantedLine.Count, $plantedLine)
 
 Write-Host ""
 $bad = @($cases | Where-Object { -not $_.Ok })

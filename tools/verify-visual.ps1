@@ -38,6 +38,16 @@
 #   pwsh -File tools/verify-visual.ps1 -Update          # re-baseline after a fix
 #   pwsh -File tools/verify-visual.ps1 -Pages home,settings -Themes light
 #   pwsh -File tools/verify-visual.ps1 -SkipCapture     # diff what is on disk
+#   pwsh -File tools/verify-visual.ps1 -Twice           # every state twice, 0 px apart
+#
+# G36, -Twice: the diff answers "does this capture match the baseline", and the neighbour
+# tolerance and the one-pixel margin make it deliberately forgiving. It cannot answer "do
+# two captures of the same state agree", which is the question that has to be answered
+# *before* a baseline is written or a diff is trusted - round ten measured a state whose
+# cursor arrives on a 400 ms timer and every capture of it was a photograph of a different
+# instant. -Twice captures every selected state twice in one run and requires 0 px between
+# the two, prints the state that moved, and writes no baseline: -Twice and -Update together
+# are refused rather than ordered.
 param(
     # "detail" and "detail-error" are not destinations the shell can be started
     # on: they are the home page plus a deep link, one to a demo work that loads
@@ -48,7 +58,9 @@ param(
     # way every other page is and becomes a baseline like the rest. They are a
     # page in this list, not a separate script, because a state nobody photographs
     # is a state that can regress quietly - which is what U6 did for eight rounds.
-    [string[]]$Pages = @("home", "discovery", "ranking", "search", "bookmarks", "history", "downloads", "settings", "detail", "detail-error", "detail-ugoira", "palette", "selection", "suggestion", "downloads-queue"),
+    # G32: empty means "ask tools/page-set.ps1 for the capture selection", which is
+    # resolved below; an explicit -Pages, including an empty one, still wins.
+    [string[]]$Pages = @(),
     [string[]]$Themes = @("light", "dark"),
     [string]$Size = "1024x768",
     [int]$Tolerance = 6,
@@ -67,11 +79,16 @@ param(
     [string]$BaselineDir = "docs/screenshots/baseline",
     [string]$OutDir = "target/visual",
     [switch]$Update,
-    [switch]$SkipCapture
+    [switch]$SkipCapture,
+    # G36: one run, two captures of every state, 0 px between them.
+    [switch]$Twice
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
+# G32: which states this gate captures, and the launch recipe for each, come from
+# tools/page-set.ps1 - the same file the other three verifiers and the budget read.
+. (Join-Path $PSScriptRoot "page-set.ps1") | Out-Null
 Add-Type -AssemblyName System.Drawing
 
 if (-not ('PixDiff' -as [type])) {
@@ -238,8 +255,23 @@ function Test-Shifted {
     return [pscustomobject]@{ Shifted = (($still - $best) -gt $margin); Recovered = $still - $best; Still = $still; Dx = $bestDx; Dy = $bestDy }
 }
 
+# G32: the fifteen states this gate has always captured, asked for by name instead of
+# copied: nine destinations (the eight the shell starts on by name plus detail, which is
+# PIXIV_DESKTOP_START_ILLUST on top of home) and six fixture states. The three novel
+# destinations are deliberately absent until their baselines exist (G33), and that
+# exclusion is one line of tools/page-set.ps1 rather than a second list here.
+if (-not $PSBoundParameters.ContainsKey("Pages")) { $Pages = @(Get-PageSet -For visual) }
 $Pages = @($Pages | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Themes = @($Themes | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+if ($Twice -and $Update) {
+    Write-Host "FAIL -Twice and -Update together would re-baseline from a capture whose reproducibility was the question: run -Twice first, then -Update once it is clean" -ForegroundColor Red
+    exit 1
+}
+if ($Twice -and $SkipCapture) {
+    Write-Host "FAIL -Twice and -SkipCapture together capture nothing, so nothing can be compared twice" -ForegroundColor Red
+    exit 1
+}
 
 $currentDir = Join-Path $OutDir "current"
 # G7: the capture directory is emptied before the first shot. A capture that failed
@@ -253,33 +285,27 @@ if (-not (Test-Path $BaselineDir)) { New-Item -ItemType Directory -Force -Path $
 
 $env:PIXIV_DESKTOP_DEMO = "1"
 
-$fixturePages = @{
-    "detail-ugoira"   = @{ Start = "home";      Fixture = "ugoira" }
-    "palette"         = @{ Start = "home";      Fixture = "palette" }
-    "selection"       = @{ Start = "home";      Fixture = "selection" }
-    "suggestion"      = @{ Start = "home";      Fixture = "suggestion" }
-    "downloads-queue" = @{ Start = "downloads"; Fixture = "downloads" }
-}
-
 $results = @()
 foreach ($theme in $Themes) {
     foreach ($page in $Pages) {
         $name = "{0}-{1}" -f $page, $theme
         $png = Join-Path $currentDir "$name.png"
-        $startPage = if ($page -like "detail*") { "home" } else { $page }
-        # A fixture page names the state, not a widget: the app opens the work, the
-        # panel or the queue itself, so this table never guesses a deep link.
-        $fixture = $null
-        if ($fixturePages.ContainsKey($page)) {
-            $startPage = $fixturePages[$page].Start
-            $fixture = $fixturePages[$page].Fixture
+        # A state names itself, not a widget: the app opens the work, the panel or the
+        # queue itself. Which page it starts on and which work or fixture it is asked for
+        # is one row of tools/page-set.ps1 (G32) - this script used to keep a second table
+        # for the six fixture states and two more `if`s for the two detail links.
+        $launch = Get-PageLaunch -Page $page
+        if ($launch.Count -eq 0 -or -not $launch.ContainsKey("StartPage")) {
+            $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "CAPTURE"; Detail = ("tools/page-set.ps1 declares no launch recipe for '{0}', so this state was never captured" -f $page) }
+            continue
         }
-        if ($fixture) { $env:PIXIV_DESKTOP_FIXTURE = $fixture }
-        else { Remove-Item Env:PIXIV_DESKTOP_FIXTURE -ErrorAction SilentlyContinue }
-        $shotArgs = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $startPage, "-Mode", "size", "-Size", $Size, "-Out", $png, "-Exe", $Exe)
+        # shot.ps1 inherits this environment, and every deep-link key is written or
+        # cleared per state, so one state's link cannot leak into the next capture.
+        Set-PageLaunch -Page $page
+        Set-PageFixture -Page $page
+        $shotArgs = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $launch.StartPage, "-Mode", "size", "-Size", $Size, "-Out", $png, "-Exe", $Exe)
         if ($theme -eq "dark") { $shotArgs += "-Dark" }
-        if ($page -eq "detail") { $shotArgs += @("-Illust", "700000003") }
-        if ($page -eq "detail-error") { $shotArgs += @("-Illust", "999999999") }
+        if ($launch.ContainsKey("Illust")) { $shotArgs += @("-Illust", $launch.Illust) }
 
         if (-not $SkipCapture) {
             & pwsh @shotArgs | Out-Null
@@ -295,6 +321,45 @@ foreach ($theme in $Themes) {
                 $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "CAPTURE"; Detail = "shot.ps1 exited 0 but wrote no capture" }
                 continue
             }
+        }
+
+        if ($Twice) {
+            # G36: two captures of one state, in one run, and the requirement is 0 px -
+            # not the 6/0.02 %/96 px budget above, which forgives exactly what this
+            # question is about. CompareShift at dx=dy=0 and tolerance 0 absorbs nothing
+            # and reports a pixel count rather than a percentage, so "0 px" is a fact and
+            # not a rounded one. A state whose cursor or notice arrives on a timer answers
+            # 400 ms apart, which is how round ten found it.
+            $again = Join-Path $currentDir ("{0}-twice.png" -f $name)
+            $twiceArgs = @($shotArgs)
+            $twiceArgs[[array]::IndexOf($twiceArgs, "-Out") + 1] = $again
+            & pwsh @twiceArgs | Out-Null
+            $twiceExit = $LASTEXITCODE
+            if ($twiceExit -ne 0) {
+                $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "CAPTURE"; Detail = ("the second shot exited {0}: one capture is not a reproducibility measurement" -f $twiceExit) }
+                continue
+            }
+            if (-not (Test-Path $again) -or -not (Test-Path $png)) {
+                $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "CAPTURE"; Detail = "a shot exited 0 but wrote no capture, so the pair could not be compared" }
+                continue
+            }
+            $strict = [PixDiff]::CompareShift($png, $again, 0, 0, 0)
+            if ($strict -like "size*") {
+                $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "UNSTABLE"; Detail = ("the two captures are different shapes ({0}): the window itself moved" -f $strict) }
+                continue
+            }
+            $strictParts = $strict -split "\|"
+            $moved = [int]$strictParts[0]
+            $peak = [int]$strictParts[1]
+            $twiceVerdict = if ($moved -eq 0) { "TWICE" } else { "UNSTABLE" }
+            $twiceDetail = if ($moved -eq 0) {
+                "two captures, 0 px between them"
+            }
+            else {
+                ("{0} px differ between two captures of one state (largest channel {1}) - this state is not reproducible, so nothing measured against it can be trusted" -f $moved, $peak)
+            }
+            $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = $peak; Mean = 0; Verdict = $twiceVerdict; Detail = $twiceDetail }
+            continue
         }
 
         $shotMeta = [System.IO.Path]::ChangeExtension($png, ".json")
@@ -418,12 +483,24 @@ $results | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $OutDir "visua
 # the failure set - a 100% host cannot be asked to match a 150% baseline - but it is
 # not a pass either, so the two counts are kept apart and the run's exit code is
 # decided from them rather than from "no failures".
-$bad = @($results | Where-Object { $_.Verdict -notin @("OK", "BASE", "SKIP") })
+#
+# G36: -Twice answers a different question, so it has its own pass verdict (TWICE, "the
+# two captures of this state agreed exactly") and its own failure (UNSTABLE, which names
+# the state). The pass set is not widened for the baseline path: a -Twice row is not
+# evidence that a capture matches a baseline it was never compared against.
+$pass = if ($Twice) { @("TWICE") } else { @("OK", "BASE", "SKIP") }
+$bad = @($results | Where-Object { $_.Verdict -notin $pass })
 $skipped = @($results | Where-Object { $_.Verdict -eq "SKIP" })
-$judged = @($results | Where-Object { $_.Verdict -in @("OK", "SHIFT") })
+$judged = @($results | Where-Object { if ($Twice) { $_.Verdict -eq "TWICE" } else { $_.Verdict -in @("OK", "SHIFT") } })
 $shifted = @($results | Where-Object { $_.Verdict -eq "SHIFT" })
 Write-Host ""
 if ($bad.Count -gt 0) {
+    if ($Twice) {
+        $moving = @($bad | ForEach-Object { "{0}/{1} ({2})" -f $_.Page, $_.Theme, $_.Detail })
+        Write-Host ("{0} of {1} states are not reproducible - two captures in one run disagree:" -f $bad.Count, $results.Count) -ForegroundColor Red
+        $moving | ForEach-Object { Write-Host ("  " + $_) -ForegroundColor Red }
+        exit 1
+    }
     $extra = if ($shifted.Count) { " ({0} of them by a one-pixel shift)" -f $shifted.Count } else { "" }
     Write-Host ("{0} of {1} captures differ from the baseline{2}" -f $bad.Count, $results.Count, $extra) -ForegroundColor Red
     exit 1
@@ -445,6 +522,10 @@ if ($judged.Count -eq 0) {
 }
 if ($skipped.Count -gt 0) {
     Write-Host ("{0} compared within {1}% and {2} px of the baseline; {3} skipped (not judged)" -f $judged.Count, $MaxDiffPercent, $MaxDiffPixels, $skipped.Count) -ForegroundColor Yellow
+    exit 0
+}
+if ($Twice) {
+    Write-Host ("{0} states captured twice, 0 px between the two captures of each" -f $judged.Count) -ForegroundColor Green
     exit 0
 }
 Write-Host ("{0} captures within {1}% and {2} px of the baseline" -f $results.Count, $MaxDiffPercent, $MaxDiffPixels) -ForegroundColor Green

@@ -19,7 +19,9 @@
 #   pwsh -File tools/verify-layout.ps1 -Pages settings -Sizes 1024x768
 #   pwsh -File tools/verify-layout.ps1 -Dark
 param(
-    [string[]]$Pages = @("home", "discovery", "ranking", "search", "bookmarks", "history", "downloads", "settings"),
+    # G32: empty means "ask tools/page-set.ps1 for the layout selection", which is resolved
+    # below; an explicit -Pages, including an empty one, still wins.
+    [string[]]$Pages = @(),
     [string[]]$Sizes = @("maximize", "1024x768", "800x600"),
     [string]$Exe     = "target\debug\pixiv-desktop.exe",
     [string]$OutDir  = "docs/screenshots/verify",
@@ -29,8 +31,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# G32: the page list and each page's launch recipe come from tools/page-set.ps1, so this
+# matrix cannot walk a page set the verifiers and the budget do not share.
+. (Join-Path $PSScriptRoot "page-set.ps1") | Out-Null
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
+# G32: eleven pages, three of them new this round - the novel pages the shell has carried
+# since round ten and no capture set named. -Sizes is unrelated and keeps its three.
+if (-not $PSBoundParameters.ContainsKey("Pages")) { $Pages = @(Get-PageSet -For layout) }
 $Pages = @($Pages | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Sizes = @($Sizes | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 Write-Host "pages: $($Pages -join ', ')"
@@ -40,6 +48,17 @@ $results = @()
 foreach ($size in $Sizes) {
     foreach ($page in $Pages) {
         $suffix = if ($Dark) { "-dark" } else { "" }
+        # G32: a name the page set does not know has no recipe, and shot.ps1 would capture
+        # the home page under another page's name. That row is a failure, not a gap.
+        if ((Get-PageLaunch -Page $page).Count -eq 0) {
+            Write-Host ("  {0,-10} {1,-10} NO-PAGE" -f $page, $size) -ForegroundColor Red
+            $results += [pscustomobject]@{ Page = $page; Size = $size; Gap = [double]::NaN; Verdict = "PAGE"; Line = "" }
+            continue
+        }
+        # G32: shot.ps1 inherits this environment, so the deep-link keys are set or
+        # cleared per page here rather than inside the capture script - one recipe table,
+        # in tools/page-set.ps1. A page it can start on by name needs nothing extra.
+        Set-PageLaunch -Page $page
         $out = Join-Path $OutDir ("{0}-{1}{2}.png" -f $page, $size, $suffix)
         $mode = if ($size -eq "maximize") { "maximize" } else { "size" }
         $args = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $page, "-Mode", $mode,

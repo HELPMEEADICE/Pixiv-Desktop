@@ -31,7 +31,9 @@
 #                                                   # measurement: no window, no
 #                                                   # desktop, so a runner can (G25)
 param(
-    [string[]]$Pages = @("home", "discovery", "ranking", "search", "bookmarks", "history", "downloads", "settings"),
+    # G32: empty means "ask tools/page-set.ps1 for the accessibility selection", which is
+    # resolved below; an explicit -Pages, including an empty one, still wins.
+    [string[]]$Pages = @(),
     [string]$Size = "1024x768",
     [string]$Exe = "target\debug\pixiv-desktop.exe",
     [string]$Budget = "tools\a11y-budget.json",
@@ -63,10 +65,17 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 # G21: the stop identity, the walk engine and the coverage check live in one file that
 # tools/verify-focus.ps1 walks with too, and that the selftest can drive without a
 # window.
-. (Join-Path $PSScriptRoot "walk-lib.ps1") | Out-Null
+# G32: the page list, the launch recipe for each page and the budget key set all come
+# from here, so this script cannot drift from the three other verifiers or from
+# tools/a11y-budget.json.
+. (Join-Path $PSScriptRoot "page-set.ps1") | Out-Null
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
+# G32: eleven pages, one of them which this script has never measured: the three novel
+# destinations joined the accessibility set with the page set itself. An explicit -Pages
+# overrides it, and an empty one is still "measure nothing" (the 77 below).
+if (-not $PSBoundParameters.ContainsKey("Pages")) { $Pages = @(Get-PageSet -For a11y) }
 $Pages = @($Pages | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 function Stop-App {
@@ -84,16 +93,25 @@ $skips = @()
 function Measure-Page {
     param([string]$Page)
 
+    # G32: a name the page set does not know has no recipe, and the shell would fall back
+    # to the home page - a photograph of home reported under another page's name. Name it
+    # and measure nothing instead.
+    if ((Get-PageLaunch -Page $Page).Count -eq 0) {
+        $script:skips += ("{0}: no launch recipe in tools/page-set.ps1" -f $Page)
+        return $null
+    }
     if (-not (Test-Path $Exe)) {
         $script:skips += ("{0}: no binary at {1}" -f $Page, $Exe)
         return $null
     }
     Stop-App
     $env:PIXIV_DESKTOP_DEMO = "1"
-    $env:PIXIV_DESKTOP_START_PAGE = $Page
+    # G32: one page, one recipe. Set-PageLaunch writes every deep-link key the shell
+    # reads and removes the rest, so the illust/user/novel link a previous page set
+    # cannot survive into this measurement - the reader page is opened by
+    # PIXIV_DESKTOP_START_NOVEL plus START_READER, and nothing here has to know that.
+    Set-PageLaunch -Page $Page
     $env:PIXIV_DESKTOP_SIZE = $Size
-    Remove-Item Env:\PIXIV_DESKTOP_START_ILLUST -ErrorAction SilentlyContinue
-    Remove-Item Env:\PIXIV_DESKTOP_START_USER -ErrorAction SilentlyContinue
     Remove-Item Env:\PIXIV_DESKTOP_TIP -ErrorAction SilentlyContinue
     if ($Dark) { $env:PIXIV_DESKTOP_THEME = "dark" } else { Remove-Item Env:\PIXIV_DESKTOP_THEME -ErrorAction SilentlyContinue }
 
@@ -437,6 +455,24 @@ if ($Update) {
             Write-Host ("  {0,-10} not measured this run: entry kept unchanged" -f $name) -ForegroundColor DarkYellow
         }
     }
+    # G32: the budget is keyed by the accessibility page set, and this is where that is
+    # made true instead of asserted. A page in the set that this run did not measure gets
+    # an entry of zeros - which bounds nothing, and says so on the line - and the next
+    # measured run ratchets it up (G15). A key the set does not contain is dropped,
+    # because nothing measures it.
+    $set = @(Get-PageSet -For budget)
+    foreach ($page in $set) {
+        if (-not $doc.pages.Contains($page)) {
+            $doc.pages[$page] = [ordered]@{ minInvokable = 0; minFocusable = 0; minTabStops = 0 }
+            Write-Host ("  {0,-10} not measured yet: entry seeded at 0, which bounds nothing until a measured run ratchets it" -f $page) -ForegroundColor DarkYellow
+        }
+    }
+    foreach ($name in @($doc.pages.Keys)) {
+        if ($set -notcontains $name) {
+            $doc.pages.Remove($name)
+            Write-Host ("  {0,-10} dropped: not in the accessibility page set (tools/page-set.ps1)" -f $name) -ForegroundColor DarkYellow
+        }
+    }
     ($doc | ConvertTo-Json -Depth 6) | Set-Content -Path $Budget -Encoding utf8
     Write-Host ""
     Write-Host "budget re-pinned, ratcheted up only: $Budget" -ForegroundColor Yellow
@@ -502,6 +538,17 @@ foreach ($r in $results) {
             $failures += ("{0}: none of the roles [{1}] appears in the tree" -f $r.page, ($roles -join ", "))
         }
     }
+}
+
+# G32: a page whose entry is a seeded zero passes because nothing is asserted about it,
+# not because it was measured. One line says which, so a green run cannot be read as
+# "the novel pages were measured here" - that is -Update's job on this desktop.
+$pending = @($results | Where-Object {
+        $prop = $budgetDoc.pages.PSObject.Properties[$_.page]
+        $null -ne $prop -and [int]$prop.Value.minInvokable -eq 0 -and [int]$prop.Value.minFocusable -eq 0 -and [int]$prop.Value.minTabStops -eq 0
+    } | ForEach-Object { $_.page })
+if ($pending.Count -gt 0) {
+    Write-Host ("  pending floors, nothing asserted yet, pinned by the first measured -Update: " + ($pending -join ", ")) -ForegroundColor DarkYellow
 }
 
 Write-Host ""

@@ -72,7 +72,9 @@
 #   pwsh -File tools/verify-focus.ps1 -FullPages @()         # the pre-G22 ten, all pages
 #   pwsh -File tools/verify-focus.ps1 -Report                # measure, never fail
 param(
-    [string[]]$Pages = @("home", "detail", "settings"),
+    # G32: empty means "ask tools/page-set.ps1 for the focus selection", which is resolved
+    # below; an explicit -Pages, including an empty one, still wins.
+    [string[]]$Pages = @(),
     [string]$Size = "1024x768",
     [string]$Exe = "target\debug\pixiv-desktop.exe",
     [int]$Stops = 10,
@@ -102,8 +104,14 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 # so the selftest can plant a stop with nothing drawn on it without a desktop.
 . (Join-Path $PSScriptRoot "walk-lib.ps1")
 . (Join-Path $PSScriptRoot "focus-lib.ps1")
+# G32: the three pages this gate walks, and the deep link that opens "detail", come from
+# tools/page-set.ps1 - the same list the other three verifiers and the budget read.
+. (Join-Path $PSScriptRoot "page-set.ps1") | Out-Null
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
 
+# G32: the same three pages as before (home, detail, settings), asked for by name
+# instead of copied - and a fourth can only arrive by editing the page set.
+if (-not $PSBoundParameters.ContainsKey("Pages")) { $Pages = @(Get-PageSet -For focus) }
 $Pages = @($Pages | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $currentDir = Join-Path $OutDir "current"
 New-Item -ItemType Directory -Force -Path $currentDir | Out-Null
@@ -141,21 +149,21 @@ function Stop-App {
 function Invoke-FocusWalk {
     param([string]$Page, $Ring, $Accent)
 
+    # G32: a name the page set does not know has no recipe, and the shell would fall back
+    # to the home page: a walk of home reported as another page's ring.
+    if ((Get-PageLaunch -Page $Page).Count -eq 0) {
+        return [pscustomobject]@{ Page = $Page; Skip = "no launch recipe in tools/page-set.ps1"; Stops = @() }
+    }
     if (-not (Test-Path $Exe)) {
         return [pscustomobject]@{ Page = $Page; Skip = ("no binary at " + $Exe); Stops = @() }
     }
     Stop-App
     $env:PIXIV_DESKTOP_DEMO = "1"
     $env:PIXIV_DESKTOP_SIZE = $Size
-    if ($Page -eq "detail") {
-        $env:PIXIV_DESKTOP_START_PAGE = "home"
-        $env:PIXIV_DESKTOP_START_ILLUST = "700000003"
-    }
-    else {
-        $env:PIXIV_DESKTOP_START_PAGE = $Page
-        Remove-Item Env:\PIXIV_DESKTOP_START_ILLUST -ErrorAction SilentlyContinue
-    }
-    Remove-Item Env:\PIXIV_DESKTOP_START_USER -ErrorAction SilentlyContinue
+    # G32: "detail" is opened by PIXIV_DESKTOP_START_ILLUST on top of the home page, not
+    # by its page name; that special case used to live here and in two other scripts, and
+    # it is now one line of the page set's recipe table.
+    Set-PageLaunch -Page $Page
     Remove-Item Env:\PIXIV_DESKTOP_TIP -ErrorAction SilentlyContinue
     # Pinned, not inherited: the ring colour asserted below is the one for the
     # theme this run forces, so the OS choice must not be able to change it.
