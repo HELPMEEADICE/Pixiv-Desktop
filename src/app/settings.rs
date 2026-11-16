@@ -5,6 +5,7 @@ pub(crate) fn describe_session_error(error: &PixivError) -> String {
         PixivError::Unauthorized => {
             "Pixiv 不接受这个 PHPSESSID：它可能已经退出登录或过期，请到浏览器重新复制".to_string()
         }
+        PixivError::Forbidden => "这个页面只对它的主人开放：请用该账号登录后再看".to_string(),
         PixivError::Network(message) => format!("无法连接 Pixiv：{message}"),
         PixivError::Http { status, message } => {
             if message.trim().is_empty() {

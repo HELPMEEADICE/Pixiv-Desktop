@@ -152,7 +152,11 @@ pub(crate) fn map_status_error_with_hint(
                 .or_else(|| snippet(body))
                 .unwrap_or_else(|| "资源不存在".to_string()),
         ),
-        401 | 403 => PixivError::Unauthorized,
+        // 403 is not a missing session: the documented self-only routes answer it to
+        // a perfectly valid one. Two variants, because they ask the reader for two
+        // different things (D-crate hand_back C5).
+        401 => PixivError::Unauthorized,
+        403 => PixivError::Forbidden,
         429 => PixivError::RateLimited(retry_after.unwrap_or(BACKOFF_BASE)),
         // Every other status keeps its code. A flagged body used to become
         // `Api(message)`, which is a variant with no status in it: the caller got
@@ -1477,9 +1481,10 @@ mod tests {
             map_status_error(401, ""),
             PixivError::Unauthorized
         ));
+        // A 403 asks for the account that owns the route, not for a session.
         assert!(matches!(
             map_status_error(403, ""),
-            PixivError::Unauthorized
+            PixivError::Forbidden
         ));
         // A 400 carrying Pixiv's own message keeps *both*: the sentence is
         // Pixiv's, and the status stays on the error. It used to arrive as
@@ -1557,9 +1562,11 @@ mod tests {
             check_mutation(404, ""),
             Err(PixivError::NotFound(_))
         ));
+        // A 403 on a mutation means the route is not this account's, not that the
+        // session is missing.
         assert!(matches!(
             check_mutation(403, ""),
-            Err(PixivError::Unauthorized)
+            Err(PixivError::Forbidden)
         ));
     }
 

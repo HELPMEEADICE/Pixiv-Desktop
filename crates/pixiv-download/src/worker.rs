@@ -1126,6 +1126,7 @@ fn describe(err: &PixivError) -> String {
             format!("服务器返回 {status}：{}", truncate(message, 80))
         }
         PixivError::Unauthorized => "登录状态已失效，请重新登录".to_string(),
+        PixivError::Forbidden => "此资源只对本人账号开放".to_string(),
         PixivError::Api(message) => format!("接口错误：{}", truncate(message, 80)),
         PixivError::RateLimited(_) => "请求过于频繁，请稍后再试".to_string(),
         PixivError::Decode(_) => "响应无法解析".to_string(),

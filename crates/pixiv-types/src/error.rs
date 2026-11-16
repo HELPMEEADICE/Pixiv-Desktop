@@ -22,6 +22,15 @@ pub enum PixivError {
     #[error("需要登录 Pixiv 才能执行此操作")]
     Unauthorized,
 
+    /// The session is valid and the route is closed to it.
+    ///
+    /// Pixiv answers `403` for a route only its owner may read - the follower
+    /// list is the documented case (`docs/API-NOTES.md`). It is not a missing
+    /// session, and telling a signed-in user to sign in is the wrong sentence:
+    /// there is nothing to fix by signing in.
+    #[error("此资源只对本人账号开放，请用所在账号查看")]
+    Forbidden,
+
     /// Pixiv replied with `{"error": true, "message": "..."}`.
     #[error("Pixiv 接口错误：{0}")]
     Api(String),
@@ -71,7 +80,9 @@ impl PixivError {
             Self::RateLimited(_) => true,
             Self::Http { status, .. } => *status == 429 || *status >= 500,
             Self::Api(_) | Self::Decode(_) | Self::Io(_) => false,
-            Self::Unauthorized | Self::NotFound(_) | Self::Cancelled | Self::Other(_) => false,
+            Self::Unauthorized | Self::Forbidden | Self::NotFound(_) | Self::Cancelled | Self::Other(_) => {
+                false
+            }
         }
     }
 }
