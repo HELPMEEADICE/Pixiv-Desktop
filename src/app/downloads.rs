@@ -450,16 +450,9 @@ impl App {
             let outcome = async {
                 let meta = client.ugoira_meta(illust.id).await?;
                 let (bytes, _) = client.fetch_bytes(meta.best_zip()).await?;
-                let film = pixiv_ugoira::UgoiraFilm::decode_zip(&bytes, &meta.frames)
-                    .map_err(|e| pixiv_types::PixivError::Api(e.to_string()))?;
-                let gif = film
-                    .export_gif()
-                    .map_err(|e| pixiv_types::PixivError::Api(e.to_string()))?;
-                let path = dir.join(format!("{}_ugoira.gif", illust.id));
-                if let Err(error) = std::fs::write(&path, gif) {
-                    return Err(pixiv_types::PixivError::Api(error.to_string()));
-                }
-                Ok(path)
+                // Decoding sixty frames and encoding them is CPU, and the write is
+                // an fsync: both belong on the blocking pool (plan §2.3 O8).
+                export_gif_off_thread(illust.id, meta, bytes, dir).await
             }
             .await;
             on_ui(move |shared| {
@@ -474,6 +467,73 @@ impl App {
             });
         });
     }
+}
+
+/// Where the blocking export last ran. Test-only.
+///
+/// O8's claim is about *which* thread the encode and the fsync moved to, and a
+/// thread's name is the only handle a process has on that.
+#[cfg(test)]
+pub(crate) static EXPORT_THREAD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Run one GIF export on the blocking pool.
+///
+/// `spawn_blocking` for both halves of O8: an encode of sixty frames is pure CPU,
+/// and `write_synced` waits on an `fsync`. On a runtime worker either one stalls
+/// every other future scheduled on that thread, which is the stutter users felt
+/// while a GIF was written.
+pub(crate) async fn export_gif_off_thread(
+    id: pixiv_types::Id,
+    meta: pixiv_types::domain::UgoiraMeta,
+    bytes: Vec<u8>,
+    dir: std::path::PathBuf,
+) -> Result<std::path::PathBuf, pixiv_types::PixivError> {
+    match tokio::task::spawn_blocking(move || export_gif_blocking(id, &meta, &bytes, &dir)).await {
+        Ok(outcome) => outcome,
+        Err(error) => Err(pixiv_types::PixivError::Api(format!(
+            "动图导出线程未能结束：{error}"
+        ))),
+    }
+}
+
+/// Decode the archive, encode the GIF and write it durably.
+///
+/// A function of its own so the test can name the thread it runs on.
+pub(crate) fn export_gif_blocking(
+    id: pixiv_types::Id,
+    meta: &pixiv_types::domain::UgoiraMeta,
+    bytes: &[u8],
+    dir: &std::path::Path,
+) -> Result<std::path::PathBuf, pixiv_types::PixivError> {
+    #[cfg(test)]
+    {
+        if let Ok(mut slot) = EXPORT_THREAD.lock() {
+            *slot = std::thread::current().name().map(str::to_owned);
+        }
+    }
+    let film = pixiv_ugoira::UgoiraFilm::decode_zip(bytes, &meta.frames)
+        .map_err(|error| pixiv_types::PixivError::Api(error.to_string()))?;
+    let gif = film
+        .export_gif()
+        .map_err(|error| pixiv_types::PixivError::Api(error.to_string()))?;
+    let path = dir.join(format!("{id}_ugoira.gif"));
+    write_synced(&path, &gif).map_err(|error| pixiv_types::PixivError::Api(error.to_string()))?;
+    Ok(path)
+}
+
+/// Create, write every byte, and flush the file to the platter.
+///
+/// The three lines `pixiv-image`'s disk tier uses
+/// (`crates/pixiv-image/src/disk.rs:365`), repeated rather than shared: that
+/// module is private to its crate, so its `write_synced` is not reachable from
+/// here. The defect the copy fixes is the same one: `fs::write` returns as soon as
+/// the kernel has the bytes, so a crash can leave the name in place with nothing
+/// behind it.
+fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 /// Patch `model` so it holds `next`, touching only the rows that differ.
@@ -560,6 +620,38 @@ pub(crate) fn to_download_rows(tasks: Vec<pixiv_download::DownloadTask>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O8: the encode and the fsync run on the blocking pool, not on the thread
+    /// the async work is scheduled on.
+    ///
+    /// The negative experiment is the shape this replaced - the encode and
+    /// `fs::write` inline in the async block - which puts both back on the
+    /// runtime worker and makes this comparison equal.
+    #[tokio::test]
+    async fn the_gif_export_runs_off_the_async_worker() {
+        let here = std::thread::current().name().map(str::to_owned);
+        // An empty archive: the export fails inside the blocking half, after it
+        // has recorded its thread, so the test costs no image encode.
+        let outcome = export_gif_off_thread(
+            pixiv_types::Id(1),
+            pixiv_types::domain::UgoiraMeta::default(),
+            Vec::new(),
+            std::env::temp_dir(),
+        )
+        .await;
+        assert!(outcome.is_err(), "an empty archive is not a film");
+
+        let there = EXPORT_THREAD
+            .lock()
+            .ok()
+            .and_then(|slot| (*slot).clone())
+            .expect("the blocking half ran and named its thread");
+        assert_ne!(
+            here,
+            Some(there.clone()),
+            "the export ran on the async worker: {there}"
+        );
+    }
 
     fn request(id: &str) -> DownloadRequest {
         DownloadRequest {
