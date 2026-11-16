@@ -243,7 +243,7 @@ impl App {
                 .enumerate()
                 .map(|(row, item_index)| {
                     let illust = &self.items[*item_index];
-                    let mut item = illust_to_item(illust, rank_in(&ranks, illust));
+                    let mut item = self.card_item(illust, rank_in(&ranks, illust));
                     self.mark_selected(&mut item);
                     let key = illust.id.to_string();
                     if let Some(image) = self.covers.get(&key) {
@@ -323,7 +323,7 @@ impl App {
                 geometry.card_width,
                 layout::clamped_aspect(illust.width, illust.height),
             );
-            let mut item = illust_to_item(illust, rank_in(&ranks, illust));
+            let mut item = self.card_item(illust, rank_in(&ranks, illust));
             self.mark_selected(&mut item);
             let key = illust.id.to_string();
             if let Some(image) = self.covers.get(&key) {
@@ -384,6 +384,50 @@ pub(crate) fn rank_table(page: Destination, items: &[Illust]) -> HashMap<u64, i3
 /// One card's number, out of the table built for this render.
 pub(crate) fn rank_in(ranks: &HashMap<u64, i32>, illust: &Illust) -> i32 {
     ranks.get(&illust.id.get()).copied().unwrap_or(0)
+}
+
+/// The page count a card's badge draws.
+///
+/// `is_multi_page` is the domain's predicate, and it is asked here rather than
+/// re-derived: the badge's rule and the payload's rule are the same sentence, and a
+/// card that compared `page_count > 1` itself was the second copy of it.
+pub(crate) fn card_page_count(illust: &Illust) -> i32 {
+    if illust.is_multi_page() {
+        i32::try_from(illust.page_count).unwrap_or(i32::MAX)
+    } else {
+        1
+    }
+}
+
+/// The date a card is labelled with, or the empty string.
+///
+/// Only the ranking board labels a card with a date: its rows carry a per-entry
+/// stamp (`create_date` from `ranking.php`'s own `date`), while the work endpoints
+/// carry an upload timestamp the caption band has no room for and the grid never
+/// showed. An empty value is the answer that draws nothing — no slot, no separator.
+pub(crate) fn card_date(page: Destination, illust: &Illust) -> String {
+    if page != Destination::Ranking {
+        return String::new();
+    }
+    let raw = illust.create_date.as_deref().unwrap_or_default().trim();
+    let date = pixiv_types::domain::iso_date(raw);
+    // A board stamps its rows with a date *and* the slot it was taken in
+    // ("2024-03-12 12:33:00", "2026年11月09日 00:00"). Every row of one board shares
+    // the time, and the caption band is 44 px: the card keeps the date.
+    match date.split_once(' ') {
+        Some((head, tail)) if !head.is_empty() && tail.contains(':') => head.to_string(),
+        _ => date,
+    }
+}
+
+impl App {
+    /// One card, with the two values that belong to the page rather than to the row.
+    pub(crate) fn card_item(&self, illust: &Illust, rank: i32) -> IllustItem {
+        let mut item = illust_to_item(illust, rank);
+        item.page_count = card_page_count(illust);
+        item.date = card_date(self.page, illust).into();
+        item
+    }
 }
 
 impl App {
@@ -814,6 +858,7 @@ mod tests {
             author_avatar: slint::Image::default(),
             author_avatar_url: "".into(),
             author_avatar_state: 0,
+            date: "".into(),
             selected: false,
             selectable: false,
         }
@@ -1040,4 +1085,71 @@ mod tests {
         // Nothing on screen yet: an empty feed has no columns to extend.
         assert_eq!(plan_feed_update(true, 0, 0, 4, 0), FeedUpdate::Rebuild);
     }
+
+    /// F3: the badge's count is the domain's predicate, not a second comparison.
+    #[test]
+    fn f3_a_badge_counts_only_a_multi_page_work() {
+        let mut illust = work(1);
+        illust.page_count = 1;
+        assert_eq!(card_page_count(&illust), 1);
+        illust.page_count = 7;
+        assert_eq!(card_page_count(&illust), 7);
+        // A payload that claims zero pages is one picture, which is what
+        // `Illust::base` already clamps to; the badge must not print "共0张".
+        illust.page_count = 0;
+        assert_eq!(card_page_count(&illust), 1);
+        assert!(!illust.is_multi_page(), "the predicate the badge asks");
+    }
+
+    /// F3: the ranking board labels its cards; no other grid does.
+    #[test]
+    fn f3_only_the_ranking_card_carries_its_date() {
+        let mut illust = work(1);
+        illust.create_date = Some("2026年11月09日 00:00".to_string());
+        illust.create_date = Some("2026年11月09日 00:00".to_string());
+        assert_eq!(
+            card_date(Destination::Ranking, &illust),
+            "2026年11月09日",
+            "the board's own stamp is shown as Pixiv wrote it, without the slot time"
+        );
+        illust.create_date = Some("2024-03-12 12:33:00".to_string());
+        assert_eq!(
+            card_date(Destination::Ranking, &illust),
+            "2024-03-12",
+            "every row of one board shares the time, so the card keeps the date"
+        );
+        for page in [
+            Destination::Home,
+            Destination::Search,
+            Destination::Bookmarks,
+            Destination::History,
+        ] {
+            assert_eq!(
+                card_date(page, &illust),
+                "",
+                "{page:?} draws no date slot at all"
+            );
+        }
+        // The eight-digit form is the one shape the domain reformats.
+        illust.create_date = Some("20261116".to_string());
+        assert_eq!(card_date(Destination::Ranking, &illust), "2026-11-16");
+    }
+
+    /// F3: an empty date is the empty string, which is what draws no separator.
+    #[test]
+    fn f3_an_empty_date_draws_no_slot_and_no_separator() {
+        let mut illust = work(1);
+        assert_eq!(card_date(Destination::Ranking, &illust), "");
+        illust.create_date = Some("   ".to_string());
+        assert_eq!(
+            card_date(Destination::Ranking, &illust),
+            "",
+            "whitespace is not a date"
+        );
+        assert!(
+            !card_date(Destination::Ranking, &illust).starts_with('·'),
+            "the separator belongs to the non-empty branch only"
+        );
+    }
+
 }

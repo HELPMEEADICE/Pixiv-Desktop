@@ -1530,6 +1530,10 @@ export struct IllustItem {
     author-avatar-url: string,
     /// 0 ok, 1 loading, 2 failed or absent
     author-avatar-state: int,
+    /// F3: the row's own date, drawn only where the surface labels a card with one
+    /// (the ranking board) and only when the payload carried it. Empty means "no
+    /// date", and the card then draws no slot and no separator at all.
+    date: string,
 }
 
 /// The bookmark toggle that floats on the cover's corner.
@@ -1926,9 +1930,28 @@ export component IllustCard inherits Rectangle {
                     role: TextRole.Caption;
                     x: 21px;
                     y: 0px;
-                    width: max(0px, parent.width - 21px);
+                    // F3: the date takes the right end of this row, so the author's
+                    // cell gives it that width back instead of running underneath it.
+                    width: max(0px, parent.width - 21px - Theme.space-1
+                        - (root.item.date == "" ? 0px : parent.width * 0.46));
                     text: root.item.author;
                     color: Theme.text-tertiary;
+                }
+                // F3: the card's own date, at the right end of the author row. The dot
+                // is *inside* this branch: a separator drawn unconditionally is a dot
+                // pointing at nothing on the four surfaces that carry no date.
+                if root.item.date != "" : Text {
+                    // Natural width, right-aligned: the date is the *shorter* half of
+                    // this row and eliding it turned "2024-04-13" into "2024-04-1…"
+                    // at a four-column window. The author label above reserves the
+                    // other half, so the two cannot overlap in the first place.
+                    x: parent.width - self.width;
+                    y: 0px;
+                    height: 18px;
+                    text: "· " + root.item.date;
+                    color: Theme.text-tertiary;
+                    font-size: Theme.font-caption;
+                    vertical-alignment: center;
                 }
                 // The author's own hit target, declared last so it wins the
                 // hit-test against the card's open-on-click area.
