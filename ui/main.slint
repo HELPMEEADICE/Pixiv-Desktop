@@ -442,6 +442,11 @@ export component AppWindow inherits Window {
     in-out property <length> detail-pan-x: 0px;
     in-out property <length> detail-pan-y: 0px;
     in property <bool> detail-fit-mode: true;
+    /// F2: the work on screen is marked sensitive and has not been revealed yet, and
+    /// the badge that says how sensitive it is. Both come from `Illust.is_masked`,
+    /// `Illust.sl` and `Illust.x_restrict` (src/app/detail.rs).
+    in property <bool> detail-masked: false;
+    in property <string> detail-sensitivity: "";
 
     // ---- downloads ----
     in property <[DownloadRow]> download-rows: [];
@@ -519,6 +524,8 @@ export component AppWindow inherits Window {
     callback detail-request-pan(float, float);
     callback detail-request-toggle-zoom(float, float);
     callback detail-reload-image();
+    /// F2: 「显示」 on a masked work.
+    callback detail-reveal();
     callback detail-set-fit-mode(bool);
     callback detail-set-zoom(float);
     callback toggle-fullscreen();
@@ -1367,7 +1374,10 @@ export component AppWindow inherits Window {
                         pan-x <=> root.detail-pan-x;
                         pan-y <=> root.detail-pan-y;
                         fit-mode: root.detail-fit-mode;
+                        masked: root.detail-masked;
+                        sensitivity: root.detail-sensitivity;
                         back => { root.detail-back(); }
+                        reveal => { root.detail-reveal(); }
                         toggle-bookmark => { root.detail-toggle-bookmark(); }
                         open-author => { root.detail-open-author(); }
                         open-tag(t) => { root.detail-open-tag(t); }

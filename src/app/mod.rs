@@ -209,6 +209,10 @@ pub(crate) struct App {
     detail_pages: Vec<PageMeta>,
     detail_models: Option<Rc<VecModel<ViewerPage>>>,
     detail_epoch: u64,
+    /// F2: the work on screen is marked sensitive by Pixiv and has not been revealed.
+    /// It decides what the viewer may request, so it is a field the request path reads
+    /// rather than a property only the page draws.
+    detail_masked: bool,
     /// Reused so a burst of notices does not leak one timer per message.
     notice_timer: slint::Timer,
     /// Persisted three-state theme choice; Theme.dark is derived from it.

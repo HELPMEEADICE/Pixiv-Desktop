@@ -13,6 +13,18 @@ pub(crate) fn install(app: &Shared) {
         ui.on_detail_back(move || App::travel(&shared, true));
     }
 
+    // F2: 「显示」 on a work Pixiv marks sensitive. The mask is the app's state, not
+    // the page's: lifting it is what lets the viewer request the full-size page.
+    {
+        let shared = app.clone();
+        ui.on_detail_reveal(move || {
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            app.reveal_masked();
+        });
+    }
+
     {
         let shared = app.clone();
         ui.on_detail_toggle_bookmark(move || {

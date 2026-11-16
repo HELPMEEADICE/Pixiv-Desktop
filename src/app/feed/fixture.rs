@@ -17,6 +17,12 @@ pub(crate) enum Fixture {
     Ugoira,
     /// F5, owned by the downloads track.
     Downloads,
+    /// F2, this track: the opened work is marked sensitive, which the demo catalogue
+    /// cannot show — every one of its rows carries `is_masked: false`.
+    Sensitive,
+    /// F4, this track: every third work in a demo page is AI-generated, for the card
+    /// badge. The catalogue's rows all carry `aiType: 0`.
+    Ai,
     /// A value this build does not know. `tools/fixture.ps1` exits 77 for it, so
     /// the app must not pretend it is the same as no fixture.
     Unknown,
@@ -34,6 +40,8 @@ pub(crate) fn fixture_from(value: Option<&str>) -> Fixture {
         "suggestion" => Fixture::Suggestion,
         "ugoira" => Fixture::Ugoira,
         "downloads" => Fixture::Downloads,
+        "sensitive" => Fixture::Sensitive,
+        "ai" => Fixture::Ai,
         _ => Fixture::Unknown,
     }
 }
@@ -73,7 +81,14 @@ impl App {
             }
             // Not this track's state, or not a state at all: nothing to do, and no
             // reason to re-check on every render.
-            Fixture::Ugoira | Fixture::Downloads | Fixture::Unknown | Fixture::None => true,
+            // A grid fixture is applied by the render that builds the rows
+            // (`demo_items`), not here.
+            Fixture::Sensitive
+            | Fixture::Ai
+            | Fixture::Ugoira
+            | Fixture::Downloads
+            | Fixture::Unknown
+            | Fixture::None => true,
         };
         if applied {
             APPLIED.with(|flag| flag.set(true));
@@ -97,6 +112,8 @@ mod tests {
         assert_eq!(fixture_from(Some("suggestion")), Fixture::Suggestion);
         assert_eq!(fixture_from(Some("ugoira")), Fixture::Ugoira);
         assert_eq!(fixture_from(Some("downloads")), Fixture::Downloads);
+        assert_eq!(fixture_from(Some("sensitive")), Fixture::Sensitive);
+        assert_eq!(fixture_from(Some("AI")), Fixture::Ai);
         // Not a fixture this build knows: 77 in tools/fixture.ps1, never "no fixture".
         assert_eq!(fixture_from(Some("still-nonsense")), Fixture::Unknown);
     }

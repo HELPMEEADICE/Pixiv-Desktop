@@ -39,6 +39,10 @@ export component ZoomViewer inherits Rectangle {
     /// still — which is why playback needs no second component and no second layout
     /// path, and why a paused or unwired film paints today's pixels.
     in property <image> frame;
+    /// F2: the work is marked sensitive by Pixiv and has not been revealed. While it
+    /// is set, the viewer paints the mask instead of the picture — and the plan that
+    /// filled it asked for the small tier only (`masked_detail_plan`).
+    in property <bool> masked: false;
 
     /// Cursor position (px), wheel delta (px), and the viewer's own viewport.
     callback request-zoom(float, float, float, float, float);
@@ -51,6 +55,9 @@ export component ZoomViewer inherits Rectangle {
     /// this button used to call `request-toggle-zoom`, so pressing it changed the
     /// scale and never requested the image again.
     callback reload-image();
+    /// F2: 「显示」 was pressed on a masked work. The mask is the app's state, so the
+    /// page reports the gesture and Rust lifts it (and re-plans the decode).
+    callback reveal();
 
     clip: true;
     background: Theme.viewer-surface;
@@ -241,6 +248,53 @@ export component ZoomViewer inherits Rectangle {
                 size: 28px;
                 row-height: 36px;
                 clicked => { root.toggle-fullscreen(); }
+            }
+        }
+    }
+    // F2: the mask a sensitive work is drawn behind — the same affordance the web
+    // has, and the reason a masked page never asks for the full-size image. Declared
+    // last so it sits above the viewer's own pointer surface and the control pill, and
+    // stated as a full-surface box at the origin: it covers everything, so it is not
+    // competing for a corner with any other overlay (G48).
+    if root.masked : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        background: Theme.artwork-scrim;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: Theme.space-3;
+
+            HorizontalLayout {
+                width: 100%;
+                Rectangle { horizontal-stretch: 1; }
+                IconPresenter {
+                    name: "shield";
+                    glyph-size: Theme.icon-size-lg;
+                    tint: Theme.artwork-ink;
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+
+            Label {
+                role: TextRole.Small;
+                text: "Pixiv 把这件作品标记为敏感，已先遮罩";
+                color: Theme.artwork-ink;
+                horizontal-alignment: center;
+            }
+
+            HorizontalLayout {
+                width: 100%;
+                Rectangle { horizontal-stretch: 1; }
+                AppButton {
+                    label: "显示";
+                    icon: "eye";
+                    kind: ButtonKind.Secondary;
+                    clicked => { root.reveal(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
             }
         }
     }
@@ -676,6 +730,16 @@ export component DetailPage inherits Rectangle {
     in property <string> message: "";
     in property <string> ugoira-hint: "";
 
+    // ---- F2: a work Pixiv marks sensitive, masked before it is revealed ----
+    /// While set, the viewer draws the mask and the request path has asked only for
+    /// the small tier. Rust owns it: the mask is one fact deciding two things (what is
+    /// requested and what is drawn), so it cannot live in the page alone.
+    in property <bool> masked: false;
+    /// The sensitivity level, as the toolbar badge spells it ("R-18", "R-18G",
+    /// "敏感"). Empty draws no chip at all — a work Pixiv marks nothing is not
+    /// "normal", it is unmarked.
+    in property <string> sensitivity: "";
+
     in property <[ViewerPage]> pages: [];
     in-out property <int> current-page: 0;
 
@@ -702,6 +766,9 @@ export component DetailPage inherits Rectangle {
     callback set-zoom(float);
     callback toggle-fullscreen();
     callback reload-image();
+    /// F2: 「显示」 was pressed. The page reports it; Rust lifts the mask and re-plans
+    /// the decode at the full tier, which is the only way the original is requested.
+    callback reveal();
 
     // ---- round nine: F1 playback, F4 bookmark visibility, U29 page stepping ----
     // The frozen seams, all with defaults that draw exactly what the page drew
@@ -835,6 +902,21 @@ export component DetailPage inherits Rectangle {
                     }
                 }
 
+                // F2: the sensitivity level, beside the page-count badge and drawn
+                // the same way (a wrapper claims the row height; the 18 px chip itself
+                // keeps its own metrics). Empty means Pixiv marks nothing.
+                if root.sensitivity != "" : Rectangle {
+                    width: sensitivity-badge.width;
+                    height: 100%;
+
+                    sensitivity-badge := Badge {
+                        y: (parent.height - self.height) / 2;
+                        label: root.sensitivity;
+                        fill: Theme.danger-subtle;
+                        ink: Theme.danger;
+                    }
+                }
+
                 // ---- F1: playback, in the toolbar it already has ----
                 // Same IconButton as the four beside it, so the row keeps one control
                 // metric (32 px inside a 44 px row) and one focus-ring treatment. The
@@ -931,6 +1013,8 @@ export component DetailPage inherits Rectangle {
                     ZoomViewer {
                         horizontal-stretch: 1;
                         frame: root.film-frame;
+                        masked: root.masked;
+                        reveal => { root.reveal(); }
                         page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
                         fit-mode: root.fit-mode;
                         zoom <=> root.zoom;
@@ -1000,6 +1084,8 @@ export component DetailPage inherits Rectangle {
                 // means the embedded viewer shows the picture it was given.
                 if root.state == 0 && root.pages.length > 0 && !root.wide : VerticalLayout {
                     ZoomViewer {
+                        masked: root.masked;
+                        reveal => { root.reveal(); }
                         // `available-width` is the content box, so the estimate subtracts the
                         // page padding the surrounding layout adds.
                         //

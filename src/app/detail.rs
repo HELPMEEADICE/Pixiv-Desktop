@@ -80,10 +80,20 @@ impl App {
                 let found = app.demo.detail(illust_id);
                 let pages = app.demo.pages(illust_id);
                 drop(app);
-                let Some(illust) = found else {
+                let Some(mut illust) = found else {
                     App::fail_detail(shared, epoch, "找不到该作品，或它对该账号不可见。");
                     return;
                 };
+                // F2: a capture cannot reach a work Pixiv marks sensitive offline —
+                // every demo row carries `is_masked: false` — so the state has a name
+                // the capture table can ask for (G24). Nothing else reads it.
+                if matches!(
+                    crate::app::feed::fixture::current(),
+                    crate::app::feed::fixture::Fixture::Sensitive
+                ) {
+                    illust.is_masked = true;
+                    illust.sl = 2;
+                }
                 let mut app = shared.borrow_mut();
                 app.install_detail_with_follow(
                     DetailPayload {
@@ -368,6 +378,9 @@ impl App {
             });
         }
 
+        // F2: `is_masked` is read once, here, because it decides two things — what
+        // the plan may request and what the page draws.
+        let masked = illust.is_masked;
         // Page skeletons, sized from the real page metadata when we have it.
         let count = viewer_page_count(illust.page_count, pages.len());
         let skeletons: Vec<ViewerPage> = (0..count)
@@ -384,8 +397,12 @@ impl App {
             })
             .collect();
         let models = Rc::new(VecModel::from(skeletons));
-        self.ui().set_detail_pages(ModelRc::from(models.clone()));
-        self.ui().set_detail_state(0);
+        self.detail_masked = masked;
+        let ui = self.ui();
+        ui.set_detail_pages(ModelRc::from(models.clone()));
+        ui.set_detail_masked(masked);
+        ui.set_detail_sensitivity(sensitivity_label(&illust).into());
+        ui.set_detail_state(0);
 
         // ---- O1: decode what is shown, and only what is shown -------------
         // The strip draws 48 px cells and the viewer draws the current page plus
@@ -394,8 +411,20 @@ impl App {
         // for the one picture on screen. The plan comes from `detail_plan`, so the
         // counting test and the running app agree on what "one decode" means.
         let seed = illust.id;
-        let largest = illust.urls.largest().to_string();
-        let requests = detail_plan(&pages, &largest, 0);
+        // F2: a work Pixiv marks sensitive is drawn blurred behind 「显示」, and the
+        // blur is the small tier — `largest()` is the only call that reaches the
+        // original, so a masked page hands the plan the master1200 fallback and lets
+        // `masked_detail_plan` keep the viewer on the small tier as well.
+        let largest = if masked {
+            illust.urls.viewer().to_string()
+        } else {
+            illust.urls.largest().to_string()
+        };
+        let requests = if masked {
+            masked_detail_plan(&pages, &largest, 0)
+        } else {
+            detail_plan(&pages, &largest, 0)
+        };
 
         self.detail = Some(illust);
         self.detail_pages = pages;
@@ -449,7 +478,13 @@ impl App {
             return;
         };
 
-        let Some(url) = retry_url(&self.detail_pages, illust.urls.largest(), index) else {
+        // A masked page has not asked for the original and must not start now.
+        let fallback = if self.detail_masked {
+            illust.urls.viewer()
+        } else {
+            illust.urls.largest()
+        };
+        let Some(url) = retry_url(&self.detail_pages, fallback, index) else {
             // A work with no image at all - a novel, a deleted page, a page list
             // that came back empty - has nothing to retry. Saying so is the whole
             // difference between a button that is broken and one that has no work
@@ -889,6 +924,70 @@ pub(crate) fn detail_plan(pages: &[PageMeta], largest: &str, current: usize) -> 
     requests
 }
 
+/// The sensitivity badge's text, from Pixiv's own two fields.
+///
+/// `x_restrict` is the age rating the search and detail payloads both carry, and
+/// `sl` / `is_masked` are the newer sensitivity marks: a work can be marked without
+/// being R-18. Empty means "Pixiv marks nothing", which is what keeps the badge off
+/// the toolbar instead of drawing a chip that says "normal".
+pub(crate) fn sensitivity_label(illust: &Illust) -> String {
+    match illust.x_restrict {
+        1 => "R-18".to_string(),
+        2 => "R-18G".to_string(),
+        _ if illust.is_masked || illust.sl > 0 => "敏感".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// The decode plan a work Pixiv marks sensitive may run, before 「显示」.
+///
+/// The web draws such a work blurred and serves the blur from the *small* tier; the
+/// viewer here asked for the master1200 tier, so a masked page asks for the small one
+/// instead and lifts it only when the mask is lifted. The one URL this app can reach
+/// that carries the whole picture — `urls.original`, which `largest()` prefers — is
+/// therefore never requested while the mask is up.
+pub(crate) fn masked_detail_plan(
+    pages: &[PageMeta],
+    largest: &str,
+    current: usize,
+) -> Vec<DecodeRequest> {
+    detail_plan(pages, largest, current)
+        .into_iter()
+        .map(|request| match request.size {
+            DecodeSize::Viewer => match pages.get(request.index) {
+                // No page metadata: the single-image fallback is the caller's URL,
+                // which under a mask is already the viewer tier.
+                None => request,
+                Some(page) => DecodeRequest {
+                    url: page_url(page, DecodeSize::Thumb).to_string(),
+                    ..request
+                },
+            },
+            DecodeSize::Thumb => request,
+        })
+        .collect()
+}
+
+impl App {
+    /// 「显示」: the mask is lifted, and only now is the full-size page asked for.
+    pub(crate) fn reveal_masked(&mut self) {
+        if !self.detail_masked {
+            return;
+        }
+        self.detail_masked = false;
+        self.ui().set_detail_masked(false);
+        let Some(illust) = self.detail.clone() else {
+            return;
+        };
+        let pages = self.detail_pages.clone();
+        let current = self.ui().get_detail_page_index().max(0) as usize;
+        let seed = illust.id;
+        let epoch = self.detail_epoch;
+        let requests = detail_plan(&pages, illust.urls.largest(), current);
+        self.spawn_detail_decodes(requests, epoch, seed);
+    }
+}
+
 /// Adopt one decode result into the page model.
 ///
 /// The epoch_current flag is (detail_epoch == epoch) read at the moment the
@@ -1286,6 +1385,132 @@ async fn load_film_bytes(
 
 #[cfg(test)]
 mod tests {
+    // ---------------------------------------------------------------- F2: the mask
+
+    fn page(index: u32, small: &str, regular: &str, original: &str) -> PageMeta {
+        PageMeta {
+            index,
+            width: 600,
+            height: 800,
+            urls: PageUrls {
+                thumb_mini: format!("{small}-thumb-mini"),
+                small: small.to_string(),
+                regular: regular.to_string(),
+                original: original.to_string(),
+            },
+        }
+    }
+
+    /// A work with the three fields the mask reads; everything else is the shape a
+    /// payload with no optional extras produces.
+    fn sensitive(x_restrict: u8, sl: u8, is_masked: bool) -> Illust {
+        Illust {
+            id: Id(1),
+            title: String::new(),
+            kind: IllustKind::Illustration,
+            page_count: 1,
+            width: 600,
+            height: 800,
+            urls: IllustUrls::default(),
+            author: Author::default(),
+            tags: Vec::new(),
+            description: String::new(),
+            create_date: None,
+            bookmark: Bookmark::default(),
+            stats: IllustStats::default(),
+            x_restrict,
+            ai_type: 0,
+            alt: String::new(),
+            sl,
+            is_masked,
+            is_bookmarkable: true,
+        }
+    }
+
+    /// The badge says the level, and says nothing when Pixiv marks nothing.
+    #[test]
+    fn f2_the_sensitivity_badge_says_the_level_and_stays_off_for_an_unmarked_work() {
+        assert_eq!(sensitivity_label(&sensitive(1, 0, false)), "R-18");
+        assert_eq!(sensitivity_label(&sensitive(2, 2, true)), "R-18G");
+        assert_eq!(
+            sensitivity_label(&sensitive(0, 1, false)),
+            "敏感",
+            "a work can be marked sensitive without an age rating"
+        );
+        assert_eq!(sensitivity_label(&sensitive(0, 0, true)), "敏感");
+        assert_eq!(
+            sensitivity_label(&sensitive(0, 0, false)),
+            "",
+            "an unmarked work draws no chip: normal is not a level"
+        );
+    }
+
+    /// A masked page asks for the small tier and never for the original.
+    #[test]
+    fn f2_a_masked_page_never_requests_the_original() {
+        let pages: Vec<PageMeta> = (0..3)
+            .map(|index| {
+                page(
+                    index,
+                    &format!("https://i.pximg.net/c/360x360/small-{index}.jpg"),
+                    &format!("https://i.pximg.net/c/1200x1200/regular-{index}.jpg"),
+                    &format!("https://i.pximg.net/img-original/original-{index}.png"),
+                )
+            })
+            .collect();
+        let masked = masked_detail_plan(&pages, "https://i.pximg.net/img-original/f1.png", 1);
+        assert!(
+            !masked.iter().any(|request| request.url.contains("img-original")),
+            "a masked page must not fetch the full-size image: {:?}",
+            masked
+        );
+        for request in masked.iter().filter(|r| r.size == DecodeSize::Viewer) {
+            assert!(
+                request.url.contains("small-"),
+                "the viewer asks for the small tier while the mask is up: {:?}",
+                request
+            );
+        }
+        // The strip is untouched: it was already the small tier.
+        assert!(
+            masked.iter().any(|request| request.size == DecodeSize::Thumb),
+            "the strip keeps its cells"
+        );
+        // The unmasked plan is the one that reaches for the bigger copy, so the
+        // difference above is the mask and not the plan.
+        let plain = detail_plan(&pages, "https://i.pximg.net/img-original/f1.png", 1);
+        assert!(
+            plain
+                .iter()
+                .any(|request| request.url.contains("regular-")),
+            "the revealed page asks for the master1200 tier"
+        );
+    }
+
+    /// No page metadata: the caller's fallback is the only URL, and under a mask the
+    /// caller hands the viewer tier (never `largest()`).
+    #[test]
+    fn f2_the_single_image_fallback_is_the_viewer_tier_while_masked() {
+        let illust = sensitive(1, 1, true);
+        let mut urls = IllustUrls::default();
+        urls.regular = "https://i.pximg.net/c/1200x1200/regular.jpg".to_string();
+        urls.original = "https://i.pximg.net/img-original/original.png".to_string();
+        let illust = Illust { urls, ..illust };
+        assert!(illust.urls.largest().contains("img-original"));
+        assert!(illust.urls.viewer().contains("regular"));
+        // What `install_detail_with_follow` does with the flag:
+        let fallback = if illust.is_masked {
+            illust.urls.viewer().to_string()
+        } else {
+            illust.urls.largest().to_string()
+        };
+        let plan = masked_detail_plan(&[], &fallback, 0);
+        assert!(
+            !plan.iter().any(|request| request.url.contains("img-original")),
+            "the fallback a masked page passes must not be the original: {plan:?}"
+        );
+    }
+
     use super::*;
     use pixiv_types::domain::PageUrls;
 

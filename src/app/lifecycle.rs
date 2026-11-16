@@ -381,6 +381,7 @@ impl App {
             detail_pages: Vec::new(),
             detail_models: None,
             detail_epoch: 0,
+            detail_masked: false,
             notice_timer: slint::Timer::default(),
             theme_mode,
             theme_timer: slint::Timer::default(),
