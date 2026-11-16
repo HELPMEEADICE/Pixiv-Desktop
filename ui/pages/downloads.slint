@@ -71,6 +71,19 @@ component LocalRecordRow inherits Rectangle {
     accessible-role: AccessibleRole.list-item;
     accessible-label: root.entry.title + " · " + root.entry.when;
 
+    // A1: the row's hover surface is declared *first*, not last.
+    //
+    // Slint hit-tests in reverse declaration order, and a TouchArea takes the mouse on
+    // `MouseEvent::Pressed` whether or not it has a handler. Declared last, this bare
+    // surface sat on top of the row's four IconButtons and ate every press aimed at
+    // them: open / reveal / re-download / forget were pointer-dead while Tab still
+    // reached them, which is why no reviewer saw it. Declared first it stays under the
+    // controls, and `ta.has-hover` still paints the row wash — the one thing given up is
+    // that hovering an icon lights the icon's own wash instead of the whole row, which is
+    // what an icon button's hover is for. uiaudit's
+    // `a_hover_surface_declared_after_a_pointer_target_loses_the_press` keeps it here.
+    ta := TouchArea { }
+
     HorizontalLayout {
         padding-left: Theme.space-3;
         padding-right: Theme.space-2;
@@ -143,8 +156,6 @@ component LocalRecordRow inherits Rectangle {
             clicked => { root.forget(root.entry.id); }
         }
     }
-
-    ta := TouchArea { }
 }
 
 /// Row metric, mirrored by the state-colour logic below.

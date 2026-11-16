@@ -2458,4 +2458,130 @@ last in its component:\n{}",
             offenders.join("\n")
         );
     }
+    // -----------------------------------------------------------------------
+    // Round twelve (docs/OPTIMIZATION-PLAN-R12.md §9, track A)
+    // -----------------------------------------------------------------------
+
+    /// Names of the components whose body declares a pointer callback.
+    ///
+    /// Read out of the tree rather than listed here: a shared control becomes a pointer
+    /// target the moment it declares `clicked`, and a hand-written list would have gone
+    /// stale the first time one was added — which is the failure mode this round keeps
+    /// finding.
+    fn pointer_targets() -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for path in page_files() {
+            let source = read(&path);
+            for (index, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                let Some(at) = code.find("component ") else {
+                    continue;
+                };
+                let rest = &code[at + "component ".len()..];
+                let ident: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
+                if ident.is_empty() {
+                    continue;
+                }
+                let body = component_body(&source, index);
+                if body.contains("callback clicked") {
+                    out.insert(ident);
+                }
+            }
+        }
+        out
+    }
+
+    /// True when a block's own lines carry a `clicked =>` handler.
+    ///
+    /// `double-clicked` is a different event and must not count: the image viewer's pan
+    /// surface answers it and takes no single press, which is exactly the surface a
+    /// "has a click of its own" test would have waved through.
+    fn owns_click(own: &str) -> bool {
+        own.match_indices("clicked").any(|(at, _)| {
+            let before = own[..at].chars().next_back();
+            if matches!(before, Some(c) if c.is_ascii_alphanumeric() || c == '-') {
+                return false;
+            }
+            own[at + "clicked".len()..].trim_start().starts_with("=>")
+        })
+    }
+
+    /// G45 — a hover surface declared after a pointer target eats that target's press.
+    ///
+    /// Slint hit-tests in reverse declaration order, and a `TouchArea` claims the mouse on
+    /// `MouseEvent::Pressed` whether or not it carries a handler. A `TouchArea` that owns
+    /// no `clicked` is nothing but a hover/hit surface, and declared *after* the controls
+    /// it shares a row with it is above them: the control still draws its hover, still
+    /// answers the keyboard, and never receives the press. That is the shape
+    /// `downloads.slint`'s local-record row shipped — open, reveal, re-download and forget
+    /// were pointer-dead while Tab still reached them — and the reason the surface has to
+    /// be declared first.
+    ///
+    /// A `TouchArea` that carries its own `clicked` *is* the target and belongs last, and
+    /// a `FocusScope` only takes the pointer after a press has been claimed, so neither is
+    /// what this rule is about. Both may sit under the controls.
+    #[test]
+    fn a_hover_surface_declared_after_a_pointer_target_loses_the_press() {
+        let targets = pointer_targets();
+        assert!(
+            targets.len() >= 4,
+            "expected the shared controls to declare their pointer callbacks, found {}: {targets:?}",
+            targets.len()
+        );
+        let mut offenders = Vec::new();
+        let mut checked = 0;
+        for path in page_files() {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let source = read(&path);
+            let blocks = element_blocks(&source);
+            for block in blocks.iter().filter(|block| block.name == "TouchArea") {
+                let own = own_lines(&block.body);
+                if owns_click(&own) {
+                    continue;
+                }
+                // Only a surface that spans its parent can be over anything: one that
+                // states its own box is a small target of its own, and where it sits
+                // relative to a sibling control is then a layout question, not this one.
+                if ["width:", "height:", "x:", "y:"]
+                    .iter()
+                    .any(|key| own.lines().any(|line| line.trim_start().starts_with(key)))
+                {
+                    continue;
+                }
+                checked += 1;
+                let owner = enclosing_component(&source, source[..block.start].matches('\n').count());
+                let here = source[..block.start].matches('\n').count() + 1;
+                for earlier in blocks.iter().filter(|other| other.start < block.start) {
+                    if !targets.contains(&earlier.name) {
+                        continue;
+                    }
+                    if enclosing_component(&source, source[..earlier.start].matches('\n').count())
+                        != owner
+                    {
+                        continue;
+                    }
+                    let there = source[..earlier.start].matches('\n').count() + 1;
+                    offenders.push(format!(
+                        "{name}:{here}: a hover-only TouchArea covers {} at line {there}, \
+                         declared before it",
+                        earlier.name
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked >= 2,
+            "expected the row wash and the viewer's pan surface to be found, found {checked}; \
+             the scan is broken"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a TouchArea without a click of its own goes *before* the controls it shares a \
+             row with: declared after them it takes their press and they are pointer-dead:\n{}",
+            offenders.join("\n")
+        );
+    }
 }
