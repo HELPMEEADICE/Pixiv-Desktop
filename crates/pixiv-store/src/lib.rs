@@ -121,6 +121,25 @@ const SQL_DOWNLOADS: &str = "SELECT id, illust_id, title, author, page_index, fi
      ORDER BY created_at DESC, id DESC
      LIMIT ?1";
 
+/// How many rows each history list keeps.
+///
+/// A history is a shortlist, not an archive (C7): every list here is read with a
+/// `LIMIT` well under this, a table that only ever grows makes [`Store::stats`]
+/// grow with it, and every `MAX(seq)` in the schema reads a wider index. The cap
+/// is applied when a row is written, so the table never exceeds it and no sweep
+/// has to run on a timer.
+pub const HISTORY_RETENTION: usize = 500;
+
+/// Keep everything but the oldest rows beyond [`HISTORY_RETENTION`].
+///
+/// `seq` is monotonic per table, so "older than the newest N" is one comparison
+/// against `MAX(seq)`. A table shorter than the cap deletes nothing: the
+/// right-hand side is not positive yet, and `seq` starts at 1.
+const SQL_PRUNE_SEARCH: &str =
+    "DELETE FROM search_history WHERE seq <= (SELECT MAX(seq) FROM search_history) - ?1";
+const SQL_PRUNE_VIEW: &str =
+    "DELETE FROM view_history WHERE seq <= (SELECT MAX(seq) FROM view_history) - ?1";
+
 /// Migration step 1: every table this crate ever reads or writes.
 ///
 /// Kept strictly additive — a later step may only add tables, columns or
@@ -423,6 +442,10 @@ impl Store {
             .query_row([], |row| row.get(0))?;
         self.cached(&conn, SQL_PUSH_SEARCH)?
             .execute(params![word, now_secs(), next_seq])?;
+        // Retention (C7): the row just written is the newest one, so the cap is
+        // applied on the write path instead of on a timer.
+        self.cached(&conn, SQL_PRUNE_SEARCH)?
+            .execute(params![limit_to_i64(HISTORY_RETENTION)])?;
         Ok(())
     }
 
@@ -448,6 +471,9 @@ impl Store {
             entry.viewed_at,
             next_seq,
         ])?;
+        // Retention (C7), the same clause `push_search` applies.
+        self.cached(&conn, SQL_PRUNE_VIEW)?
+            .execute(params![limit_to_i64(HISTORY_RETENTION)])?;
         Ok(())
     }
 
@@ -640,7 +666,11 @@ mod tests {
         s.record_view(&view("1", 10)).unwrap();
         assert_eq!(s.view_history(5).unwrap().len(), 1);
         let warm = s.compiles();
-        assert_eq!(warm, 3, "MAX(seq), the insert and the read, once each");
+        assert_eq!(
+            warm,
+            4,
+            "MAX(seq), the insert, the retention sweep and the read, once each"
+        );
 
         s.record_view(&view("2", 20)).unwrap();
         assert_eq!(s.view_history(5).unwrap().len(), 2);
@@ -654,15 +684,76 @@ mod tests {
         s.push_search("alpha").unwrap();
         assert_eq!(
             s.compiles(),
-            warm + 2,
-            "MAX(seq) and the insert, again once"
+            warm + 3,
+            "MAX(seq), the insert and its sweep, once each"
         );
         s.push_search("beta").unwrap();
         assert_eq!(
             s.compiles(),
-            warm + 2,
-            "the same two texts, already compiled"
+            warm + 3,
+            "the same three texts, already compiled"
         );
+    }
+
+    /// C7: a history keeps its last [`HISTORY_RETENTION`] rows and no more.
+    ///
+    /// The negative experiment is deleting the `SQL_PRUNE_*` call from the write
+    /// path: both lists then come back with all 620 rows, `stats()` with them, and
+    /// the three assertions below read 620 where they want 500.
+    #[test]
+    fn a_history_keeps_the_last_five_hundred_rows() {
+        let s = store();
+        let writes = HISTORY_RETENTION + 120;
+        for index in 0..writes {
+            s.push_search(&format!("word-{index}")).unwrap();
+            s.record_view(&view(&index.to_string(), i64::try_from(index).unwrap()))
+                .unwrap();
+        }
+        assert_eq!(HISTORY_RETENTION, 500);
+
+        // Newest first, and the oldest 120 rows are gone.
+        let views = s.view_history(writes).unwrap();
+        assert_eq!(views.len(), HISTORY_RETENTION);
+        assert_eq!(views[0].illust_id, (writes - 1).to_string());
+        assert_eq!(views[HISTORY_RETENTION - 1].illust_id, "120");
+
+        let words = s.search_history(writes).unwrap();
+        assert_eq!(words.len(), HISTORY_RETENTION);
+        assert_eq!(words[0], format!("word-{}", writes - 1));
+
+        // `stats()` counts the same table, so the cap bounds it too.
+        assert_eq!(s.stats().unwrap().history_entries, 500);
+    }
+
+    /// The retention clause has the shape G34 asks of the hot queries: a bounded
+    /// walk of the sequence index, not a read of the table it just wrote.
+    ///
+    /// The negative experiment is dropping `idx_view_history_seq` (or its
+    /// `search_history` twin): the plan names `SCAN <table>` and this fails.
+    #[test]
+    fn the_retention_sweep_reads_the_sequence_index() {
+        let s = store();
+        for index in 0..8 {
+            s.push_search(&format!("word-{index}")).unwrap();
+            s.record_view(&view(&index.to_string(), index)).unwrap();
+        }
+        let conn = s.lock();
+        for (table, sql, index_name) in [
+            ("search_history", SQL_PRUNE_SEARCH, "idx_search_history_seq"),
+            ("view_history", SQL_PRUNE_VIEW, "idx_view_history_seq"),
+        ] {
+            let plan = plan_of(&conn, sql, &[limit_to_i64(HISTORY_RETENTION)]);
+            assert!(
+                plan.contains(&format!(
+                    "SEARCH {table} USING COVERING INDEX {index_name} (seq<?)"
+                )),
+                "{table}: {plan}"
+            );
+            let full_scan = plan
+                .split(" | ")
+                .any(|part| part.trim_start().starts_with("SCAN ") && !part.contains("USING"));
+            assert!(!full_scan, "{table} reads the whole table: {plan}");
+        }
     }
 
     /// G34: the three hot queries read an index, not a table.

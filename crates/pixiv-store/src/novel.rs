@@ -26,10 +26,17 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 
-use crate::{Store, StoreError, limit_to_i64, now_secs};
+use crate::{HISTORY_RETENTION, Store, StoreError, limit_to_i64, now_secs};
 
 /// Every key this module writes into `settings` starts with this.
 pub const SETTING_PREFIX: &str = "novel.";
+
+/// Keep everything but the oldest rows beyond [`HISTORY_RETENTION`].
+///
+/// The recently-read list is a shortlist like the two illustration histories, and
+/// it grows on the same `seq` rule, so it is capped by the same clause (C7).
+const SQL_PRUNE_NOVEL: &str =
+    "DELETE FROM novel_history WHERE seq <= (SELECT MAX(seq) FROM novel_history) - ?1";
 
 /// Where the reader stopped in one novel.
 ///
@@ -251,6 +258,8 @@ impl Store {
                 now_secs(),
             ],
         )?;
+        // Retention (C7): the row just written is the newest one.
+        conn.execute(SQL_PRUNE_NOVEL, params![limit_to_i64(HISTORY_RETENTION)])?;
         Ok(())
     }
 
@@ -368,6 +377,29 @@ mod tests {
         rows.map(|row| row.expect("plan detail"))
             .collect::<Vec<_>>()
             .join(" | ")
+    }
+
+    /// C7: the recently-read list is capped by the same clause as the two
+    /// illustration histories, so a reader who opens a novel a day cannot grow
+    /// the table for a decade.
+    ///
+    /// The negative experiment is deleting `SQL_PRUNE_NOVEL` from
+    /// `record_novel_read`: the two asserts below read 540 where they want 500.
+    #[test]
+    fn the_recently_read_list_keeps_the_last_five_hundred_rows() {
+        let s = store();
+        let writes = HISTORY_RETENTION + 40;
+        for index in 0..writes {
+            s.record_novel_read(&history(&index.to_string(), i64::try_from(index).unwrap()))
+                .unwrap();
+        }
+
+        let rows = s.novel_history(writes).unwrap();
+        assert_eq!(rows.len(), HISTORY_RETENTION);
+        assert_eq!(rows[0].novel_id, (writes - 1).to_string());
+        assert_eq!(rows[HISTORY_RETENTION - 1].novel_id, "40");
+        // `novel_stats` counts the table, so the cap bounds the settings page too.
+        assert_eq!(s.novel_stats().unwrap().1, HISTORY_RETENTION as u64);
     }
 
     #[test]
