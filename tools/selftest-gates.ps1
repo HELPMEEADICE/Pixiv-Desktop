@@ -499,6 +499,36 @@ $directKeys = @([regex]::Matches($shotText, '[$]env:PIXIV_DESKTOP_START_([A-Z]+)
 $oneKey = (@($directKeys | Where-Object { $_ -ne "PAGE" -and $_ -ne "ILLUST" }).Count -eq 0) -and ($shotText -match 'Set-PageLaunch')
 Add-Case -Name "launch-keys" -Wanted "a leftover START_NOVEL survives the regressed script and not the shipped one; a page's own recipe still applies; one direct key" -Ok ($leaks -and $swept -and $recipeOk -and $oneKey) -Evidence ("regressed: {0} | shipped -Page home: {1} | shipped -Page novel-reader: {2} | direct launch keys in shot.ps1: [{3}]" -f $leakText.Trim(), $sweptText.Trim(), $recipeText.Trim(), ($directKeys -join ", "))
 
+
+# ---- case dpi-numeric: G60/E12 - -NumericOnly can be green, and can be red ----
+# The numeric half of tools/verify-dpi.ps1 needs no window, which makes it the one part of
+# that gate a runner could execute - and until round twelve it could never be green: the
+# mode fell through to the ladder's "every requested scale was measured" rule, a test it
+# deliberately fails, so it always left by 77. The experiment is the plan's own: the same
+# script with one pixel taken out of Get-TargetWidth's clamp has to fail, in the same mode.
+# The mutant lives one directory under the repository root because the script re-reads
+# src/layout.rs and src/images.rs relative to its parent directory - a copy anywhere else
+# would fail for the wrong reason.
+$dpiScript = Join-Path (Split-Path -Parent $VerifyScript) "verify-dpi.ps1"
+$dpiNumberOnly = & pwsh -NoProfile -File $dpiScript -NumericOnly 2>&1 | Out-String
+$dpiNumberCode = $LASTEXITCODE
+$dpiMutant = Join-Path (Split-Path -Parent $WorkDir) "dpi-mutant.ps1"
+try {
+    $dpiText = Get-Content $dpiScript -Raw
+    $clampLine = 'return [int][math]::Min([math]::Max($rounded, $floor), $cap)'
+    if (-not $dpiText.Contains($clampLine)) {
+        throw "case dpi-numeric: Get-TargetWidth no longer ends in '$clampLine', so the clamp cannot be shortened"
+    }
+    [System.IO.File]::WriteAllText($dpiMutant, $dpiText.Replace($clampLine, ($clampLine + ' - 1')), (New-Object System.Text.UTF8Encoding($false)))
+    $dpiMutantText = & pwsh -NoProfile -File $dpiMutant -NumericOnly 2>&1 | Out-String
+    $dpiMutantCode = $LASTEXITCODE
+}
+finally {
+    if (Test-Path $dpiMutant) { Remove-Item $dpiMutant -Force }
+}
+$dpiRow = @($dpiMutantText -split "\r?\n" | Where-Object { $_ -match "below the draw size|FAIL sweep" } | Select-Object -First 2) -join " / "
+Add-Case -Name "dpi-numeric" -Wanted "-NumericOnly exits 0 on the shipped clamp and 1 when the clamp is one pixel short" -Ok ($dpiNumberCode -eq 0 -and $dpiNumberOnly -match "numeric half only" -and $dpiMutantCode -eq 1 -and $dpiMutantText -match "below the draw size") -Evidence ("shipped exit={0} [{1}]; mutant exit={2} [{3}]" -f $dpiNumberCode, (@($dpiNumberOnly -split "\r?\n" | Where-Object { $_ -match "numeric half only" })[0]).Trim(), $dpiMutantCode, $dpiRow.Trim())
+
 # ---------------------------------------------------------------- round nine
 
 <#

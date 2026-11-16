@@ -37,9 +37,10 @@
 #     it.
 #   * it CANNOT judge rendering quality, a live drag between two monitors, or a
 #     scale whose window does not fit this display: at 200 % the window is
-#     2048x1536 physical and this 2560x1440 screen cannot show all of it, so the
+#     2048x1536 physical and this 2560x1600 screen cannot show all of it, so the
 #     capture is short at the bottom - the trace numbers, which are what is
-#     asserted, are not.
+#     asserted, are not. (The size is read from a capture sidecar's screenW/screenH,
+#     not from memory: it said 1440 here for four rounds.)
 #
 # Usage:
 #   pwsh -File tools/verify-dpi.ps1                       # numeric table + ladder
@@ -303,9 +304,21 @@ foreach ($scale in $Scales) {
     if (-not (Test-ScaleMeasured -Scale $scale)) { $missing += $scale }
 }
 
-if ($failures.Count -eq 0 -and $missing.Count -gt 0) {
-    $why = if ($NumericOnly) { "this run was -NumericOnly, so it measured no scale at all" } else { "the ladder did not produce a trace line for it" }
-    Write-Host ("SKIP: {0} of {1} requested scales measured ({2} missing: {3}) - the numeric mirror is not the ladder, so this run cannot claim the ladder held - {4}" -f ($Scales.Count - $missing.Count), $Scales.Count, $missing.Count, ($missing -join ", "), $why) -ForegroundColor DarkYellow
+# G60/E12: -NumericOnly asks one question - does the decode mirror hold across the card
+# range - and answers it with no window at all, which makes it the one half of this gate a
+# CI runner could run. Until round twelve it fell through to the ladder's rule below ("every
+# requested scale was measured"), a test this mode deliberately fails, so it *always* left
+# by 77: a gate that could never be green, in either direction. It now exits on the
+# arithmetic it did measure. The ladder keeps its own rule and its own SKIP.
+if ($NumericOnly) {
+    if ($failures.Count -eq 0) {
+        Write-Host ("numeric half only (-NumericOnly): {0} sampled rows and {1} sweep points across {2}..{3} logical px, no decode target below the draw size" -f $table.Count, $sweepCount, $cardMin, $cardMax) -ForegroundColor Green
+        exit 0
+    }
+    # A failure is a failure in this mode too: fall through to the block below.
+}
+if (-not $NumericOnly -and $failures.Count -eq 0 -and $missing.Count -gt 0) {
+    Write-Host ("SKIP: {0} of {1} requested scales measured ({2} missing: {3}) - the numeric mirror is not the ladder, so this run cannot claim the ladder held - the ladder did not produce a trace line for it" -f ($Scales.Count - $missing.Count), $Scales.Count, $missing.Count, ($missing -join ", ")) -ForegroundColor DarkYellow
     if ($skips.Count -gt 0) { Write-Host ("      skipped: {0}" -f ($skips -join "; ")) -ForegroundColor DarkYellow }
     exit 77
 }

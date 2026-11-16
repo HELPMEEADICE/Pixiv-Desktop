@@ -203,6 +203,18 @@ Invoke-Gate "tools/fetch_icons.ps1 -Check (ui/icons.slint matches its generator)
     pwsh -NoProfile -File tools/fetch_icons.ps1 -Check 2>&1 | Out-Host
 } | Out-Null
 
+# ---- 0.6 the half of the DPI gate that needs no window ----
+# E12: tools/verify-dpi.ps1's numeric half (does the decode mirror hold across the card
+# range, at every requested scale) always exited 77 with -NumericOnly, because the mode fell
+# through to the ladder's "every requested scale was measured" rule and fails it on purpose.
+# That made the one part of this gate a desktop-less host - a CI runner - could run, and the
+# one part nobody could be told about. It exits on its own question now, and it runs here,
+# outside the -Ui block, so a decode target that falls below the drawn card fails the suite
+# on a runner too. The ladder itself still needs the app and still lives below.
+Invoke-Gate "tools/verify-dpi.ps1 -NumericOnly (the decode mirror, no window)" {
+    pwsh -NoProfile -File tools/verify-dpi.ps1 -NumericOnly 2>&1 | Select-Object -Last 3 | Out-Host
+} | Out-Null
+
 # ---- 1. formatting: cheap, and the only gate that is fixed mechanically ----
 Invoke-Gate "cargo fmt --check" { cargo fmt --all -- --check 2>&1 | Out-Host } | Out-Null
 
