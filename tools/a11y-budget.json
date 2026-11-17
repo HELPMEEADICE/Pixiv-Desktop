@@ -1,5 +1,5 @@
 {
-  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. detail joined the accessibility set in round twelve; its entry is seeded at zero, which bounds nothing until a measured -Update ratchets it, and verify-a11y.ps1 prints the pending line for it rather than reading a zero as a floor. Written by tools/verify-a11y.ps1 -Update, which ratchets: each floor is max(previous, measured), so a re-pin on a degraded build cannot lower one. invokable = elements with an InvokePattern, distinctTab = distinct stops the Tab walk reached before its (Name, Type, rectangle) identity repeated - G21, round nine: the pair alone ended the walk at the second control sharing a name and read as a cycle.",
+  "_comment": "Accessibility budget: what each page must expose to UI Automation after round five. Written by tools/verify-a11y.ps1 -Update, which ratchets: each floor is max(previous, measured), so a re-pin on a degraded build cannot lower one. invokable = elements with an InvokePattern, distinctTab = distinct stops the Tab walk reached before its (Name, Type, rectangle) identity repeated - G21, round nine: the pair alone ended the walk at the second control sharing a name and read as a cycle.",
   "default": {
     "minInvokable": 1,
     "minFocusable": 2,
@@ -27,7 +27,7 @@
     "search": {
       "minInvokable": 22,
       "minFocusable": 23,
-      "minTabStops": 24
+      "minTabStops": 27
     },
     "bookmarks": {
       "minInvokable": 31,
@@ -39,10 +39,15 @@
       "minFocusable": 16,
       "minTabStops": 17
     },
+    "detail": {
+      "minInvokable": 29,
+      "minFocusable": 30,
+      "minTabStops": 37
+    },
     "downloads": {
       "minInvokable": 19,
       "minFocusable": 20,
-      "minTabStops": 21
+      "minTabStops": 25
     },
     "settings": {
       "minInvokable": 18,
@@ -63,11 +68,6 @@
       "minInvokable": 15,
       "minFocusable": 16,
       "minTabStops": 17
-    },
-    "detail": {
-      "minInvokable": 0,
-      "minFocusable": 0,
-      "minTabStops": 0
     }
   }
 }
