@@ -376,6 +376,7 @@ impl App {
             recent_words,
             recent_searches,
             view_queue,
+            viewer_viewport: (0.0, 0.0),
             detail: None,
             detail_author_avatar_url: None,
             detail_pages: Vec::new(),

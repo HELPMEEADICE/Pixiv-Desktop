@@ -201,6 +201,10 @@ pub(crate) struct App {
     /// `DownloadTask` clones to read one path. The snapshot the tick already takes is
     /// the only place that has the paths, so it is where the index comes from.
     task_paths: RefCell<HashMap<u64, PathBuf>>,
+    /// The viewer box the pointer last reported, in logical pixels. Written by the
+    /// wheel and the drag; read by the gestures that carry no geometry of their own
+    /// (double-click, the zoom buttons). Zero until the first pointer event.
+    viewer_viewport: (f32, f32),
     detail: Option<Illust>,
     /// Avatar URL the metadata panel is waiting for. Stored rather than recomputed:
     /// a resolved lookup lands in `author_avatars`, not in `illust.author.avatar`,

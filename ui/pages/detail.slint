@@ -45,11 +45,22 @@ export component ZoomViewer inherits Rectangle {
     in property <bool> masked: false;
 
     /// Cursor position (px), wheel delta (px), and the viewer's own viewport.
+    ///
+    /// The viewport is the arguments, not a lookup: the viewer is a box inside the
+    /// page (rail, toolbar, info panel and thumbnail strip are all outside it), so
+    /// Rust clamping the pan against the *window* let a drag travel hundreds of
+    /// pixels past the edges of the surface that clips it.
     callback request-zoom(float, float, float, float, float);
-    callback request-pan(float, float);
+    /// Pan delta (px) and the viewer's own viewport.
+    callback request-pan(float, float, float, float);
+    /// Toggle between fit and actual size, around the point that was clicked.
     callback request-toggle-zoom(float, float);
     callback set-fit-mode(bool);
+    /// Explicit zoom request (a button, not the wheel), in *multiplier* units.
     callback set-zoom(float);
+    /// Explicit "draw at 1:1" request. Separate from `set-zoom` because in fit mode
+    /// the multiplier is applied on top of the fit scale, so 1:1 is not 1.0 there.
+    callback set-actual-size();
     callback toggle-fullscreen();
     /// Re-fetch the page whose image failed. Distinct from the zoom callbacks:
     /// this button used to call `request-toggle-zoom`, so pressing it changed the
@@ -77,6 +88,13 @@ export component ZoomViewer inherits Rectangle {
     property <float> last-x: 0.0;
     property <float> last-y: 0.0;
 
+    /// Whether the drawn image is larger than the viewer on either axis, i.e.
+    /// whether there is anything to drag. Rust clamps the pan, this only decides
+    /// the cursor and whether a drag is reported at all.
+    out property <bool> pannable:
+        root.page.width * root.scale > root.width / 1px + 0.5
+        || root.page.height * root.scale > root.height / 1px + 0.5;
+
     img := Image {
         source: root.frame.width > 0 ? root.frame : root.page.source;
         x: (root.width - self.width) / 2 + root.pan-x;
@@ -88,6 +106,10 @@ export component ZoomViewer inherits Rectangle {
     }
 
     ta := TouchArea {
+        // Wheel up arrives here as a *positive* delta-y: Slint forwards winit's
+        // LineDelta(0, +1) unchanged and the backend scales a line by 60, so one
+        // detent is +60. The sign decision belongs to Rust
+        // (src/zoom.rs::wheel_zoom), where it is unit tested.
         scroll-event(e) => {
             root.request-zoom(ta.mouse-x / 1px, ta.mouse-y / 1px, e.delta-y / 1px,
                 root.width / 1px, root.height / 1px);
@@ -101,8 +123,14 @@ export component ZoomViewer inherits Rectangle {
             EventResult.accept
         }
         moved => {
-            if (ta.pressed && !root.fit-mode) {
-                root.request-pan((ta.mouse-x / 1px) - root.last-x, (ta.mouse-y / 1px) - root.last-y);
+            // Dragging is allowed whenever there is something to drag, not only in
+            // actual-size mode: a fitted image that has been zoomed past the
+            // viewport is draggable too, and the old `!fit-mode` guard made those
+            // pixels unreachable.
+            if (ta.pressed && root.pannable) {
+                root.request-pan((ta.mouse-x / 1px) - root.last-x,
+                    (ta.mouse-y / 1px) - root.last-y,
+                    root.width / 1px, root.height / 1px);
             }
             root.last-x = ta.mouse-x / 1px;
             root.last-y = ta.mouse-y / 1px;
@@ -110,7 +138,7 @@ export component ZoomViewer inherits Rectangle {
         double-clicked => {
             root.request-toggle-zoom(ta.mouse-x / 1px, ta.mouse-y / 1px);
         }
-        mouse-cursor: root.fit-mode ? MouseCursor.default : MouseCursor.grab;
+        mouse-cursor: root.pannable ? MouseCursor.grab : MouseCursor.default;
     }
 
     // Non-image states must never look like a broken image.
@@ -215,11 +243,15 @@ export component ZoomViewer inherits Rectangle {
             }
             IconButton {
                 icon: "actual-size";
-                tip: "实际尺寸";
+                tip: "实际尺寸 (100%)";
                 active: !root.fit-mode;
                 size: 28px;
                 row-height: 36px;
-                clicked => { root.set-fit-mode(false); root.set-zoom(1.0); }
+                // One callback, because switching modes has to set the mode *and* the
+                // multiplier together: the two modes do not share a meaning for the
+                // multiplier, and setting only one half is what drew a 4000px scan at
+                // 25% while the button said "actual size".
+                clicked => { root.set-actual-size(); }
             }
             IconButton {
                 icon: "zoom-out";
@@ -763,10 +795,11 @@ export component DetailPage inherits Rectangle {
     callback retry();
     callback select-page(int);
     callback request-zoom(float, float, float, float, float);
-    callback request-pan(float, float);
+    callback request-pan(float, float, float, float);
     callback request-toggle-zoom(float, float);
     callback set-fit-mode(bool);
     callback set-zoom(float);
+    callback set-actual-size();
     callback toggle-fullscreen();
     callback reload-image();
     /// F2: 「显示」 was pressed. The page reports it; Rust lifts the mask and re-plans
@@ -1039,10 +1072,11 @@ export component DetailPage inherits Rectangle {
                         pan-x <=> root.pan-x;
                         pan-y <=> root.pan-y;
                         request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
-                        request-pan(dx, dy) => { root.request-pan(dx, dy); }
+                        request-pan(dx, dy, w, h) => { root.request-pan(dx, dy, w, h); }
                         request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
                         set-fit-mode(m) => { root.set-fit-mode(m); }
                         set-zoom(z) => { root.set-zoom(z); }
+                        set-actual-size => { root.set-actual-size(); }
                         toggle-fullscreen => { root.toggle-fullscreen(); }
                         reload-image => { root.reload-image(); }
                     }
@@ -1123,10 +1157,11 @@ export component DetailPage inherits Rectangle {
                         pan-x <=> root.pan-x;
                         pan-y <=> root.pan-y;
                         request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
-                        request-pan(dx, dy) => { root.request-pan(dx, dy); }
+                        request-pan(dx, dy, w, h) => { root.request-pan(dx, dy, w, h); }
                         request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
                         set-fit-mode(m) => { root.set-fit-mode(m); }
                         set-zoom(z) => { root.set-zoom(z); }
+                        set-actual-size => { root.set-actual-size(); }
                         toggle-fullscreen => { root.toggle-fullscreen(); }
                         reload-image => { root.reload-image(); }
                     }

@@ -526,13 +526,14 @@ export component AppWindow inherits Window {
     callback detail-retry();
     callback detail-select-page(int);
     callback detail-request-zoom(float, float, float, float, float);
-    callback detail-request-pan(float, float);
+    callback detail-request-pan(float, float, float, float);
     callback detail-request-toggle-zoom(float, float);
     callback detail-reload-image();
     /// F2: 「显示」 on a masked work.
     callback detail-reveal();
     callback detail-set-fit-mode(bool);
     callback detail-set-zoom(float);
+    callback detail-set-actual-size();
     callback toggle-fullscreen();
 
     // ---- downloads ----
@@ -1397,11 +1398,12 @@ export component AppWindow inherits Window {
                         retry => { root.detail-retry(); }
                         select-page(i) => { root.detail-select-page(i); }
                         request-zoom(px, py, dy, w, h) => { root.detail-request-zoom(px, py, dy, w, h); }
-                        request-pan(dx, dy) => { root.detail-request-pan(dx, dy); }
+                        request-pan(dx, dy, w, h) => { root.detail-request-pan(dx, dy, w, h); }
                         request-toggle-zoom(px, py) => { root.detail-request-toggle-zoom(px, py); }
                         reload-image => { root.detail-reload-image(); }
                         set-fit-mode(m) => { root.detail-set-fit-mode(m); }
                         set-zoom(z) => { root.detail-set-zoom(z); }
+                        set-actual-size => { root.detail-set-actual-size(); }
                         toggle-fullscreen => { root.toggle-fullscreen(); }
 
                         // F1 / F4 / U29, all `in` except playback, which the button also
