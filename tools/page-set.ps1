@@ -47,11 +47,15 @@ $script:PageSet = @(
     "novel-reader"
 )
 
-# The six capture states. They are not destinations: each one is a destination plus a
+# The nine capture states. They are not destinations: each one is a destination plus a
 # forced state, reached through PIXIV_DESKTOP_START_ILLUST or PIXIV_DESKTOP_FIXTURE, and
 # tools/verify-visual.ps1 is the only consumer that photographs them. They are declared
 # here so that a name a consumer uses is either a destination or this list - a typo in a
 # page list used to be indistinguishable from a page.
+#
+# Round twelve added the last three: each one photographs a feature that only exists in a
+# state the demo catalogue cannot reach on its own (a masked work, an AI-flagged card,
+# novel result rows), so the pixels are the evidence a test cannot give.
 $script:PageState = @(
     "detail-error"
     "detail-ugoira"
@@ -59,6 +63,9 @@ $script:PageState = @(
     "selection"
     "suggestion"
     "downloads-queue"
+    "detail-masked"
+    "ranking-ai"
+    "novels-results"
 )
 
 <#
@@ -104,6 +111,9 @@ $script:PageLaunch = @{
     "user-profile"    = @{ StartPage = "home"; User = "900000" }
     "novel"           = @{ StartPage = "home"; Novel = "810000001" }
     "novel-reader"    = @{ StartPage = "home"; Novel = "810000001"; Reader = $true }
+    "detail-masked"   = @{ StartPage = "home"; Illust = "700000003"; Fixture = "sensitive" }
+    "ranking-ai"      = @{ StartPage = "ranking"; Fixture = "ai" }
+    "novels-results"  = @{ StartPage = "novels"; Fixture = "novels" }
 }
 
 # The three pages the pixel baseline does not carry yet (G33): in the accessibility and

@@ -33,7 +33,7 @@ param(
 )
 
 <#
-  One entry per fixture. The four are the four states round nine's features create
+  One entry per fixture. The first four are the states round nine's features create
   and nothing had ever captured (plan section 7, G24):
     ugoira    F1  playback in the viewer (README limit 6: export only)
     selection F2  multi-select and the batch bar (no entry point at all)
@@ -98,6 +98,48 @@ function Get-FixtureTable {
             Captures = @("downloads-queue", "downloads-queue-paused")
             Asserts  = "throughput and ETA are non-empty, and U13's progress bar keeps its frozen width while paused"
             Defect   = "F5/U13"
+        }
+        # Round twelve's three. Each is a state no pointer can reach on this host: the
+        # demo catalogue marks nothing sensitive, ranks nothing as AI, and carries no
+        # novel search at all, so a gate that wanted these pixels had nothing to ask for.
+        sensitive = [pscustomobject]@{
+            Name     = "sensitive"
+            Page     = "detail"
+            Env      = [ordered]@{
+                PIXIV_DESKTOP_DEMO       = "1"
+                PIXIV_DESKTOP_START_PAGE = "home"
+                PIXIV_DESKTOP_FIXTURE    = "sensitive"
+            }
+            Setup    = "the opened work is marked sensitive; the page masks it and offers 显示"
+            Captures = @("detail-masked")
+            Asserts  = "the mask covers the viewer and the sensitivity badge is in the toolbar; the original is not requested until 显示"
+            Defect   = "F2"
+        }
+        ai        = [pscustomobject]@{
+            Name     = "ai"
+            Page     = "ranking"
+            Env      = [ordered]@{
+                PIXIV_DESKTOP_DEMO       = "1"
+                PIXIV_DESKTOP_START_PAGE = "ranking"
+                PIXIV_DESKTOP_FIXTURE    = "ai"
+            }
+            Setup    = "every fourth ranking row carries ai_type 1, which draws the AI 生成 badge"
+            Captures = @("ranking-ai")
+            Asserts  = "the badge sits where no other overlay is anchored (G48) and the rows without the flag have none"
+            Defect   = "F4"
+        }
+        novels    = [pscustomobject]@{
+            Name     = "novels"
+            Page     = "novels"
+            Env      = [ordered]@{
+                PIXIV_DESKTOP_DEMO       = "1"
+                PIXIV_DESKTOP_START_PAGE = "novels"
+                PIXIV_DESKTOP_FIXTURE    = "novels"
+            }
+            Setup    = "the novels page holds four result rows, which the demo catalogue cannot produce"
+            Captures = @("novels-results")
+            Asserts  = "each row carries language and bookmark count at the illustration row's density, and a missing value draws a dash"
+            Defect   = "F5"
         }
     }
 }
