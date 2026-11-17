@@ -1457,6 +1457,105 @@ still walks the home page only, which is why `16h`’s note about the ladder abo
 not moved.
 
 ---
+## 19. Round twelve: the seams that had no reader
+
+Round eleven froze six interfaces and wired half of them. The round that followed was not a search
+for new defects: it was the cost of the half that was wired. Four classes came out of it, each with a
+file:line and each with a rule that can now fail.
+
+### 19a. What the four classes were
+
+* **A pointer surface that ate its own controls.** `ui/pages/downloads.slint` declared the row's
+  hover-only `TouchArea` *after* its four icon buttons. Slint hit-tests in reverse declaration order
+  and a `TouchArea` takes the mouse on `MouseEvent::Pressed` whether or not it has a handler, so
+  open / reveal / re-download / forget were dead to the pointer while Tab still reached them. The
+  surface moved to the top of the row and `uiaudit` keeps it there.
+* **A move is a hover until the button is down.** The reader's seven sliders computed their value in
+  `moved =>` with no `pressed` guard, so a pointer sweep across the settings panel rewrote every
+  persisted preference it crossed. The image viewer had carried the correct guard since round nine;
+  both sites are now asked for it.
+* **A notice that covered the bar it shared space with.** The shell's notice bar and the three page
+  batch bars are both bottom-anchored overlays; they overlapped by a whole bar height, and the notice
+  takes no input except its own close button, so a batch action's confirmation covered the controls it
+  had just used while letting clicks through to them. One height token, one subtraction.
+* **An async reply that landed on whatever page was current.** The detail page compared its epoch on
+  the success path and not on the failure path; the artist page compared nothing at all; the bookmark
+  visibility menu bypassed the busy slot the star uses. `src/app/helpers.rs` now holds one
+  `ReplySurface` and one `reply_lands`, and each site says which surface asked.
+
+### 19b. The author link: a node that advertised an action the keyboard could not reach
+
+Round eleven's U27 gave the card's author row a role, a name and a default action, and no focus
+scope. UI Automation therefore published one invokable node per card that the Tab walk could never
+enter - and `verify-a11y` named every one of them the first time the walk got far enough to notice.
+
+The first attempt was to give the row a `FocusScope` (the shape `AppButton` uses). It made the
+walk visit *fewer* stops, not more: focusing a scope inside a card publishes the card's own node
+again, so the walk read it as a cycle and closed early. That is worth writing down, because "add the
+scope" is the answer that reads correct and measured wrong.
+
+The shape that shipped is the honest one: the row is a *text* node. The author is still in the card's
+own `accessible-label`, the pointer still opens the artist, and the card's `a` key is the keyboard
+path - from the one Tab stop the design gives a card, which is also why round eight refused a stop per
+card twice. No role advertises an action the keyboard cannot perform.
+
+Its floors came down with it. The accessibility budget only ratchets up, deliberately, so that a
+degraded build cannot record its degradation as a floor; here the four grid pages were lowered by
+hand, in a commit that says why. The number that came down was counting nodes that existed and could
+not be reached - a floor keeping a lie, not a floor keeping a guarantee. The assertion that matters
+for keyboards is the walk's coverage, and it is now complete on every page it measures.
+
+### 19c. Gates that reported PASS when they failed
+
+Round seven's and round eight's theme repeated itself with a different face: the failure was not a
+missing gate but a gate whose failure path was a pass.
+
+* `verify-layout` and `verify-icons` threw away their capture's exit code and never cleared their
+  output directory, so a failed capture was judged on the previous run's sidecar. Both now clear,
+  both read `$LASTEXITCODE`, and a missing frame is a `CAPTURE:` failure rather than a throw.
+* `verify-a11y` exited 77 only when nothing at all had been measured: ten skipped pages beside one
+  measured page printed the budget sentence and exited 0. A skip is not a pass, and the difference is
+  now a named failure per page.
+* The walk's `walkEnd` was printed and asserted by nobody while `verify-focus` failed on the same
+  condition. Two gates disagreed about one fact; they now agree.
+* The numeric half of the DPI gate always exited 77, which is why it was never in CI: the one half
+  that needs no window could not be green and could not be red. It is both now.
+
+Two of these were only provable with a planted child process, not with a screenshot, and that is why
+the negative experiments live in `tools/selftest-gates.ps1` rather than in a document.
+
+### 19d. The features were already in the crate
+
+Every surface this round added reads a field that was parsed and read by nobody: the sort and match
+vocabulary that round eleven serialised into the URL and never assigned, the AI flag, the mask flag,
+the multi-page predicate, the ranking row's own date, the novel row's language and bookmark count. No
+endpoint was added and no dependency was taken on. The one substitution worth naming: the related-tag
+row derives its chips from the tags of the works on screen, because `SearchResult::from_wire` drops
+the server's own list - the honest derivation, not a guess at a field shape.
+
+### 19e. What the new guards can and cannot decide
+
+* They can name a `TouchArea` declared after an interactive sibling, a `moved =>` that writes without
+  a `pressed` guard, two overlays sharing an anchor, a theme length nobody reads, an indeterminate bar
+  that cannot travel, a page declaration the shell never binds, and a reply landing without an epoch.
+* They cannot decide whether a value is *the right* value: a sort control bound to the wrong enum
+  index satisfies every rule here.
+* The `moved`/anchor/reader rules read the Slint source as text. A component that composes the same
+  defect out of two files is out of reach - the same limit round nine recorded for the glyph rules.
+* The reply rule is a grep: it proves the epoch is named inside the closure, not that the comparison
+  is correct.
+* `verify-icons` now splits the rail into the evenly-pitched destination cluster and the pinned tail,
+  and reads both counts out of `ui/main.slint` rather than hard-coding them. A rail guard this gate
+  does not understand is a named failure, not a guess.
+
+### 19f. What is still not verified here
+
+A real screen reader reading any of this tree; the Linux and macOS input paths; an IME composing
+inside the palette; whether the masked detail tab-order survives a real preview load; the two
+captures the demo catalogue cannot reach (a local-record band with rows, and a notice over an active
+batch bar) - both fixes are proven by their gates and their counted experiments, not by a before and
+after pair. The screenshots that do exist for this round are in `target/r12/`.
+
 ## Appendix: round-one limits (kept for the record)
 
 ### Not verified in round one
