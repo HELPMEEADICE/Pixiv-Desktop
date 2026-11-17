@@ -949,7 +949,11 @@ mod tests {
         let capacity = ids.capacity();
 
         // The same feed again: the buffer and the strings in it are reused.
-        assert_eq!(refill_ids(&mut ids, &works), 0, "a second render allocates nothing");
+        assert_eq!(
+            refill_ids(&mut ids, &works),
+            0,
+            "a second render allocates nothing"
+        );
         assert_eq!(
             ids.iter().map(|id| id.as_ptr()).collect::<Vec<_>>(),
             pointers,
@@ -1152,5 +1156,4 @@ mod tests {
             "the separator belongs to the non-empty branch only"
         );
     }
-
 }

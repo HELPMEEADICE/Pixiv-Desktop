@@ -1234,7 +1234,10 @@ mod tests {
         }
         let reversed = clean_caption("左&#x202e;右");
         assert_eq!(reversed, "左&#x202e;右");
-        assert!(!reversed.contains('\u{202e}'), "no override reached the reader");
+        assert!(
+            !reversed.contains('\u{202e}'),
+            "no override reached the reader"
+        );
         // The characters either side of that range are ordinary and still decode.
         assert_eq!(clean_caption("&#x2029;"), "\u{2029}");
         assert_eq!(clean_caption("&#x202f;"), "\u{202f}");

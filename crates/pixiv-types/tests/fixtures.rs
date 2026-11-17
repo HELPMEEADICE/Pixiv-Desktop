@@ -195,7 +195,8 @@ fn a_detail_caption_reaches_the_domain_without_markup() {
         illust.description
     );
     assert!(
-        illust.description
+        illust
+            .description
             .contains("https://www.pixiv.net/novel/show.php?id=27815393"),
         "the link target survives: {}",
         illust.description
@@ -209,12 +210,23 @@ fn a_detail_caption_reaches_the_domain_without_markup() {
 fn a_comment_only_caption_is_cleaned_too() {
     let raw = fixture("illust_detail_html.json");
     let mut env: Envelope<IllustDetailWire> = serde_json::from_str(&raw).expect("detail envelope");
-    assert!(env.body.illust_comment.contains("<br"), "the fixture carries it");
+    assert!(
+        env.body.illust_comment.contains("<br"),
+        "the fixture carries it"
+    );
     env.body.description = String::new();
 
     let illust = Illust::from_detail(env.body);
-    assert!(!illust.description.contains("<br"), "{}", illust.description);
-    assert!(!illust.description.contains("<a "), "{}", illust.description);
+    assert!(
+        !illust.description.contains("<br"),
+        "{}",
+        illust.description
+    );
+    assert!(
+        !illust.description.contains("<a "),
+        "{}",
+        illust.description
+    );
     assert!(illust.description.contains('\n'));
 }
 
@@ -229,7 +241,10 @@ fn a_search_caption_is_cleaned_the_same_way() {
     assert!(row.description.contains("<br"));
 
     let illust = Illust::from_search(row);
-    assert_eq!(illust.description, "一行目\n二行目\n出典 (https://x.test/p)");
+    assert_eq!(
+        illust.description,
+        "一行目\n二行目\n出典 (https://x.test/p)"
+    );
 }
 /// C4: a ranking row carries the date it was ranked, and the ranking was the one
 /// surface whose cards had no date at all.
@@ -280,8 +295,7 @@ fn a_novel_row_keeps_its_genre_language_and_bookmarks() {
 /// list then prints: no genre is the empty string, no count is 0.
 #[test]
 fn a_novel_row_without_genre_or_count_reports_neither() {
-    let row: NovelItemWire =
-        serde_json::from_str(r#"{"id":"1","title":"t"}"#).expect("bare row");
+    let row: NovelItemWire = serde_json::from_str(r#"{"id":"1","title":"t"}"#).expect("bare row");
     let summary = NovelSummary::from_row(row);
     assert_eq!(summary.genre, "");
     assert_eq!(summary.language, "");
@@ -325,10 +339,9 @@ fn an_ai_flag_reaches_the_domain_from_every_route() {
 /// read it, so a work Pixiv marks sensitive was drawn unmasked on the home page.
 #[test]
 fn a_street_card_keeps_the_mask_flag() {
-    let masked: StreetThumbWire = serde_json::from_str(
-        r#"{"id":"1","title":"t","isSensitiveForMasking":true,"sl":2}"#,
-    )
-    .expect("street row");
+    let masked: StreetThumbWire =
+        serde_json::from_str(r#"{"id":"1","title":"t","isSensitiveForMasking":true,"sl":2}"#)
+            .expect("street row");
     let card = Illust::from_street(masked);
     assert!(card.is_masked);
     assert_eq!(card.sl, 2);
@@ -351,7 +364,10 @@ fn a_street_caption_is_cleaned_too() {
     let raw = r#"{"id":"151999999","title":"t","description":"一行目<br />二行目<br /><a href=\"https://www.pixiv.net/novel/show.php?id=27815393\">出典</a>"}"#;
     let row: StreetThumbWire = serde_json::from_str(raw).expect("street row");
     // The payload is half of this gate: a caption with no markup cannot fail it.
-    assert!(row.description.contains("<br"), "the row must carry a break");
+    assert!(
+        row.description.contains("<br"),
+        "the row must carry a break"
+    );
     assert!(row.description.contains("<a "), "and a link");
 
     let card = Illust::from_street(row);

@@ -1037,7 +1037,6 @@ impl App {
             let ui = app.ui();
             ui.set_novel_rows(ModelRc::from(app.novel.rows.clone()));
             app.publish_novels_state(0, "");
-
         }
         let (store, rt) = {
             let app = shared.borrow();
@@ -1910,7 +1909,12 @@ impl App {
 
         // Reader body: the index built with the body names the rows that show this
         // URL, so an arrival reads those rows and no others (B9).
-        let shown_at = self.novel.block_images.get(url).cloned().unwrap_or_default();
+        let shown_at = self
+            .novel
+            .block_images
+            .get(url)
+            .cloned()
+            .unwrap_or_default();
         let patched = patch_block_image(&self.novel.blocks, &shown_at, &image) > 0;
         if patched {
             let ui = self.ui();
@@ -2032,12 +2036,16 @@ mod tests {
         );
         let index = block_image_index(&rows, &sources);
         assert_eq!(
-            index.get("https://i.pximg.net/novel/large.jpg").map(Vec::as_slice),
+            index
+                .get("https://i.pximg.net/novel/large.jpg")
+                .map(Vec::as_slice),
             Some([IMAGE_ROW].as_slice()),
             "the big URL names the row that shows it"
         );
         assert_eq!(
-            index.get("https://i.pximg.net/novel/small.jpg").map(Vec::as_slice),
+            index
+                .get("https://i.pximg.net/novel/small.jpg")
+                .map(Vec::as_slice),
             Some([IMAGE_ROW].as_slice())
         );
 
@@ -2075,9 +2083,17 @@ mod tests {
         let (rows, _) = adopt_novel_page(&mut summaries, second_page, &images);
 
         assert_eq!(rows.len(), 48, "both pages are on screen");
-        assert_eq!(rows[0].id.as_str(), "1", "page one is still the top of the list");
+        assert_eq!(
+            rows[0].id.as_str(),
+            "1",
+            "page one is still the top of the list"
+        );
         assert_eq!(rows[47].id.as_str(), "48", "and page two is below it");
-        assert_eq!(summaries.len(), 48, "the list the model is built from agrees");
+        assert_eq!(
+            summaries.len(),
+            48,
+            "the list the model is built from agrees"
+        );
     }
 
     /// B8 - one page in flight, and a page that failed asks for itself again.
@@ -2132,8 +2148,6 @@ mod tests {
         assert_eq!(thousands(4_025), "4,025");
         assert_eq!(thousands(82_847), "82,847");
         assert_eq!(thousands(1_234_567), "1,234,567");
-
-
     }
 
     /// F4: the row's percentage is `progress_percent(block, char)`, a row with no
@@ -2595,5 +2609,4 @@ mod tests {
         assert_eq!(language_label(" zh-tw "), "中文");
         assert_eq!(language_label("en"), "English");
     }
-
 }

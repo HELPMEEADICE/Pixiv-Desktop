@@ -209,7 +209,8 @@ impl App {
             return false;
         }
         self.selection.active = true;
-        self.selection.set_ids(order[..order.len().min(count)].to_vec());
+        self.selection
+            .set_ids(order[..order.len().min(count)].to_vec());
         self.selection.anchor_to(order[0], &order);
         self.publish_selection();
         true
@@ -219,7 +220,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::helpers::testkit::{bare_card, CountingModel};
+    use crate::app::helpers::testkit::{CountingModel, bare_card};
 
     /// B10 - one click writes one row, not the page.
     ///

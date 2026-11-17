@@ -184,11 +184,7 @@ impl App {
                                 // The related-tag row describes the page that just
                                 // arrived, so it is published before the rows are.
                                 let tags = if page == Destination::Search {
-                                    related_tags(
-                                        &items,
-                                        &word,
-                                        FeedControls::RELATED_LIMIT,
-                                    )
+                                    related_tags(&items, &word, FeedControls::RELATED_LIMIT)
                                 } else {
                                     Vec::new()
                                 };
@@ -258,10 +254,11 @@ impl App {
                 .into_iter()
                 .map(|row| row.illust)
                 .collect(),
-            Destination::Search => self
-                .demo
-                .search(&self.controls.query(&self.search_word, page))
-                .items,
+            Destination::Search => {
+                self.demo
+                    .search(&self.controls.query(&self.search_word, page))
+                    .items
+            }
             Destination::Bookmarks => self.demo.bookmarks().items,
             _ => {
                 let all = self.demo.feed();

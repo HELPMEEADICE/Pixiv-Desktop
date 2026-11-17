@@ -2586,7 +2586,9 @@ last in its component:\n{}",
                     continue;
                 }
                 let line = source[..at].matches('\n').count() + 1;
-                offenders.push(format!("{name}:{line}: a moved handler assigns without a pressed guard"));
+                offenders.push(format!(
+                    "{name}:{line}: a moved handler assigns without a pressed guard"
+                ));
             }
         }
         assert!(
@@ -2644,7 +2646,8 @@ last in its component:\n{}",
                     continue;
                 }
                 checked += 1;
-                let owner = enclosing_component(&source, source[..block.start].matches('\n').count());
+                let owner =
+                    enclosing_component(&source, source[..block.start].matches('\n').count());
                 let here = source[..block.start].matches('\n').count() + 1;
                 for earlier in blocks.iter().filter(|other| other.start < block.start) {
                     if !targets.contains(&earlier.name) {
@@ -2715,8 +2718,8 @@ last in its component:\n{}",
             .iter()
             .find(|block| opener(&source, block).contains("root.notice != \"\""))
             .expect("the shell must draw a notice bar");
-        let anchor = geometry_binding(&notice.body, "y")
-            .expect("the notice bar must state its own y");
+        let anchor =
+            geometry_binding(&notice.body, "y").expect("the notice bar must state its own y");
         assert!(
             anchor.contains("batch-bar-height"),
             "the notice bar is anchored at the bottom of the content area, where the batch \
@@ -2918,7 +2921,11 @@ last in its component:\n{}",
     fn every_theme_length_token_is_read_by_the_ui() {
         let theme = read(&ui_dir().join("theme.slint"));
         // Only the `Theme` global: `Type` below it is an int ramp read as `Type.semibold`.
-        let theme = theme.split("export global Type").next().unwrap_or("").to_string();
+        let theme = theme
+            .split("export global Type")
+            .next()
+            .unwrap_or("")
+            .to_string();
         let readers: Vec<String> = page_files()
             .into_iter()
             .filter(|path| path.file_name().and_then(|n| n.to_str()) != Some("theme.slint"))
@@ -2942,7 +2949,10 @@ last in its component:\n{}",
             if readers.iter().any(|source| reads_token(source, &name)) {
                 continue;
             }
-            offenders.push(format!("theme.slint:{}: {name} has no reader in ui/", index + 1));
+            offenders.push(format!(
+                "theme.slint:{}: {name} has no reader in ui/",
+                index + 1
+            ));
         }
         assert!(
             checked >= 30,
@@ -2977,7 +2987,8 @@ last in its component:\n{}",
             "ProgressBar is the component this rule is about; it must still declare the flag"
         );
         assert!(
-            body.lines().any(|line| line.trim_start().starts_with("animate x")),
+            body.lines()
+                .any(|line| line.trim_start().starts_with("animate x")),
             "the indeterminate thumb has to move: without an `animate x` the bar is a still \
              picture of progress"
         );
@@ -3020,15 +3031,51 @@ last in its component:\n{}",
     fn every_page_property_is_bound_by_the_shell() {
         // (page, declaration, who owes it)
         const KNOWN_UNBOUND: [(&str, &str, &str); 9] = [
-            ("DetailPage", "focus-request", "the U21 focus counter, filed for the shell"),
-            ("DetailPage", "tag-cursor", "R11's tag strip, filed for track D"),
-            ("GalleryPage", "recent-cursor", "the recent-tag strip, filed for track D"),
-            ("GalleryPage", "related-cursor", "the related-tag strip, filed for track D"),
-            ("GalleryPage", "show-header", "defaults to true on every instantiation, filed"),
-            ("GalleryPage", "tag-cursor", "R11's tag strip, filed for track D"),
-            ("HomePage", "tag-cursor", "the home tag strip, filed for track D"),
-            ("NovelPage", "tag-cursor", "the novel tag strip, filed for track D"),
-            ("ProfilePage", "mutual-label", "the follow-state caption, filed for the shell"),
+            (
+                "DetailPage",
+                "focus-request",
+                "the U21 focus counter, filed for the shell",
+            ),
+            (
+                "DetailPage",
+                "tag-cursor",
+                "R11's tag strip, filed for track D",
+            ),
+            (
+                "GalleryPage",
+                "recent-cursor",
+                "the recent-tag strip, filed for track D",
+            ),
+            (
+                "GalleryPage",
+                "related-cursor",
+                "the related-tag strip, filed for track D",
+            ),
+            (
+                "GalleryPage",
+                "show-header",
+                "defaults to true on every instantiation, filed",
+            ),
+            (
+                "GalleryPage",
+                "tag-cursor",
+                "R11's tag strip, filed for track D",
+            ),
+            (
+                "HomePage",
+                "tag-cursor",
+                "the home tag strip, filed for track D",
+            ),
+            (
+                "NovelPage",
+                "tag-cursor",
+                "the novel tag strip, filed for track D",
+            ),
+            (
+                "ProfilePage",
+                "mutual-label",
+                "the follow-state caption, filed for the shell",
+            ),
         ];
         let shell = read(&ui_dir().join("main.slint"));
         let pages = ui_dir().join("pages");

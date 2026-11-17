@@ -2033,7 +2033,11 @@ mod tests {
     #[test]
     fn a_declared_length_reserves_one_chunk_not_the_declaration() {
         const LIMIT: u64 = 64 * 1024 * 1024;
-        assert_eq!(BODY_RESERVE_CHUNK, 1024 * 1024, "a megabyte, not a document");
+        assert_eq!(
+            BODY_RESERVE_CHUNK,
+            1024 * 1024,
+            "a megabyte, not a document"
+        );
         // A large declaration is clamped to the chunk: the body reserves a chunk
         // before it has received a single byte.
         let fresh = BodyBuffer::new(Some(LIMIT), LIMIT);

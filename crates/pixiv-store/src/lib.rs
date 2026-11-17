@@ -667,8 +667,7 @@ mod tests {
         assert_eq!(s.view_history(5).unwrap().len(), 1);
         let warm = s.compiles();
         assert_eq!(
-            warm,
-            4,
+            warm, 4,
             "MAX(seq), the insert, the retention sweep and the read, once each"
         );
 
