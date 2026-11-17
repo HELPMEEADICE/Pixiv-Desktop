@@ -529,6 +529,125 @@ finally {
 $dpiRow = @($dpiMutantText -split "\r?\n" | Where-Object { $_ -match "below the draw size|FAIL sweep" } | Select-Object -First 2) -join " / "
 Add-Case -Name "dpi-numeric" -Wanted "-NumericOnly exits 0 on the shipped clamp and 1 when the clamp is one pixel short" -Ok ($dpiNumberCode -eq 0 -and $dpiNumberOnly -match "numeric half only" -and $dpiMutantCode -eq 1 -and $dpiMutantText -match "below the draw size") -Evidence ("shipped exit={0} [{1}]; mutant exit={2} [{3}]" -f $dpiNumberCode, (@($dpiNumberOnly -split "\r?\n" | Where-Object { $_ -match "numeric half only" })[0]).Trim(), $dpiMutantCode, $dpiRow.Trim())
 
+
+# ---- case rail-groups: G61 - the rail's pinned tail is not a row in the pitch it is measured by ----
+# The rail is not one equidistant chain: eight destination rows sit above a stretch spacer,
+# and Settings plus the collapse toggle are pinned to the bottom (ui/main.slint). Round twelve
+# measured the cost of pretending otherwise - the gate reported "expected 9 rail glyphs,
+# measured 10" on a rail that was correct, because it counted the pinned toggle as the
+# ninth row of a 38 px pitch.
+#
+# The experiment is synthetic, and it has to be: the question is what the *gate* decides
+# about a given arrangement of rows, so the fixture is the arrangement. Each case draws a
+# 1280x800 or 900x800 client area at 1.5x - rail glyph squares at the mirrored pitch, label
+# bars in the expanded column, two glyphs in the command bar's slots - writes the sidecar
+# verify-icons.ps1 reads, and runs the shipped gate with -SkipCapture. No window, no
+# pointer, no dependency on an untracked capture.
+function New-RailCapture {
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [double]$LogicalW = 1280,
+        [double]$LogicalH = 800,
+        [int]$MainRows = 8,
+        [int]$TailGlyphs = 2,
+        [int]$TailLabels = 2,
+        [switch]$NoLabels,
+        [int]$ShiftMainRow = -1,
+        [double]$ShiftLogical = 0
+    )
+    $scale = 1.5
+    $compact = $LogicalW -lt 1000
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $w = [int][math]::Round($LogicalW * $scale)
+    $h = [int][math]::Round($LogicalH * $scale)
+    $bmp = New-Object System.Drawing.Bitmap $w, $h
+    $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+    $graphics.Clear([System.Drawing.Color]::White)
+    $ink = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::Black)
+    $toPx = { param([double]$v) [int][math]::Round($v * $scale) }
+    # The glyph column the gate scans: expanded is a 16 px glyph at x 20..36, compact is the
+    # same glyph centred in a 52 px pane (12..40). Centred here too, so the spread is 0.
+    $glyphCx = if ($compact) { 26.0 } else { 28.0 }
+    $labelLeft = 48.0
+    $glyphEdge = 7.0
+    # Main rows: item height 36 + spacing 2, first item top = topbar 48 + rail padding 8.
+    $mainCy = @()
+    for ($k = 0; $k -lt $MainRows; $k++) { $mainCy += (74.0 + 38.0 * $k) }
+    # Pinned rows: bottom-up from the status bar and the rail's own bottom padding.
+    $tailCy = @()
+    for ($k = 0; $k -lt [math]::Max($TailGlyphs, $TailLabels); $k++) { $tailCy += ($LogicalH - 52.0 - 38.0 * $k) }
+    $tailCy = @($tailCy | Sort-Object)
+    for ($k = 0; $k -lt $mainCy.Count; $k++) {
+        $cy = $mainCy[$k]
+        if ($k -eq $ShiftMainRow) { $cy += $ShiftLogical }
+        $graphics.FillRectangle($ink, (& $toPx ($glyphCx - $glyphEdge)), (& $toPx ($cy - $glyphEdge)), (& $toPx (2 * $glyphEdge)), (& $toPx (2 * $glyphEdge)))
+        if (-not $NoLabels) { $graphics.FillRectangle($ink, (& $toPx $labelLeft), (& $toPx ($mainCy[$k] - 5)), (& $toPx 60), (& $toPx 10)) }
+    }
+    for ($k = 0; $k -lt $tailCy.Count; $k++) {
+        # The tail is drawn top-down, so $tailCy[0] is Settings and the last entry is the
+        # toggle. Omitting the last glyph is therefore "the toggle draws no glyph", which is
+        # the scenario the case is about - not "a pinned row vanished".
+        $cy = $tailCy[$k]
+        if ($k -lt $TailGlyphs) { $graphics.FillRectangle($ink, (& $toPx ($glyphCx - $glyphEdge)), (& $toPx ($cy - $glyphEdge)), (& $toPx (2 * $glyphEdge)), (& $toPx (2 * $glyphEdge))) }
+        if (-not $NoLabels -and $k -lt $TailLabels) { $graphics.FillRectangle($ink, (& $toPx $labelLeft), (& $toPx ($cy - 5)), (& $toPx 60), (& $toPx 10)) }
+    }
+    # The command bar's two slots, on the bar's centre line (24 logical).
+    $graphics.FillRectangle($ink, (& $toPx 56.0), (& $toPx 16.0), (& $toPx 16), (& $toPx 16))
+    $graphics.FillRectangle($ink, (& $toPx 92.0), (& $toPx 16.0), (& $toPx 16), (& $toPx 16))
+    $graphics.Dispose()
+    $ink.Dispose()
+    $size = "{0}x{1}" -f [int]$LogicalW, [int]$LogicalH
+    $png = Join-Path $Dir ("icons-{0}.png" -f $size)
+    $bmp.Save($png, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    $meta = [ordered]@{
+        trace = $null; page = "home"; mode = "size"; dark = $false; scale = $scale
+        width = $w; height = $h; logicalW = [double]$LogicalW; logicalH = [double]$LogicalH
+        clientX = 0; clientY = 0; screenLeft = 0; screenTop = 0; screenW = 2560; screenH = 1600
+    }
+    ($meta | ConvertTo-Json -Compress) | Set-Content -Path ([System.IO.Path]::ChangeExtension($png, ".json")) -Encoding utf8
+    return [pscustomobject]@{ Dir = $Dir; Size = $size; Png = $png }
+}
+
+$iconsRail = Join-Path (Split-Path -Parent $VerifyScript) "verify-icons.ps1"
+$railRoot = Join-Path $WorkDir "rail"
+if (Test-Path $railRoot) { Remove-Item $railRoot -Recurse -Force }
+function Invoke-RailGate {
+    param([pscustomobject]$Case)
+    $text = & pwsh -NoProfile -File $iconsRail -SkipCapture -Size $Case.Size -OutDir $Case.Dir 2>&1 | Out-String
+    return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $text }
+}
+function Get-RailLine {
+    param([string]$Text, [string]$Pattern)
+    return (@($Text -split "\r?\n" | Where-Object { $_ -match $Pattern } | Select-Object -First 1) -join "").Trim()
+}
+$railExpanded = New-RailCapture -Dir (Join-Path $railRoot "expanded") -TailGlyphs 2 -TailLabels 2
+$runExpanded = Invoke-RailGate -Case $railExpanded
+$railNoToggle = New-RailCapture -Dir (Join-Path $railRoot "no-toggle") -TailGlyphs 1 -TailLabels 2
+$runNoToggle = Invoke-RailGate -Case $railNoToggle
+$railShifted = New-RailCapture -Dir (Join-Path $railRoot "shifted") -TailGlyphs 2 -TailLabels 2 -ShiftMainRow 3 -ShiftLogical 3
+$runShifted = Invoke-RailGate -Case $railShifted
+$railCompact = New-RailCapture -Dir (Join-Path $railRoot "compact") -LogicalW 900 -TailGlyphs 1 -TailLabels 0 -NoLabels
+$runCompact = Invoke-RailGate -Case $railCompact
+$railCompactToggle = New-RailCapture -Dir (Join-Path $railRoot "compact-toggle") -LogicalW 900 -TailGlyphs 2 -TailLabels 0 -NoLabels
+$runCompactToggle = Invoke-RailGate -Case $railCompactToggle
+# Expanded: 8 above the spacer + Settings + the toggle, all from ui/main.slint.
+# No toggle glyph: the tail has one row where the source says two - named by the tail assertion.
+# Row 3 three logical pixels lower: the pitch in the main group is the assertion that owns it.
+# Compact: the toggle is not drawn at all when the pane is narrow, so the tail is Settings alone.
+# Compact with a toggle drawn anyway: the tail has one row too many.
+$railOk = ($runExpanded.Code -eq 0) -and
+    ($runExpanded.Output -match "expect 8 above the spacer \+ 2 pinned") -and
+    ($runExpanded.Output -match "8\+2") -and
+    ($runNoToggle.Code -eq 1) -and ($runNoToggle.Output -match "rail pinned tail: expected 2 glyph\(s\), measured 1") -and
+    ($runShifted.Code -eq 1) -and ($runShifted.Output -match "rail main group: pitch between row 3 and row 4") -and
+    ($runCompact.Code -eq 0) -and ($runCompact.Output -match "expect 8 above the spacer \+ 1 pinned") -and
+    ($runCompactToggle.Code -eq 1) -and ($runCompactToggle.Output -match "rail pinned tail: expected 1 glyph\(s\), measured 2")
+Add-Case -Name "rail-groups" -Wanted "expanded 8+2 and compact 8+1 pass; a missing toggle glyph and a 3 px row offset each fail by name" -Ok $railOk -Evidence ("expanded exit={0} [{1}]; no toggle glyph exit={2} [{3}]; row 3 shifted exit={4} [{5}]; compact exit={6} [{7}]; compact with toggle exit={8} [{9}]" -f
+    $runExpanded.Code, (Get-RailLine $runExpanded.Output "rail source"), $runNoToggle.Code, (Get-RailLine $runNoToggle.Output "pinned tail"),
+    $runShifted.Code, (Get-RailLine $runShifted.Output "pitch between"), $runCompact.Code, (Get-RailLine $runCompact.Output "rail source"),
+    $runCompactToggle.Code, (Get-RailLine $runCompactToggle.Output "pinned tail"))
+
 # ---------------------------------------------------------------- round nine
 
 <#
