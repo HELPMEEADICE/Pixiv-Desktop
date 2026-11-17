@@ -1931,18 +1931,20 @@ export component IllustCard inherits Rectangle {
                 y: 22px;
                 width: parent.width;
                 height: 18px;
-                // U27: the link is a bare `TouchArea` no more. The role and the name
-                // sit on the row — the same shape the account affordance in
-                // `main.slint` uses, and for the same reason: UIA publishes the node
-                // that carries the role, and the row is the cell that holds the avatar,
-                // the handle and the pointer target. Slint 1.18's `AccessibleRole` has
-                // no `link` member (checked against i-slint-common 1.18.1; the enum is
-                // None…RadioGroup plus landmarks), so the role is `Button` — the only
-                // one that means "invokable" — and the name says what it opens.
-                accessible-role: AccessibleRole.button;
+                // U27 gave this row a role, a name and a *default action*; R12 takes
+                // the action back off it. The action was reachable by pointer and by
+                // nothing else: the row has no focus scope, so UI Automation published
+                // an invokable node per card that the Tab walk could never enter, and
+                // `verify-a11y` named forty of them. A card is one Tab stop by design
+                // (round eight refused a stop per card twice, for the reason a
+                // forty-item grid is eighty presses to cross), so the honest shape is a
+                // *text* node: the author is still in the card's own `accessible-label`
+                // (line 1653), the pointer still opens the artist, and the card's `a`
+                // key is the keyboard path. No role advertises an action the keyboard
+                // cannot perform.
+                accessible-role: AccessibleRole.text;
                 accessible-label: root.item.author == ""
                     ? "作者" : "作者：" + root.item.author;
-                accessible-action-default => { root.open-author(); }
 
                 Avatar {
                     x: 0px;

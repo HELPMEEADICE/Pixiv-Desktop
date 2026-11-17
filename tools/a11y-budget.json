@@ -10,18 +10,18 @@
   },
   "pages": {
     "home": {
-      "minInvokable": 42,
-      "minFocusable": 51,
+      "minInvokable": 37,
+      "minFocusable": 46,
       "minTabStops": 54
     },
     "discovery": {
-      "minInvokable": 36,
-      "minFocusable": 46,
+      "minInvokable": 27,
+      "minFocusable": 37,
       "minTabStops": 41
     },
     "ranking": {
-      "minInvokable": 42,
-      "minFocusable": 53,
+      "minInvokable": 34,
+      "minFocusable": 45,
       "minTabStops": 74
     },
     "search": {
@@ -30,8 +30,8 @@
       "minTabStops": 27
     },
     "bookmarks": {
-      "minInvokable": 31,
-      "minFocusable": 40,
+      "minInvokable": 23,
+      "minFocusable": 32,
       "minTabStops": 27
     },
     "history": {
