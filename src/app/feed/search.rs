@@ -156,7 +156,7 @@ pub(crate) fn related_tags(items: &[Illust], word: &str, limit: usize) -> Vec<St
             }
         }
     }
-    counts.sort_by(|left, right| right.1.cmp(&left.1));
+    counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     counts
         .into_iter()
         .take(limit)
@@ -176,10 +176,8 @@ impl App {
         ui.set_grid_sort_labels(ModelRc::from(Rc::new(VecModel::from(sort))));
         ui.set_grid_sort_index(self.controls.sort_index());
         ui.set_grid_sort_label(FeedControls::SORT_GROUP.into());
-        let target: Vec<slint::SharedString> = SearchTarget::labels()
-            .into_iter()
-            .map(Into::into)
-            .collect();
+        let target: Vec<slint::SharedString> =
+            SearchTarget::labels().into_iter().map(Into::into).collect();
         ui.set_grid_mode_labels(ModelRc::from(Rc::new(VecModel::from(target))));
         ui.set_grid_mode_index(self.controls.target_index());
         ui.set_grid_mode_label(FeedControls::TARGET_GROUP.into());
@@ -200,10 +198,7 @@ impl App {
     /// where the cursor goes back to page 1 and the epoch is bumped — so a reply for
     /// the old parameters can no longer land (the guard the rest of this round's
     /// replies already use).
-    pub(crate) fn control_chosen(
-        shared: &Shared,
-        pick: impl FnOnce(FeedControls) -> FeedControls,
-    ) {
+    pub(crate) fn control_chosen(shared: &Shared, pick: impl FnOnce(FeedControls) -> FeedControls) {
         {
             let mut app = shared.borrow_mut();
             let Some(next) = app.controls.changed(pick(app.controls)) else {
@@ -287,7 +282,9 @@ mod tests {
         }
         for index in 0..SearchTarget::ALL.len() {
             let target = SearchTarget::from_index(index).expect("every index has a mode");
-            let query = controls.with_target_index(index as i32).query("landscape", 1);
+            let query = controls
+                .with_target_index(index as i32)
+                .query("landscape", 1);
             let url = template
                 .replace("{order}", query.sort.as_param())
                 .replace("{target}", query.target.as_param());
@@ -304,7 +301,11 @@ mod tests {
         let labels = SortOrder::labels();
         assert_eq!(labels.len(), SortOrder::ALL.len());
         for (index, order) in SortOrder::ALL.iter().enumerate() {
-            assert_eq!(labels[index], order.label(), "the label list is the order list");
+            assert_eq!(
+                labels[index],
+                order.label(),
+                "the label list is the order list"
+            );
             assert_eq!(
                 FeedControls::default().with_sort_index(index as i32).sort,
                 *order,
@@ -316,7 +317,9 @@ mod tests {
         for (index, target) in SearchTarget::ALL.iter().enumerate() {
             assert_eq!(modes[index], target.label());
             assert_eq!(
-                FeedControls::default().with_target_index(index as i32).target,
+                FeedControls::default()
+                    .with_target_index(index as i32)
+                    .target,
                 *target
             );
         }
@@ -327,14 +330,23 @@ mod tests {
         let mut seen: Vec<&str> = Vec::new();
         for order in SortOrder::ALL {
             let param = order.as_param();
-            assert!(!param.is_empty(), "an order without a parameter is a dead control");
-            assert!(!seen.contains(&param), "{param} is carried by two control indices");
+            assert!(
+                !param.is_empty(),
+                "an order without a parameter is a dead control"
+            );
+            assert!(
+                !seen.contains(&param),
+                "{param} is carried by two control indices"
+            );
             seen.push(param);
         }
         let mut seen: Vec<&str> = Vec::new();
         for target in SearchTarget::ALL {
             let param = target.as_param();
-            assert!(!param.is_empty(), "a mode without a parameter is a dead control");
+            assert!(
+                !param.is_empty(),
+                "a mode without a parameter is a dead control"
+            );
             assert!(!seen.contains(&param), "{param} is carried by two indices");
             seen.push(param);
         }
@@ -450,7 +462,11 @@ mod tests {
             .into_iter()
             .map(|illust| illust.id.get())
             .collect();
-        assert_eq!(kept, vec![1], "AI-assisted (2) is AI too, not only AI-generated");
+        assert_eq!(
+            kept,
+            vec![1],
+            "AI-assisted (2) is AI too, not only AI-generated"
+        );
     }
 
     /// F4: the switch is not a query parameter — the endpoint has none — so it is
@@ -489,7 +505,6 @@ mod tests {
         assert_ne!(flipped, controls, "the AI switch is part of the state");
     }
 }
-
 
 /// Search-suggestion panel state.
 pub(crate) struct SuggestState {

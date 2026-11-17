@@ -1142,9 +1142,7 @@ mod tests {
         use crate::app::helpers::testkit::CountingModel;
 
         let drawn: Vec<LocalRecord> = (0..10).map(band_row).collect();
-        let model = CountingModel::new(
-            drawn.iter().cloned().map(to_local_row).collect::<Vec<_>>(),
-        );
+        let model = CountingModel::new(drawn.iter().cloned().map(to_local_row).collect::<Vec<_>>());
 
         // One recorded file was deleted between two publishes: one row's state moves.
         let mut next = drawn.clone();
@@ -1165,9 +1163,8 @@ mod tests {
         assert!(local_band_patch(&next, &next).is_empty());
 
         // The shape this replaced, measured: ten fresh elements for that one flag.
-        let rebuilt = CountingModel::new(
-            next.iter().cloned().map(to_local_row).collect::<Vec<_>>(),
-        );
+        let rebuilt =
+            CountingModel::new(next.iter().cloned().map(to_local_row).collect::<Vec<_>>());
         assert_eq!(
             rebuilt.row_count(),
             10,
@@ -1268,8 +1265,8 @@ mod tests {
         assert_eq!(task_destination(&index, 999), None);
 
         // The shape this replaced, measured: every queued task cloned to read one.
-        let cloned = tasks.iter().cloned().count();
-        assert_eq!(cloned, 200, "200 task clones per click");
+        let cloned: Vec<_> = tasks.iter().cloned().collect();
+        assert_eq!(cloned.len(), 200, "200 task clones per click");
 
         // A snapshot that no longer holds a row drops it, so a stale path can never
         // be the one revealed.

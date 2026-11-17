@@ -733,8 +733,6 @@ impl App {
     }
 }
 
-
-
 impl App {
     /// Toggle the follow state for the current author.
     ///
@@ -1462,7 +1460,9 @@ mod tests {
             .collect();
         let masked = masked_detail_plan(&pages, "https://i.pximg.net/img-original/f1.png", 1);
         assert!(
-            !masked.iter().any(|request| request.url.contains("img-original")),
+            !masked
+                .iter()
+                .any(|request| request.url.contains("img-original")),
             "a masked page must not fetch the full-size image: {:?}",
             masked
         );
@@ -1475,16 +1475,16 @@ mod tests {
         }
         // The strip is untouched: it was already the small tier.
         assert!(
-            masked.iter().any(|request| request.size == DecodeSize::Thumb),
+            masked
+                .iter()
+                .any(|request| request.size == DecodeSize::Thumb),
             "the strip keeps its cells"
         );
         // The unmasked plan is the one that reaches for the bigger copy, so the
         // difference above is the mask and not the plan.
         let plain = detail_plan(&pages, "https://i.pximg.net/img-original/f1.png", 1);
         assert!(
-            plain
-                .iter()
-                .any(|request| request.url.contains("regular-")),
+            plain.iter().any(|request| request.url.contains("regular-")),
             "the revealed page asks for the master1200 tier"
         );
     }
@@ -1494,9 +1494,11 @@ mod tests {
     #[test]
     fn f2_the_single_image_fallback_is_the_viewer_tier_while_masked() {
         let illust = sensitive(1, 1, true);
-        let mut urls = IllustUrls::default();
-        urls.regular = "https://i.pximg.net/c/1200x1200/regular.jpg".to_string();
-        urls.original = "https://i.pximg.net/img-original/original.png".to_string();
+        let urls = IllustUrls {
+            regular: "https://i.pximg.net/c/1200x1200/regular.jpg".to_string(),
+            original: "https://i.pximg.net/img-original/original.png".to_string(),
+            ..IllustUrls::default()
+        };
         let illust = Illust { urls, ..illust };
         assert!(illust.urls.largest().contains("img-original"));
         assert!(illust.urls.viewer().contains("regular"));
@@ -1508,7 +1510,9 @@ mod tests {
         };
         let plan = masked_detail_plan(&[], &fallback, 0);
         assert!(
-            !plan.iter().any(|request| request.url.contains("img-original")),
+            !plan
+                .iter()
+                .any(|request| request.url.contains("img-original")),
             "the fallback a masked page passes must not be the original: {plan:?}"
         );
     }
@@ -1549,7 +1553,10 @@ mod tests {
     #[test]
     fn b4_a_follow_reply_lands_only_on_the_work_that_asked() {
         let asked = Id(11);
-        assert!(detail_reply_lands(7, 7, Some(asked), asked), "same page, same work");
+        assert!(
+            detail_reply_lands(7, 7, Some(asked), asked),
+            "same page, same work"
+        );
         assert!(
             !detail_reply_lands(7, 7, Some(Id(12)), asked),
             "same epoch is not enough: the page now shows another work"
@@ -1597,7 +1604,10 @@ mod tests {
 
         // A verdict that changes nothing writes nothing at all.
         model.reset();
-        assert!(!patch_card_bookmark(&model, 0, true), "the flag already says so");
+        assert!(
+            !patch_card_bookmark(&model, 0, true),
+            "the flag already says so"
+        );
         assert_eq!(model.writes(), 0);
         assert_eq!(model.reads(), 1, "one row is read to know that");
 
