@@ -1265,7 +1265,7 @@ mod tests {
         assert_eq!(task_destination(&index, 999), None);
 
         // The shape this replaced, measured: every queued task cloned to read one.
-        let cloned: Vec<_> = tasks.iter().cloned().collect();
+        let cloned = tasks.to_vec();
         assert_eq!(cloned.len(), 200, "200 task clones per click");
 
         // A snapshot that no longer holds a row drops it, so a stale path can never
