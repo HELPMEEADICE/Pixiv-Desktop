@@ -130,11 +130,10 @@ pub fn wheel_zoom(current: f32, wheel_delta: f32) -> f32 {
     // Work in log space and clamp there: a huge delta would otherwise overflow to
     // infinity and report "no change" instead of the bound it clearly asked for.
     let stepped = current.clamp(ZOOM_MIN, ZOOM_MAX).ln() + notches * WHEEL_STEP.ln();
-    stepped
-        .exp()
-        .clamp(ZOOM_MIN, ZOOM_MAX)
-        .max(ZOOM_MIN)
-        .min(ZOOM_MAX)
+    // Clamped in log space, so a huge delta cannot overflow to infinity and report
+    // "no change" instead of the bound it clearly asked for. `exp` of a value already
+    // inside [ln(MIN), ln(MAX)] is finite and already inside the bounds.
+    stepped.exp().clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
 /// Pan offset that keeps the image point under \`cursor\` pinned while the scale
@@ -545,8 +544,8 @@ mod tests {
         assert!((effective_scale(VIEW, image, fit, zoom) - 0.5).abs() < 1e-6);
 
         // It is an involution: two toggles return the original mode.
-        assert_eq!(toggled_mode(toggled_mode(true).0).0, true);
-        assert_eq!(toggled_mode(toggled_mode(false).0).0, false);
+        assert!(toggled_mode(toggled_mode(true).0).0);
+        assert!(!toggled_mode(toggled_mode(false).0).0);
     }
 
     #[test]
