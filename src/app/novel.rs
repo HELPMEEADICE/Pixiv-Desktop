@@ -1012,8 +1012,16 @@ impl App {
     pub(crate) fn load_novels_page(shared: &Shared) {
         {
             let mut app = shared.borrow_mut();
+            // Opening the page is not a search.
+            //
+            // This used to promote any non-content state to "loading" whenever the
+            // result model was empty - and since nothing had been searched, nothing
+            // would ever resolve it. The page therefore opened on a spinner that ran
+            // for the life of the process, which reads as a hung application. The
+            // idle state says what to do instead, and only an actual request may put
+            // the result area into `1`.
             if app.novel.state != 0 && app.novel.rows.row_count() == 0 {
-                app.publish_novels_state(1, "");
+                app.publish_novels_state(2, "输入标题、标签或作者名，然后按回车开始搜索");
             }
         }
         // F5: a capture of the result row needs result rows, and `pixiv-demo` has no
