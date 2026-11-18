@@ -387,8 +387,21 @@ component InfoBody inherits VerticalLayout {
 
     spacing: Theme.space-3;
 
+    // Every child below states `vertical-stretch: 0`.
+    //
+    // A layout child defaults to stretching, and this body is the only child of a
+    // scroll view that grows its content to fill its viewport. The panel is usually
+    // taller than the metadata, so that leftover height was being shared out between
+    // the title, the counts and the tag heading - measured at 1280x900: 155 px
+    // between the title and the author row, 227 px between the description and the
+    // 标签 heading. The gaps vanished at 620 px tall, which is what proved they were
+    // unused space rather than padding. With the children pinned to their own
+    // heights the body packs at the top and the leftover falls harmlessly below the
+    // last row.
+    alignment: start;
 
     Text {
+        vertical-stretch: 0;
         text: root.title;
         color: Theme.text;
         font-size: Theme.font-title;
@@ -398,6 +411,7 @@ component InfoBody inherits VerticalLayout {
 
     // ---- author ----
     Rectangle {
+        vertical-stretch: 0;
         height: 44px;
         border-radius: Theme.radius-md;
         background: ta-author.has-hover ? Theme.layer-alt : transparent;
@@ -477,7 +491,15 @@ component InfoBody inherits VerticalLayout {
     // is: the main half and the menu half are different verbs. Both halves are
     // shared primitives (`AppButton`, `IconButton`), so hover, press, focus ring,
     // role and keyboard all come from the components rather than from here.
+    // ---- primary actions: one row, one height ----
+    //
+    // The three verbs that act on *this work* share a row: bookmark (a Fluent
+    // SplitButton), save-this-page and download-all. They used to be split across
+    // three stacked rows with a Subtle text button under them, which made a 360 px
+    // column read as a list of unrelated controls and pushed the metadata below the
+    // fold. The verbs that leave the application are their own row below.
     HorizontalLayout {
+        vertical-stretch: 0;
         spacing: Theme.space-2;
         alignment: start;
 
@@ -526,58 +548,85 @@ component InfoBody inherits VerticalLayout {
             icon: "downloads";
             clicked => { root.download-page(); }
         }
-    }
 
-    HorizontalLayout {
-        spacing: Theme.space-2;
-        alignment: start;
+        // Download-all is a primary verb on this work, so it belongs in this row
+        // rather than alone on the next one. The label is the count when there is
+        // more than one page, and the tooltip carries the full sentence so the
+        // button can stay narrow in a 360 px column.
         AppButton {
-            label: root.page-count > 1 ? ("下载全部 " + root.page-count) : "下载";
+            label: root.page-count > 1 ? ("全部 " + root.page-count) : "下载";
             icon: "downloads";
             kind: ButtonKind.Secondary;
             clicked => { root.download-all(); }
         }
+    }
+
+    // ---- secondary actions: the verbs that leave the application ----
+    HorizontalLayout {
+        vertical-stretch: 0;
+        spacing: Theme.space-2;
+        alignment: start;
+        AppButton {
+            label: "在浏览器中打开";
+            icon: "open";
+            kind: ButtonKind.Subtle;
+            clicked => { root.open-external(); }
+        }
         if root.kind == 2 : AppButton {
-            label: "导出动图 GIF";
+            label: "导出 GIF";
             icon: "play";
-            kind: ButtonKind.Secondary;
+            kind: ButtonKind.Subtle;
             enabled: !root.busy;
             clicked => { root.export-ugoira(); }
         }
     }
 
-    AppButton {
-        label: "在浏览器中打开";
-        icon: "open";
-        kind: ButtonKind.Subtle;
-        clicked => { root.open-external(); }
-    }
-
     if !root.authenticated : InfoBar {
+        vertical-stretch: 0;
         kind: InfoKind.Warning;
         title: "只读模式";
         message: "收藏与关注需要先完成登录（设置 → 账户）。";
     }
 
     if root.kind == 2 && root.ugoira-hint != "" : InfoBar {
+        vertical-stretch: 0;
         kind: InfoKind.Info;
         title: "动图（Ugoira）";
         message: root.ugoira-hint;
     }
 
-    Divider { }
+    Rectangle {
+        vertical-stretch: 0;
+        height: 1px;
+        background: Theme.border;
+    }
 
     // ---- stats ----
-    HorizontalLayout {
-        spacing: Theme.space-4;
-        alignment: start;
-        Text { text: "浏览 " + root.views; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
-        Text { text: "收藏 " + root.bookmarks; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
-        Text { text: "赞 " + root.likes; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
-        Text { text: root.posted; color: Theme.text-tertiary; font-size: Theme.font-small; vertical-alignment: center; overflow: elide; }
+    // Two rows, not one. In the 360 px panel the single row could not hold three
+    // counts *and* the date, and the date was the child that carried
+    // `overflow: elide` - so the last line of the metadata silently lost its tail
+    // ("2025-10-27 20:11:00" became "2025-10-2..."). Counts are one line, the date
+    // is the next, and neither has a reason to truncate.
+    VerticalLayout {
+        vertical-stretch: 0;
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: Theme.space-4;
+            alignment: start;
+            Text { text: "浏览 " + root.views; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+            Text { text: "收藏 " + root.bookmarks; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+            Text { text: "赞 " + root.likes; color: Theme.text-secondary; font-size: Theme.font-small; vertical-alignment: center; }
+        }
+        Text {
+            text: root.posted == "" ? "" : ("发布于 " + root.posted);
+            color: Theme.text-tertiary;
+            font-size: Theme.font-small;
+            wrap: word-wrap;
+        }
     }
 
     if root.description != "" : Text {
+        vertical-stretch: 0;
         text: root.description;
         color: Theme.text-secondary;
         font-size: Theme.font-small;
@@ -585,6 +634,7 @@ component InfoBody inherits VerticalLayout {
     }
 
     if root.tags.length > 0 : VerticalLayout {
+        vertical-stretch: 0;
         spacing: Theme.space-2;
         Label {
             role: TextRole.Caption;
@@ -698,6 +748,14 @@ export component InfoPanel inherits Rectangle {
         spacing: Theme.space-3;
 
         focus-body := InfoBody {
+            // Pack at the top. A layout child defaults to `vertical-stretch: 1`, and
+            // the scroll view stretches its content to fill the viewport whenever the
+            // metadata is shorter than the panel - so every stretchable child inside
+            // the body absorbed a share of the leftover height. Measured at 1280x900:
+            // 155 px between the title and the author row, 75 px between the 标签
+            // heading and its first chip. Those gaps were not padding; they were the
+            // panel's unused space distributed across its own children.
+            vertical-stretch: 0;
             title: root.title;
             author: root.author;
             author-id: root.author-id;

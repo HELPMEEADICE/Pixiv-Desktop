@@ -393,7 +393,13 @@ impl App {
             };
             app.loading_more = true;
             app.ui().set_grid_loading_more(true);
-            (target, next, app.epoch, app.client.clone(), app.tasks.clone())
+            (
+                target,
+                next,
+                app.epoch,
+                app.client.clone(),
+                app.tasks.clone(),
+            )
         };
         let Some(client) = client else {
             let mut app = shared.borrow_mut();

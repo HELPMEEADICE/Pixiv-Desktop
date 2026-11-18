@@ -192,9 +192,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // the event loop returns, which is what reaches the shutdown sequence below. A
     // future tray feature has to change this line instead of silently changing what
     // the X button does.
-    ui.window().on_close_requested(|| {
-        slint::CloseRequestResponse::HideWindow
-    });
+    ui.window()
+        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 
     let result = ui.run();
     shutdown(&app);
@@ -405,7 +404,6 @@ impl App {
             timer.stop();
         }
     }
-
 }
 
 impl App {

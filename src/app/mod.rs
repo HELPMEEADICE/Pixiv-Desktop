@@ -29,16 +29,15 @@ mod lifecycle;
 mod novel;
 mod palette;
 mod profile;
-mod tasks;
 mod selection;
 mod settings;
+mod tasks;
 mod ugoira;
 
 pub(crate) use self::{
     callbacks::install_callbacks, detach::detach_callbacks, feed::*, helpers::*, lifecycle::*,
-    novel::NovelState,
-    palette::PaletteState, profile::*, selection::Selection, settings::*, tasks::Tasks,
-    ugoira::PlaybackState,
+    novel::NovelState, palette::PaletteState, profile::*, selection::Selection, settings::*,
+    tasks::Tasks, ugoira::PlaybackState,
 };
 
 use slint::{
