@@ -683,7 +683,7 @@ mod tests {
     /// change, this test is the alarm that the table in the report is stale.
     #[test]
     fn decode_target_versus_drawn_card_width() {
-        const RAIL: f32 = 232.0;
+        const RAIL: f32 = 192.0;
         const RAIL_COMPACT: f32 = 52.0;
         const GUTTER: f32 = 10.0;
         const PAGE_PADDING: f32 = 20.0 * 2.0;
@@ -705,10 +705,10 @@ mod tests {
         // 1024x768 at 150%: the rail is expanded (1024 is above the breakpoint).
         let geometry = crate::layout::GridGeometry::for_width(body(1024.0));
         assert_eq!(geometry.columns, 4);
-        assert!(near(body(1024.0), 742.0));
-        assert!(near(geometry.card_width, 173.5));
+        assert!(near(body(1024.0), 782.0));
+        assert!(near(geometry.card_width, 183.5));
         let drawn = (geometry.card_width * 1.5).ceil() as u32;
-        assert_eq!(drawn, 261);
+        assert_eq!(drawn, 276);
         assert_eq!(target_width(geometry.card_width, 1.5), 288);
         // The guess over-decoded here by one tier - one of the two directions the
         // guess is wrong in, and the reason "it looks soft" was never reported at
@@ -717,15 +717,13 @@ mod tests {
 
         // 1536x1152 at 150%.
         let geometry = crate::layout::GridGeometry::for_width(body(1536.0));
-        assert_eq!(geometry.columns, 6);
-        assert!(near(body(1536.0), 1254.0));
-        assert!(near(geometry.card_width, 195.666_67));
+        assert_eq!(geometry.columns, 7);
+        assert!(near(body(1536.0), 1294.0));
+        assert!(near(geometry.card_width, 171.142_85));
         let drawn = (geometry.card_width * 1.5).ceil() as u32;
-        assert_eq!(drawn, 294);
-        assert_eq!(target_width(geometry.card_width, 1.5), 320);
-        // Unchanged by the fix at this size: the guess happens to land on the
-        // tier the settled width wants.
-        assert_eq!(seed, target_width(geometry.card_width, 1.5));
+        assert_eq!(drawn, 257);
+        assert_eq!(target_width(geometry.card_width, 1.5), 288);
+        assert!(seed > target_width(geometry.card_width, 1.5));
 
         // 800x768 at 150%: rail compact, three columns. This row reproduces the
         // numbers in section 12i exactly - a 320px decode, a card of 222 logical px

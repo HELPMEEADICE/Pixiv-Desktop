@@ -54,7 +54,7 @@ impl App {
             // Opening a work leaves the page behind it exactly the way a fresh
             // navigation does, tooltip included: this is the third exit path and it
             // had the same missing reset (plan §2.3 R20).
-            app.leave_page(target);
+            app.leave_page(current, target);
             let ui = app.ui();
             ui.set_detail_state(1);
             ui.set_detail_pages(ModelRc::default());

@@ -7,7 +7,7 @@
 // did not send is simply not shown.
 
 import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
-import { AppButton, ButtonKind, IconButton, IconSlot, PageScroll, StateView, StateKind, Skeleton, ProgressBar, LoadingRow, Avatar, IllustItem, ProfileStatItem, BatchBar, Label, BodyText } from "../components.slint";
+import { AppButton, ButtonKind, IconButton, IconSlot, PageScroll, StateView, StateKind, Skeleton, ProgressBar, LoadingRow, Avatar, IllustItem, ProfileStatItem, BatchBar, Label, BodyText, PageHeader } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
 
 export component ProfilePage inherits Rectangle {
@@ -293,18 +293,6 @@ export component ProfilePage inherits Rectangle {
                         enabled: !root.busy;
                         clicked => { root.toggle-follow(); }
                     }
-                    // The selection toggle is icon-only here and labelled on the two
-                    // grid pages: the action block is a fixed 210 px and two labelled
-                    // buttons already fill 176 px of it, so a third label would be
-                    // clipped. 32 px of square control fits, and `IconButton` names
-                    // itself from its tip, so nothing is anonymous to a screen reader.
-                    IconButton {
-                        icon: root.selection-mode ? "close" : "check";
-                        tip: root.selection-mode ? "退出多选" : "多选";
-                        active: root.selection-mode;
-                        row-height: 34px;
-                        clicked => { root.toggle-selection-mode(); }
-                    }
                     AppButton {
                         label: "刷新";
                         icon: "refresh";
@@ -363,16 +351,28 @@ export component ProfilePage inherits Rectangle {
                         }
                     }
 
-                    if root.count-label != "" : Label {
-                        role: TextRole.Caption;
-                        text: root.count-label;
-                        color: Theme.text-tertiary;
-                    }
                 }
             }
         }
 
-        // ---------------- works ----------------
+        if root.state == 0 && root.columns.length > 0 : works-header := PageHeader {
+            title: "作品";
+
+            if root.count-label != "" : Label {
+                role: TextRole.Small;
+                text: root.count-label;
+                color: Theme.text-secondary;
+            }
+
+            AppButton {
+                label: root.selection-mode ? "退出多选" : "多选";
+                icon: root.selection-mode ? "close" : "check";
+                kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
+                row-height: works-header.command-height;
+                clicked => { root.toggle-selection-mode(); }
+            }
+        }
+
         if root.state == 0 : ArtworkGrid {
             columns: root.columns;
             card-width: root.card-width;

@@ -572,7 +572,7 @@ function New-RailCapture {
     $glyphEdge = 7.0
     # Main rows: item height 36 + spacing 2, first item top = topbar 48 + rail padding 8.
     $mainCy = @()
-    for ($k = 0; $k -lt $MainRows; $k++) { $mainCy += (74.0 + 38.0 * $k) }
+    for ($k = 0; $k -lt $MainRows; $k++) { $mainCy += (74.0 + 38.0 * $k + $(if ($k -ge 5) { 3.0 } else { 0.0 })) }
     # Pinned rows: bottom-up from the status bar and the rail's own bottom padding.
     $tailCy = @()
     for ($k = 0; $k -lt [math]::Max($TailGlyphs, $TailLabels); $k++) { $tailCy += ($LogicalH - 52.0 - 38.0 * $k) }
@@ -898,7 +898,7 @@ $namesPair = @($plantedDiffs | Where-Object { $_.Pair -eq "a11y\budget" -and $_.
 # the two lists is a FAIL that names the page, not a list that quietly agrees with
 # itself again.
 $completeNow = @(Test-PageSetCompleteness)
-$completePlanted = @(Test-PageSetCompleteness -Unmeasured @("detail", "user-profile"))
+$completePlanted = @(Test-PageSetCompleteness -Unmeasured @("detail"))
 $detailMeasured = ((Get-PageSet -For a11y) -contains "detail") -and ((Get-PageSet -For layout) -contains "detail") -and ((Get-PageSet -For budget) -contains "detail")
 $plantedShown = ($plantedDiffs | ForEach-Object { $_.Message }) -join " / "
 $agreeShown = if ($agreeNow.Count) { ($agreeNow | ForEach-Object { $_.Message }) -join " / " } else { "none" }

@@ -607,7 +607,7 @@ fn build_novel(
     let noise = u32::try_from(seed_for_id(id) % 1_000).unwrap_or(0);
     Novel {
         id,
-        title: format!("{DEMO_MARKER}{title}"),
+        title: format!("{DEMO_MARKER}{}", title.trim_start_matches(DEMO_MARKER)),
         author: author.clone(),
         cover: Some(novel_cover_url(id)),
         caption: format!(

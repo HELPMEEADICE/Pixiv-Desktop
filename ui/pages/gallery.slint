@@ -14,7 +14,7 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
-import { IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton, ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard, BatchBar, SegmentedControl, Label, BodyText, ToggleSwitch } from "../components.slint";
+import { IllustCard, IllustItem, StateView, StateKind, Skeleton, TagChip, AppButton, ButtonKind, PageScroll, ProgressBar, LoadingRow, Divider, RecommendUserItem, UserCard, BatchBar, SegmentedControl, Label, BodyText, ToggleSwitch, PageHeader } from "../components.slint";
 
 /// The masonry columns themselves. No scroll view, no header: callers embed this
 /// inside their own scroll body so the grid can sit under page-specific content.
@@ -87,6 +87,7 @@ export component GalleryPage inherits Rectangle {
     in property <string> subtitle: "";
     in property <string> message: "";
     in property <string> action-label: "";
+    in property <bool> offer-search: false;
     in property <[string]> tags: [];
     in property <string> active-tag: "";
     /// Ranking period / search sort chips.
@@ -119,6 +120,7 @@ export component GalleryPage inherits Rectangle {
     callback select-filter(int);
     callback retry();
     callback action();
+    callback focus-search();
     callback load-more();
     callback pick-search(string);
     /// Recommended artists, shown only on the discovery page. Empty elsewhere,
@@ -227,71 +229,22 @@ export component GalleryPage inherits Rectangle {
             }
         }
 
-        // ---------------- header ----------------
-        if root.show-header : VerticalLayout {
-            spacing: Theme.space-1;
-            padding-top: Theme.space-1;
+        if root.show-header : gallery-header := PageHeader {
+            title: root.title;
+            subtitle: root.subtitle;
 
-            HorizontalLayout {
-                spacing: Theme.space-3;
-                // space-between and *not* end: with end, the title shrank to its
-                // preferred width and the whole header drifted to the right edge.
-                alignment: space-between;
-
-                Label {
-                    role: TextRole.Page;
-                    emphasis: Emphasis.Semibold;
-                    text: root.title;
-                    color: Theme.text;
-                }
-
-                // The pointer-only way into selection mode, and the reason F2 does not
-                // depend on modifiers surviving `TouchArea.pointer-event`: one control
-                // that flips the mode the bar and the cards already understand. `kind`
-                // swaps so the button reads as a toggle, as WinUI's does.
-                //
-                // It is `compact` (26 px) and carries no `row-height`, and it shares one
-                // cell with the count label instead of becoming a third child of this
-                // `space-between` row: a 32 px control made the *row* 32 px tall (the
-                // 20 px title is 27), so every pixel below — the whole masonry — moved
-                // down with it. Measured by the visual gate: discovery 20.87 % over,
-                // rows 107..1112, which is a shifted page, not a new control.
-                HorizontalLayout {
-                    spacing: Theme.space-2;
-                    alignment: end;
-
-                    if root.count-label != "" : Label {
-                        role: TextRole.Small;
-                        text: root.count-label;
-                        color: Theme.text-tertiary;
-                    }
-
-                    // A12: the button states its own 26 px height and sits in the row like
-                    // any other child.
-                    //
-                    // It used to be wrapped in a `height: 0px` cell and lifted with
-                    // `y: -one step`, on the theory that a 32 px control in a 27 px row moved
-                    // the masonry down (measured then: discovery 20.87 % over, rows 107..1112).
-                    // The wrapper did hold the row at 23.3 px, and it also made the button's
-                    // hit area overflow the header: 4 px up over the subtitle and the rest of
-                    // its box below the row, so the end of the subtitle pressed 多选.
-                    // `compact` is 26 px — under the 27 px of the title row — so the row does
-                    // not grow and nothing overflows.
-                    select-toggle := AppButton {
-                        label: root.selection-mode ? "退出多选" : "多选";
-                        icon: root.selection-mode ? "close" : "check";
-                        kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
-                        compact: true;
-                        height: Theme.control-height-sm;
-                        clicked => { root.toggle-selection-mode(); }
-                    }
-                }
+            if root.count-label != "" : Label {
+                role: TextRole.Small;
+                text: root.count-label;
+                color: Theme.text-secondary;
             }
 
-            if root.subtitle != "" : Label {
-                role: TextRole.Small;
-                text: root.subtitle;
-                color: Theme.text-secondary;
+            AppButton {
+                label: root.selection-mode ? "退出多选" : "多选";
+                icon: root.selection-mode ? "close" : "check";
+                kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
+                row-height: gallery-header.command-height;
+                clicked => { root.toggle-selection-mode(); }
             }
         }
 
@@ -308,46 +261,56 @@ export component GalleryPage inherits Rectangle {
             }
         }
 
-        // ---------------- round eleven: sort and match mode ----------------
-        // Two groups, both composed from the shared `SegmentedControl`. They report
-        // the index the gesture picked and never assign `sort-index`/`mode-index`:
-        // those belong to the model that owns the query (§2.1 U28).
-        if root.sort-labels.length > 0 : HorizontalLayout {
-            spacing: Theme.space-2;
-            alignment: start;
-            height: Theme.control-height;
+        if root.sort-labels.length > 0 : Rectangle {
+            property <length> control-gap: Theme.space-2;
+            property <bool> wrap-filters: self.width < Theme.search-filters-inline-min
+                || filter-groups.preferred-width
+                + ai-filter.preferred-width + control-gap + Theme.space-3 * 2 > self.width;
+            height: Theme.space-2 * 2 + Theme.control-height
+                + (wrap-filters ? Theme.control-height + control-gap : 0px);
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.layer;
 
-            SegmentedControl {
-                label: root.sort-label == "" ? "排序方式" : root.sort-label;
-                items: root.sort-labels;
-                current: root.sort-index;
-                selected(i) => { root.sort-chosen(i); }
-            }
-
-            if root.mode-labels.length > 0 : SegmentedControl {
-                label: root.mode-label == "" ? "匹配方式" : root.mode-label;
-                items: root.mode-labels;
-                current: root.mode-index;
-                selected(i) => { root.mode-chosen(i); }
-            }
-
-            // F4: the AI filter, in the same 32 px control row so the group, the mode
-            // and the filter read as one line of settings. The caption names what the
-            // switch does; the switch itself carries the accessible name.
-            HorizontalLayout {
+            filter-groups := HorizontalLayout {
+                x: Theme.space-3;
+                y: Theme.space-2;
+                height: Theme.control-height;
+                width: self.preferred-width;
                 spacing: Theme.space-2;
-                alignment: end;
+
+                SegmentedControl {
+                    label: root.sort-label == "" ? "排序方式" : root.sort-label;
+                    items: root.sort-labels;
+                    current: root.sort-index;
+                    selected(i) => { root.sort-chosen(i); }
+                }
+
+                if root.mode-labels.length > 0 : SegmentedControl {
+                    label: root.mode-label == "" ? "匹配方式" : root.mode-label;
+                    items: root.mode-labels;
+                    current: root.mode-index;
+                    selected(i) => { root.mode-chosen(i); }
+                }
+            }
+
+            ai-filter := HorizontalLayout {
+                x: parent.wrap-filters ? Theme.space-3 : parent.width - self.width - Theme.space-3;
+                y: Theme.space-2 + (parent.wrap-filters ? Theme.control-height + parent.control-gap : 0px);
+                height: Theme.control-height;
+                width: self.preferred-width;
+                spacing: Theme.space-2;
 
                 Label {
-                    role: TextRole.Caption;
-                    text: "AI 作品";
+                    role: TextRole.Small;
+                    text: "排除 AI 生成";
                     color: Theme.text-secondary;
-                    vertical-alignment: center;
                 }
 
                 ToggleSwitch {
                     y: (parent.height - self.height) / 2;
-                    label: "排除 AI 生成的作品";
+                    label: "排除 AI 生成的作品（下次加载生效）";
                     checked: root.exclude-ai;
                     toggled(on) => { root.exclude-ai-toggled(on); }
                 }
@@ -450,7 +413,7 @@ export component GalleryPage inherits Rectangle {
                 }
                 Label {
                     role: TextRole.Caption;
-                    text: "来自 /ajax/discovery/users，点击进入作者主页";
+                    text: "发现更多创作者";
                     color: Theme.text-tertiary;
                     horizontal-stretch: 1;
                 }
@@ -559,6 +522,7 @@ export component GalleryPage inherits Rectangle {
 
                 StateView {
                     width: 100%;
+                    vertical-padding: root.offer-search ? Theme.space-3 : Theme.space-6;
                     kind: (root.state == 3) ? StateKind.Error
                         : (root.state == 4) ? StateKind.Locked
                         : StateKind.Empty;
@@ -567,10 +531,14 @@ export component GalleryPage inherits Rectangle {
                     // already said "搜索", next to a picture-unavailable glyph.
                     glyph: root.state-glyph;
                     title: root.state-title != "" ? root.state-title : root.title;
-                    description: root.message;
-                    action-label: root.action-label;
+                    description: root.offer-search && root.state == 2
+                        ? "按标题或标签查找插画、漫画和动图。" : root.message;
+                    action-label: root.offer-search && root.state == 2 ? "开始搜索" : root.action-label;
                     retry => { root.retry(); }
-                    action => { root.action(); }
+                    action => {
+                        if (root.offer-search && root.state == 2) { root.focus-search(); }
+                        else { root.action(); }
+                    }
                 }
 
                 // Recent searches, offered where they are useful: the empty result.

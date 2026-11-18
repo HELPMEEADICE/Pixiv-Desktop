@@ -20,8 +20,8 @@
       "minTabStops": 41
     },
     "ranking": {
-      "minInvokable": 34,
-      "minFocusable": 45,
+      "minInvokable": 33,
+      "minFocusable": 42,
       "minTabStops": 74
     },
     "search": {
@@ -47,12 +47,17 @@
     "downloads": {
       "minInvokable": 19,
       "minFocusable": 20,
-      "minTabStops": 25
+      "minTabStops": 21
     },
     "settings": {
       "minInvokable": 18,
       "minFocusable": 20,
       "minTabStops": 27
+    },
+    "user-profile": {
+      "minInvokable": 26,
+      "minFocusable": 32,
+      "minTabStops": 28
     },
     "novels": {
       "minInvokable": 17,

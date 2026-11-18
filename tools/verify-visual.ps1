@@ -255,11 +255,7 @@ function Test-Shifted {
     return [pscustomobject]@{ Shifted = (($still - $best) -gt $margin); Recovered = $still - $best; Still = $still; Dx = $bestDx; Dy = $bestDy }
 }
 
-# G32: the fifteen states this gate has always captured, asked for by name instead of
-# copied: nine destinations (the eight the shell starts on by name plus detail, which is
-# PIXIV_DESKTOP_START_ILLUST on top of home) and six fixture states. The three novel
-# destinations are deliberately absent until their baselines exist (G33), and that
-# exclusion is one line of tools/page-set.ps1 rather than a second list here.
+# G32: capture every destination and each named fixture state in tools/page-set.ps1.
 if (-not $PSBoundParameters.ContainsKey("Pages")) { $Pages = @(Get-PageSet -For visual) }
 $Pages = @($Pages | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Themes = @($Themes | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -299,13 +295,10 @@ foreach ($theme in $Themes) {
             $results += [pscustomobject]@{ Page = $page; Theme = $theme; Over = [double]::NaN; Max = 0; Mean = 0; Verdict = "CAPTURE"; Detail = ("tools/page-set.ps1 declares no launch recipe for '{0}', so this state was never captured" -f $page) }
             continue
         }
-        # shot.ps1 inherits this environment, and every deep-link key is written or
-        # cleared per state, so one state's link cannot leak into the next capture.
-        Set-PageLaunch -Page $page
+        # shot.ps1 applies the named page's deep links. The visual gate supplies the fixture.
         Set-PageFixture -Page $page
-        $shotArgs = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $launch.StartPage, "-Mode", "size", "-Size", $Size, "-Out", $png, "-Exe", $Exe)
+        $shotArgs = @("-File", (Join-Path $PSScriptRoot "shot.ps1"), "-Page", $page, "-Mode", "size", "-Size", $Size, "-Out", $png, "-Exe", $Exe)
         if ($theme -eq "dark") { $shotArgs += "-Dark" }
-        if ($launch.ContainsKey("Illust")) { $shotArgs += @("-Illust", $launch.Illust) }
 
         if (-not $SkipCapture) {
             & pwsh @shotArgs | Out-Null

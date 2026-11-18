@@ -1177,9 +1177,7 @@ impl App {
                         let ui = app.ui();
                         ui.set_novel_rows(ModelRc::from(app.novel.rows.clone()));
                         ui.set_novels_title(title.into());
-                        ui.set_novels_subtitle(
-                            format!("{count} 本 · 来自 /ajax/search/novels").into(),
-                        );
+                        ui.set_novels_subtitle(format!("{count} 本").into());
                         if empty {
                             app.publish_novels_state(2, "Pixiv 没有返回结果，换个关键词试试");
                         } else {
@@ -1285,6 +1283,18 @@ impl App {
             app.publish_novel_view();
             return;
         }
+        {
+            let mut app = shared.borrow_mut();
+            if app.adopt_demo_novel(id).is_some() {
+                return;
+            }
+            if forced_demo() {
+                app.novel.view.state = 2;
+                app.novel.view.message = "演示目录中没有可阅读的正文".into();
+                app.publish_novel_view();
+                return;
+            }
+        }
         let client = shared.borrow().client.clone();
         let Some(client) = client else {
             let mut app = shared.borrow_mut();
@@ -1323,6 +1333,40 @@ impl App {
                 }
             });
         });
+    }
+
+    fn adopt_demo_novel(&mut self, id: u64) -> Option<Novel> {
+        if self.mode != Mode::Demo {
+            return None;
+        }
+        let novel = self.demo.novel(Id(id))?;
+        let percent = stored_novel_progress(&self.store, id)
+            .as_ref()
+            .map_or(0.0, |progress| progress.percent);
+        self.novel.ratio = percent;
+        self.adopt_novel(novel.clone(), percent);
+        if let Some(nav) = &novel.series {
+            let info = self.demo.novel_series(nav.id);
+            let chapters = self
+                .demo
+                .novel_chapters(nav.id)
+                .into_iter()
+                .enumerate()
+                .map(|(index, chapter)| {
+                    let summary = chapter.summary;
+                    SeriesChapter {
+                        id: summary.id,
+                        title: summary.title,
+                        order: u32::try_from(index + 1).unwrap_or(u32::MAX),
+                        cover: summary.cover,
+                        character_count: summary.character_count,
+                        reading_time: summary.reading_time,
+                    }
+                })
+                .collect();
+            self.adopt_novel_series(info, chapters);
+        }
+        Some(novel)
     }
 
     /// Adopt a loaded novel into the landing page state.
@@ -1424,39 +1468,17 @@ impl App {
                 let Ok(mut app) = shared.try_borrow_mut() else {
                     return;
                 };
-                if let Ok(info) = info {
-                    app.novel.series = Some(info);
-                }
-                match chapters {
-                    Ok(list) => {
-                        let current = app.novel.novel.as_ref().map(|novel| novel.id.get());
-                        app.novel.chapter_ids =
-                            list.iter().map(|chapter| chapter.id.get()).collect();
-                        app.novel.chapter_index = current
-                            .and_then(|id| {
-                                app.novel.chapter_ids.iter().position(|known| *known == id)
-                            })
-                            .unwrap_or(0);
-                        let rows: Vec<NovelChapter> = list
-                            .iter()
-                            .map(|chapter| chapter_row(chapter, current))
-                            .collect();
-                        app.novel.chapters.set_vec(rows);
-                        app.novel.view.chapters_state = 0;
-                        app.novel.view.chapters_message = "".into();
-                        if let Some(info) = app.novel.series.clone() {
-                            app.novel.view.series_title = info.title.clone().into();
-                            app.novel.view.series_meta = format!(
-                                "共 {} 章 · {} · {}",
-                                info.total,
-                                characters_label(info.total_characters),
-                                reading_label(info.total_reading_time)
-                            )
-                            .into();
-                        }
-                        app.publish_novel_view();
-                    }
+                let info = match info {
+                    Ok(info) => Some(info),
                     Err(error) => {
+                        tracing::debug!(%error, %series, "novel series metadata unavailable");
+                        None
+                    }
+                };
+                match chapters {
+                    Ok(list) => app.adopt_novel_series(info, list),
+                    Err(error) => {
+                        app.novel.series = info;
                         app.novel.view.chapters_state = 3;
                         app.novel.view.chapters_message = novel_error_text(&error).into();
                         app.publish_novel_view();
@@ -1464,6 +1486,34 @@ impl App {
                 }
             });
         });
+    }
+
+    fn adopt_novel_series(&mut self, info: Option<NovelSeries>, chapters: Vec<SeriesChapter>) {
+        let current = self.novel.novel.as_ref().map(|novel| novel.id.get());
+        self.novel.chapter_ids = chapters.iter().map(|chapter| chapter.id.get()).collect();
+        self.novel.chapter_index = current
+            .and_then(|id| self.novel.chapter_ids.iter().position(|known| *known == id))
+            .unwrap_or(0);
+        self.novel.chapters.set_vec(
+            chapters
+                .iter()
+                .map(|chapter| chapter_row(chapter, current))
+                .collect::<Vec<_>>(),
+        );
+        self.novel.view.chapters_state = 0;
+        self.novel.view.chapters_message = "".into();
+        if let Some(info) = info {
+            self.novel.view.series_title = info.title.clone().into();
+            self.novel.view.series_meta = format!(
+                "共 {} 章 · {} · {}",
+                info.total,
+                characters_label(info.total_characters),
+                reading_label(info.total_reading_time)
+            )
+            .into();
+            self.novel.series = Some(info);
+        }
+        self.publish_novel_view();
     }
 
     /// Push the landing-page value to Slint.
@@ -1541,6 +1591,20 @@ impl App {
             app.adopt_novel(novel.clone(), ratio);
             app.adopt_document(&novel);
             return;
+        }
+        {
+            let mut app = shared.borrow_mut();
+            if let Some(novel) = app.adopt_demo_novel(id) {
+                app.novel.reader_novel = Some(id);
+                app.adopt_document(&novel);
+                return;
+            }
+            if forced_demo() {
+                app.novel.reader.state = 3;
+                app.novel.reader.message = "演示目录中没有可阅读的正文".into();
+                app.publish_reader();
+                return;
+            }
         }
         let client = shared.borrow().client.clone();
         let Some(client) = client else {
@@ -1764,6 +1828,10 @@ impl App {
 
     /// Remember where the reader is, and write it out if it is due.
     pub(crate) fn reader_progress(&mut self, ratio: f32) {
+        if self.page != Destination::NovelReader || self.novel.reader_novel != self.route.novel_id()
+        {
+            return;
+        }
         self.novel.ratio = ratio.clamp(0.0, 1.0);
         self.save_progress(false);
     }

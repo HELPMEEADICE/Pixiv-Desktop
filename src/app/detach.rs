@@ -81,6 +81,10 @@ fn detach_on_detail_reload_image(ui: &AppWindow) {
 fn detach_on_detail_request_pan(ui: &AppWindow) {
     ui.on_detail_request_pan(|_a, _b, _c, _d| {});
 }
+
+fn detach_on_detail_viewport_changed(ui: &AppWindow) {
+    ui.on_detail_viewport_changed(|_a, _b| {});
+}
 fn detach_on_detail_request_toggle_zoom(ui: &AppWindow) {
     ui.on_detail_request_toggle_zoom(|_a, _b| {});
 }
@@ -371,6 +375,7 @@ const DETACHERS: &[fn(&AppWindow)] = &[
     detach_on_detail_open_tag,
     detach_on_detail_reload_image,
     detach_on_detail_request_pan,
+    detach_on_detail_viewport_changed,
     detach_on_detail_request_toggle_zoom,
     detach_on_detail_request_zoom,
     detach_on_detail_retry,

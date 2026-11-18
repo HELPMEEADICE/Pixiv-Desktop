@@ -14,7 +14,7 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
-import { AppButton, ButtonKind, IconSlot, TagChip, PageScroll, StateView, StateKind, Skeleton, ProgressBar, LoadingRow, IllustItem, IllustCard, RecommendTagItem, RecommendUserItem, UserCard, BatchBar, Label, BodyText } from "../components.slint";
+import { AppButton, ButtonKind, IconSlot, TagChip, PageScroll, StateView, StateKind, Skeleton, ProgressBar, LoadingRow, IllustItem, IllustCard, RecommendTagItem, RecommendUserItem, UserCard, BatchBar, Label, BodyText, PageHeader } from "../components.slint";
 import { ArtworkGrid } from "gallery.slint";
 
 /// A band header: title, one line of provenance, and an optional action.
@@ -193,67 +193,29 @@ export component HomePage inherits Rectangle {
             }
         }
 
-        // ---------------- hero ----------------
-        Rectangle {
-            height: 68px;
-            background: transparent;
+        page-header := PageHeader {
+            title: "为你推荐";
+            subtitle: root.source-note;
 
-            HorizontalLayout {
-                spacing: Theme.space-4;
+            if root.count-label != "" : Label {
+                role: TextRole.Small;
+                text: root.count-label;
+                color: Theme.text-secondary;
+            }
 
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 2px;
-                    horizontal-stretch: 1;
+            AppButton {
+                label: "换一批";
+                icon: "refresh";
+                row-height: page-header.command-height;
+                clicked => { root.refresh(); }
+            }
 
-                    HorizontalLayout {
-                        spacing: Theme.space-2;
-                        alignment: start;
-                        IconSlot {
-                            name: "sparkle";
-                            slot: Theme.icon-size-lg;
-                            tint: Theme.accent-fill;
-                        }
-                        Label {
-                            role: TextRole.Page;
-                            emphasis: Emphasis.Semibold;
-                            text: "为你推荐";
-                            color: Theme.text;
-                        }
-                        if root.count-label != "" : Label {
-                            role: TextRole.Small;
-                            text: root.count-label;
-                            color: Theme.text-tertiary;
-                        }
-                    }
-
-                    Text {
-                        text: root.source-note;
-                        color: Theme.text-secondary;
-                        font-size: Theme.font-small;
-                        wrap: word-wrap;
-                    }
-                }
-
-                AppButton {
-                    label: "换一批";
-                    icon: "refresh";
-                    kind: ButtonKind.Secondary;
-                    row-height: 68px;
-                    clicked => { root.refresh(); }
-                }
-
-                // The pointer way into selection mode — the plan's documented fallback
-                // when Ctrl/Shift never arrive in a pointer event. Same shape and same
-                // wording as the gallery page's toggle, so the two pages cannot drift.
-                AppButton {
-                    label: root.selection-mode ? "退出多选" : "多选";
-                    icon: root.selection-mode ? "close" : "check";
-                    kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
-                    compact: true;
-                    row-height: 68px;
-                    clicked => { root.toggle-selection-mode(); }
-                }
+            AppButton {
+                label: root.selection-mode ? "退出多选" : "多选";
+                icon: root.selection-mode ? "close" : "check";
+                kind: root.selection-mode ? ButtonKind.Primary : ButtonKind.Subtle;
+                row-height: page-header.command-height;
+                clicked => { root.toggle-selection-mode(); }
             }
         }
 
@@ -263,7 +225,7 @@ export component HomePage inherits Rectangle {
 
             BandHeader {
                 title: "推荐标签";
-                note: root.tags-state == 3 ? root.tags-message : "点击标签直接搜索";
+                note: root.tags-state == 3 ? root.tags-message : "";
                 glyph: "tag";
                 show-retry: root.tags-state == 3;
                 retry => { root.refresh(); }
@@ -319,13 +281,6 @@ export component HomePage inherits Rectangle {
                     }
                 }
             }
-        }
-
-        // ---------------- for you ----------------
-        BandHeader {
-            title: "为你推荐的作品";
-            note: "Pixiv 按你的收藏与浏览生成，与排行榜无关";
-            glyph: "home";
         }
 
         if root.feed-state == 0 : ArtworkGrid {

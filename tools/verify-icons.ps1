@@ -129,7 +129,7 @@ $report = New-Object System.Collections.Generic.List[string]
 $MinRun = [int]([math]::Max(4, 6 * $scale / 1.5))
 # The shell compacts the pane below 1000 logical px (src/app.rs NARROW_BREAKPOINT).
 $compact = [double]$meta.logicalW -lt 1000
-$railWidth = if ($compact) { 52 } else { 232 }
+$railWidth = if ($compact) { 52 } else { 192 }
 # In compact mode the selected item also draws its 3px leading indicator at the
 # item's left edge (rail padding 8, so 8..11 logical); that is chrome, not the
 # glyph. The scan therefore starts at 12 and ends at 40, which contains the
@@ -179,8 +179,10 @@ function Get-RailNavItems {
     $items = New-Object System.Collections.Generic.List[object]
     $pinned = $false
     $depth = 0
+    $libraryStart = -1
     for ($i = $start; $i -lt $lines.Count; $i++) {
         $code = ($lines[$i] -split '//')[0]
+        if ($code -match '^\s*library-divider\s*:=\s*Divider') { $libraryStart = $items.Count }
         if ($code -match 'vertical-stretch:\s*1') { $pinned = $true }
         # One NavItem block opens on one line, and its body never repeats the name.
         $m = [regex]::Match($code, '(?:if\s+(?<guard>[^:]+?)\s*:\s*)?\bNavItem\s*\{')
@@ -199,6 +201,7 @@ function Get-RailNavItems {
         PlainPinned = @($items | Where-Object { $_.Pinned -and -not $_.Guard }).Count
         Guards      = @($items | Where-Object { $_.Guard } | ForEach-Object { $_.Guard } | Select-Object -Unique)
         Rows        = $items
+        LibraryStart = $libraryStart
     }
 }
 
@@ -265,8 +268,9 @@ if ($tail.Count -ne $expectedTail) {
 # one chain over both is the defect this section replaced.
 for ($i = 1; $i -lt $main.Count; $i++) {
     $d = $main[$i].Center - $main[$i - 1].Center
-    if ([math]::Abs($d - $pitch) -gt $Tolerance) {
-        $failures.Add(("rail main group: pitch between row {0} and row {1} is {2} px, expected {3}" -f ($i - 1), $i, [math]::Round($d, 1), [math]::Round($pitch, 1)))
+    $expectedPitch = $pitch + $(if ($i -eq $rail.LibraryStart) { 3 * $scale } else { 0 })
+    if ([math]::Abs($d - $expectedPitch) -gt $Tolerance) {
+        $failures.Add(("rail main group: pitch between row {0} and row {1} is {2} px, expected {3}" -f ($i - 1), $i, [math]::Round($d, 1), [math]::Round($expectedPitch, 1)))
     }
 }
 

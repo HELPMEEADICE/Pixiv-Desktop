@@ -21,10 +21,7 @@
 # What this file can and cannot decide. It can decide that the five selections are the
 # ones declared below, that every name they use is a destination the shell has or a
 # capture state declared here, and that the budget is keyed by the accessibility set. It
-# cannot decide that a page *renders*: that is the gates' job. The novel pages join the
-# accessibility and layout sets in round eleven and have no measured floor yet, and the
-# pixel baseline does not carry them (G33) - both debts are named below rather than
-# hidden inside a copy of a list.
+# cannot decide that a page *renders*: that is the gates' job.
 
 # $PSScriptRoot is the directory of the file being dot-sourced, so this works from
 # every consumer without a Set-Location of its own.
@@ -116,81 +113,17 @@ $script:PageLaunch = @{
     "novels-results"  = @{ StartPage = "novels"; Fixture = "novels" }
 }
 
-# The three pages the pixel baseline does not carry yet (G33): in the accessibility and
-# layout sets from round eleven, in the capture set once their baselines exist. Deleting
-# this line widens the capture set and turns the visual gate red until that is done,
-# which is the honest order.
-$script:PageUnbaselined = @("novels", "novel", "novel-reader")
-
-# The pages no *measurement* set reaches - not the same list, and until round twelve one
-# variable (PageUncaptured) held both, on the premise that "the two destinations no
-# capture set opens" were detail and user-profile. The visual set and the tracked
-# baselines contradicted half of it: detail-light, detail-dark and the ugoira pair have
-# been photographed since round seven, so detail had a baseline and no accessibility
-# floor and no gap check (G56/E6). The two lists are now separate declarations, and
-# tools/page-set.ps1's Test-PageSetCompleteness fails if a photographed page is in this
-# one.
-#
-# user-profile stays: it has no tracked baseline, no capture state, no launch recipe
-# that opens it without a signed-in account, and no measured floor. Promoting it means
-# measuring it first, which is a decision - and this is where it is written down.
-$script:PageUnmeasured = @("user-profile")
-
-# The three pages the focus gate walks. A full walk costs one capture and one pixel map
-# per stop (G22), so the ring is measured on every stop of one page and a sample on two:
-# the chrome is the same three pages deep, and the number is a budget, not a list.
+# The focus gate samples three destinations. Every destination has a demo launch recipe.
 $script:PageFocus = @("home", "detail", "settings")
 
-<#
-  The page set, or one consumer's selection of it, in the shell's order.
-
-  -Without removes names, -Only keeps them, and the result keeps the order of
-  $PageSet - so a selection is a rule over one list rather than a second copy of it.
-#>
-function Select-Page {
-    param(
-        [string[]]$Without = @(),
-        [string[]]$Only = @()
-    )
-    $out = @()
-    foreach ($page in $script:PageSet) {
-        if ($Only.Count -gt 0 -and -not ($Only -contains $page)) { continue }
-        if ($Without -contains $page) { continue }
-        $out += $page
-    }
-    return $out
-}
-
-<#
-  One consumer's page list.
-
-  `all` is the thirteen destinations. `a11y`, `layout` and `budget` are the same twelve
-  pages - the accessibility budget is keyed by the accessibility set, by definition, and
-  G32 exists because it stopped being true. `detail` joined all three in round twelve
-  (E6): it has been photographed since round seven and had no floor. `focus` is the
-  three the focus gate walks. `visual` is the nine destinations that have a tracked
-  baseline plus the six capture states.
-#>
 function Get-PageSet {
     param(
         [ValidateSet("all", "a11y", "layout", "focus", "visual", "budget")]
         [string]$For = "all"
     )
     switch ($For) {
-        "all" { return @($script:PageSet) }
-        # G56/E6: two exclusions, not one. -Without $PageUnmeasured is a page nothing
-        # measures; -Without $PageUnbaselined is a page the pixel baseline lacks. A
-        # capture set and a measurement set may drop different pages, and merging the
-        # lists is how detail lost its floor.
-        "a11y" { return @(Select-Page -Without $script:PageUnmeasured) }
-        "layout" { return @(Select-Page -Without $script:PageUnmeasured) }
-        "budget" { return @(Select-Page -Without $script:PageUnmeasured) }
-        "focus" { return @(Select-Page -Only $script:PageFocus) }
-        "visual" {
-            $without = @($script:PageUnbaselined) + @($script:PageUnmeasured)
-            $out = @(Select-Page -Without $without)
-            return @($out + @($script:PageState))
-        }
+        "focus" { return @($script:PageSet | Where-Object { $script:PageFocus -contains $_ }) }
+        "visual" { return @($script:PageSet + $script:PageState) }
         default { return @($script:PageSet) }
     }
 }
@@ -313,7 +246,7 @@ function Get-PageListFromText {
      wrote down.
 
   The overrides exist for the negative experiment: tools/selftest-gates.ps1 hands the
-  pre-E6 shape in (-Unmeasured @("detail", "user-profile")) and this function - the
+  pre-E6 shape in (-Unmeasured @("detail")) and this function - the
   shipped one, not a copy - has to name detail.
 #>
 function Test-PageSetCompleteness {
@@ -323,7 +256,7 @@ function Test-PageSetCompleteness {
         [string[]]$A11y       = $null,
         [string[]]$Layout     = $null
     )
-    if ($null -eq $Unmeasured) { $Unmeasured = @($script:PageUnmeasured) }
+    if ($null -eq $Unmeasured) { $Unmeasured = @() }
     if ($null -eq $Visual) { $Visual = @(Get-PageSet -For visual) }
     if ($null -eq $A11y) { $A11y = @(Get-PageSet -For a11y) }
     if ($null -eq $Layout) { $Layout = @(Get-PageSet -For layout) }

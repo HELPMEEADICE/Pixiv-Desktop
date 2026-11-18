@@ -527,6 +527,7 @@ export component AppWindow inherits Window {
     callback detail-select-page(int);
     callback detail-request-zoom(float, float, float, float, float);
     callback detail-request-pan(float, float, float, float);
+    callback detail-viewport-changed(length, length);
     callback detail-request-toggle-zoom(float, float);
     callback detail-reload-image();
     /// F2: 「显示」 on a masked work.
@@ -579,7 +580,7 @@ export component AppWindow inherits Window {
     in property <int> novels-state: 1;
     in property <string> novels-message: "";
     in property <string> novels-title: "小说";
-    in property <string> novels-subtitle: "Pixiv 小说搜索与本机阅读记录";
+    in property <string> novels-subtitle: "";
     in-out property <string> novel-query: "";
     callback novel-search(string);
     callback novel-open(string);
@@ -859,6 +860,8 @@ export component AppWindow inherits Window {
 
                         search-field := TextField {
                             height: Theme.control-height;
+                            width: min(parent.width, Theme.search-width-max);
+                            x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
                             placeholder: "搜索插画、漫画、动图或标签…  (Ctrl+F)";
                             leading-icon: "search";
@@ -983,7 +986,7 @@ export component AppWindow inherits Window {
                 // ---- NavigationView pane ----
                 rail-pane := Rectangle {
                     width: root.rail-compact ? Theme.rail-width-compact : Theme.rail-width;
-                    // The one place the rail moves: 232 <-> 52 is a width change,
+                    // The one place the rail moves: 192 <-> 52 is a width change,
                     // and letting it happen between two frames is what made the
                     // pane read as a redraw rather than a control. `motion` (150ms)
                     // is the longest duration the style contract allows and this is
@@ -1001,7 +1004,7 @@ export component AppWindow inherits Window {
                         padding-bottom: Theme.space-2;
                         padding-left: Theme.space-2;
                         padding-right: Theme.space-2;
-                        spacing: 2px;
+                        spacing: Theme.rail-row-gap;
 
                         nav-home := NavItem {
                             icon: "home"; label: "首页"; compact: root.rail-compact;
@@ -1039,6 +1042,7 @@ export component AppWindow inherits Window {
                             clicked => { root.navigate(Destination.Novels); }
                             move-focus(d) => { root.move-nav-focus(4, d); }
                         }
+                        library-divider := Divider { }
                         nav-bookmarks := NavItem {
                             icon: "star"; label: "收藏"; compact: root.rail-compact;
                             selected: root.page == Destination.Bookmarks;
@@ -1094,7 +1098,7 @@ export component AppWindow inherits Window {
                 // narrow content is still full width and no page needs a per-page
                 // anchor to compensate.
                 // It is stated against the *pane* rather than against `rail-compact`,
-                // so the host follows `rail-pane` while the pane's own 232 <-> 52
+                // so the host follows `rail-pane` while the pane's own 192 <-> 52
                 // animation runs instead of the pane sliding over the page for a
                 // frame and a half.
                 Rectangle {
@@ -1176,13 +1180,15 @@ export component AppWindow inherits Window {
                         subtitle: root.page == Destination.Discovery
                             ? "Pixiv 推荐引擎与推荐画师，与排行榜无关"
                             : root.page == Destination.Ranking ? "Pixiv 官方榜单，可切换统计周期"
-                            : root.page == Destination.Search ? "按关键词查找作品，回车提交"
+                            : root.page == Destination.Search ? ""
                             : root.page == Destination.Bookmarks ? "你收藏的作品（需要登录）"
                             : "本机记录过的作品";
                         message: root.grid-message;
                         state-title: root.grid-state-title;
                         state-glyph: root.grid-state-glyph;
                         action-label: root.grid-action-label;
+                        offer-search: root.page == Destination.Search && root.search-word == "";
+                        focus-search => { root.focus-search(); }
                         tags: root.grid-tags;
                         active-tag: root.grid-active-tag;
                         count-label: root.grid-count-label;
@@ -1335,6 +1341,7 @@ export component AppWindow inherits Window {
                         }
                         back => { root.reader-back(); }
                         toggle-settings => { root.reader-toggle-settings(); }
+                        restore-page-focus => { shortcuts.focus(); }
                         toggle-chrome => { root.reader-toggle-chrome(); }
                         toggle-fullscreen => { root.toggle-fullscreen(); }
                         prev-chapter => { root.reader-chapter(-1); }
@@ -1377,10 +1384,10 @@ export component AppWindow inherits Window {
                         state: root.detail-state;
                         message: root.detail-message;
                         pages: root.detail-pages;
-                        current-page <=> root.detail-page-index;
-                        zoom <=> root.detail-zoom;
-                        pan-x <=> root.detail-pan-x;
-                        pan-y <=> root.detail-pan-y;
+                        current-page: root.detail-page-index;
+                        zoom: root.detail-zoom;
+                        pan-x: root.detail-pan-x;
+                        pan-y: root.detail-pan-y;
                         fit-mode: root.detail-fit-mode;
                         masked: root.detail-masked;
                         sensitivity: root.detail-sensitivity;
@@ -1399,6 +1406,7 @@ export component AppWindow inherits Window {
                         select-page(i) => { root.detail-select-page(i); }
                         request-zoom(px, py, dy, w, h) => { root.detail-request-zoom(px, py, dy, w, h); }
                         request-pan(dx, dy, w, h) => { root.detail-request-pan(dx, dy, w, h); }
+                        viewport-changed(w, h) => { root.detail-viewport-changed(w, h); }
                         request-toggle-zoom(px, py) => { root.detail-request-toggle-zoom(px, py); }
                         reload-image => { root.detail-reload-image(); }
                         set-fit-mode(m) => { root.detail-set-fit-mode(m); }
@@ -1683,9 +1691,9 @@ export component AppWindow inherits Window {
     }
 
     if root.suggest-visible : Rectangle {
-        x: search-host.absolute-position.x;
-        y: search-host.absolute-position.y + search-host.height - 2px;
-        width: max(240px, search-host.width);
+        x: search-field.absolute-position.x;
+        y: search-field.absolute-position.y + search-field.height + Theme.space-1;
+        width: search-field.width;
         // U6: still the 392 px ceiling, now a *view* onto the list instead of a pair of
         // scissors. Nine rows are 306 px, twelve are 408; before this the panel drew
         // all of them into a 392 px box with `clip: true` and there was no way to

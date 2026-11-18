@@ -22,7 +22,7 @@ param(
     [string]$Size  = "1140x886",
     [string]$Out   = "docs/screenshots/shot.png",
     [string]$Exe   = "target\debug\pixiv-desktop.exe",
-    [int]$WaitMs   = 4500,
+    [int]$WaitMs   = 0,                # optional extra startup time for a slow scenario
     [switch]$Dark,
     [switch]$Trace,
     [switch]$WholeWindow,
@@ -74,14 +74,20 @@ if ($Dark) { $env:PIXIV_DESKTOP_THEME = "dark" } else { Remove-Item Env:\PIXIV_D
 $log = [System.IO.Path]::GetTempFileName()
 $proc = Start-Process -FilePath $Exe -PassThru -RedirectStandardError $log
 try {
-    Start-Sleep -Milliseconds $WaitMs
-    $proc.Refresh()
-    if ($proc.HasExited) { Write-Host "exited early ($($proc.ExitCode))" -ForegroundColor Red; exit 1 }
-    for ($i = 0; $i -lt 40 -and $proc.MainWindowHandle -eq [IntPtr]::Zero; $i++) {
-        Start-Sleep -Milliseconds 250; $proc.Refresh()
-    }
+    if ($WaitMs -gt 0) { Start-Sleep -Milliseconds $WaitMs }
+    # Winit may expose a hidden event-target window before the app window.
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        Start-Sleep -Milliseconds 250
+        $proc.Refresh()
+        if ($proc.HasExited) { Write-Host "exited early ($($proc.ExitCode))" -ForegroundColor Red; exit 1 }
+        if ($proc.MainWindowHandle -ne [IntPtr]::Zero -and $proc.MainWindowTitle -eq "Pixiv Desktop") { break }
+    } while ((Get-Date) -lt $deadline)
     $hwnd = $proc.MainWindowHandle
-    if ($hwnd -eq [IntPtr]::Zero) { Write-Host "no window" -ForegroundColor Red; exit 1 }
+    if ($hwnd -eq [IntPtr]::Zero -or $proc.MainWindowTitle -ne "Pixiv Desktop") {
+        Write-Host "no Pixiv Desktop window" -ForegroundColor Red
+        exit 1
+    }
 
     # Restoring first is what makes the platform deliver the resize: a resize
     # applied to a never-restored window is dropped by the backend.

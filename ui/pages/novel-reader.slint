@@ -204,9 +204,35 @@ component ReaderSettings inherits Rectangle {
 
     background: Theme.flyout;
 
-    settings-scroll := ScrollView {
+    settings-header := HorizontalLayout {
+        x: 0px;
+        y: 0px;
         width: 100%;
-        height: 100%;
+        height: Theme.reader-bar-height + Theme.space-2;
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-2;
+
+        Label {
+            role: TextRole.Title;
+            emphasis: Emphasis.Semibold;
+            text: "阅读设置";
+            color: Theme.text;
+            horizontal-stretch: 1;
+        }
+        IconButton {
+            icon: "close";
+            tip: "关闭阅读设置";
+            row-height: settings-header.height;
+            clicked => { root.dismiss(); }
+        }
+    }
+
+    Divider { y: settings-header.height; width: 100%; }
+
+    settings-scroll := ScrollView {
+        y: settings-header.height + 1px;
+        width: 100%;
+        height: max(0px, root.height - self.y);
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
         vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
 
@@ -218,14 +244,7 @@ component ReaderSettings inherits Rectangle {
             padding-bottom: Theme.space-6;
             spacing: Theme.space-3;
 
-            Rectangle { height: Theme.space-3; background: transparent; }
-
-            Label {
-                role: TextRole.Title;
-                emphasis: Emphasis.Semibold;
-                text: "阅读设置";
-                color: Theme.text;
-            }
+            Rectangle { height: Theme.space-2; }
 
             // ---- preview: the real type, at the real size ----
             Rectangle {
@@ -673,18 +692,17 @@ component ReaderBody inherits Rectangle {
         width: root.width;
         height: root.height;
         visible: root.state == 1;
-        background: root.paper;
+        background: Theme.canvas;
         StateView {
             kind: StateKind.Loading;
             title: "正在载入正文…";
-            description: "Pixiv /ajax/novel/{id} 的 content 字段";
         }
     }
     Rectangle {
         width: root.width;
         height: root.height;
         visible: root.state == 3;
-        background: root.paper;
+        background: Theme.canvas;
         StateView {
             kind: StateKind.Error;
             title: "正文载入失败";
@@ -785,12 +803,27 @@ export component NovelReaderPage inherits Rectangle {
     // Any change of position reports itself, including a programmatic one (the
     // restore, PageUp/PageDown, Home/End). Without this the shell's progress readout
     // only moved when the user scrolled with the wheel.
-    changed progress => { root.scrolled(root.scroll-y, root.progress); }
+    changed progress => {
+        if (root.visible && root.view.state == 0 && root.restore-ratio < 0.0) {
+            root.scrolled(root.scroll-y, root.progress);
+        }
+    }
 
     // ---- chrome ----
     callback back();
     callback toggle-settings();
+    callback restore-page-focus();
     callback toggle-chrome();
+    property <bool> settings-open: root.view.settings-open;
+    changed settings-open => {
+        if (!root.settings-open && root.visible) {
+            if (root.view.chrome-visible && root.view.state == 0) {
+                settings-toggle.take-focus();
+            } else {
+                root.restore-page-focus();
+            }
+        }
+    }
     callback toggle-fullscreen();
     callback prev-chapter();
     callback next-chapter();
@@ -928,10 +961,9 @@ export component NovelReaderPage inherits Rectangle {
                 text: Math.round(root.progress * 100) + "%";
                 color: Theme.text-secondary;
             }
-            AppButton {
-                kind: ButtonKind.Subtle;
-                label: "Aa";
-                compact: true;
+            settings-toggle := IconButton {
+                icon: "font";
+                tip: "阅读设置";
                 enabled: !root.view.settings-open;
                 row-height: Theme.reader-bar-height;
                 clicked => { root.toggle-settings(); }
@@ -1006,9 +1038,8 @@ export component NovelReaderPage inherits Rectangle {
         background: transparent;
 
         scrim := TouchArea {
-            // The panel's dismissal backdrop: pointer-only until now, and nameless.
             accessible-role: AccessibleRole.button;
-            accessible-label: "关闭阅读设置";
+            accessible-label: "关闭阅读设置（侧板外）";
             accessible-action-default => { root.toggle-settings(); }
             clicked => { root.toggle-settings(); }
         }

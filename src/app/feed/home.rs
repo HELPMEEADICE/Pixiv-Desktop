@@ -755,16 +755,9 @@ impl App {
         ui.set_home_artists_message(self.home.artists_message.clone().into());
 
         let note = match self.mode {
-            Mode::Demo => {
-                "演示模式：以下内容来自本地演示目录，标记为 [DEMO]，不会访问 Pixiv".to_string()
-            }
-            Mode::Real if !self.session.is_authenticated() => {
-                "未登录：Pixiv 返回的是公共推荐，不是按你生成的".to_string()
-            }
-            Mode::Real => format!(
-                "{} · 推荐来自 /ajax/street/for_you",
-                FeedSource::ForYou.note()
-            ),
+            Mode::Demo => "本地演示作品",
+            Mode::Real if !self.session.is_authenticated() => "未登录 · 公开推荐",
+            Mode::Real => "",
         };
         ui.set_home_source_note(note.into());
     }

@@ -15,7 +15,7 @@
 // before it is trusted.
 
 import { Theme, Type, ThemeMode, Emphasis, TextRole } from "../theme.slint";
-import { AppButton, ButtonKind, ToggleSwitch, Divider, Badge, TextField, InfoBar, InfoKind, PageScroll, SettingsCard, SettingsRow, SegmentedControl, IconSlot, Label, BodyText } from "../components.slint";
+import { AppButton, ButtonKind, ToggleSwitch, Divider, Badge, TextField, InfoBar, InfoKind, PageScroll, SettingsCard, SettingsRow, SegmentedControl, IconSlot, Label, BodyText, PageHeader } from "../components.slint";
 
 /// The confirmation a destructive row raises (§2.1 U22).
 ///
@@ -121,40 +121,81 @@ export component SettingsPage inherits Rectangle {
     // alive while another page is shown - `visible` is switched, the element is
     // not destroyed - so the bar was still waiting when the user came back, asking
     // about an intention they had already dropped.
-    changed visible => { root.confirm = ""; }
+    changed visible => {
+        root.confirm = "";
+        if (root.visible) { page.scroll-y = 0px; }
+    }
 
-    page := PageScroll {
+    function jump-to(top: length) {
+        page.scroll-y = max(-max(0px, page.body-height - page.viewport-height), page.padding-y - top);
+    }
+
+    header := VerticalLayout {
+        x: 0px;
+        y: 0px;
         width: 100%;
-        height: 100%;
-        spacing: Theme.space-3;
+        height: self.preferred-height;
+        padding-left: Theme.page-padding;
+        padding-right: Theme.page-padding;
+        padding-top: Theme.space-3;
+        spacing: Theme.space-2;
 
-        // ---- title ----
-        VerticalLayout {
-            spacing: Theme.space-1;
-            padding-top: Theme.space-1;
-            Label {
-                role: TextRole.Page;
-                emphasis: Emphasis.Semibold;
-                text: "设置";
-                color: Theme.text;
+        PageHeader { title: "设置"; }
+
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+
+            AppButton {
+                label: "账户";
+                kind: ButtonKind.Subtle;
+                clicked => { root.jump-to(account.y); account-control.take-focus(); }
             }
-            Text {
-                text: "账户、外观、缓存、下载与本地数据";
-                color: Theme.text-tertiary;
-                font-size: Theme.font-small;
-                wrap: word-wrap;
+            AppButton {
+                label: "外观";
+                kind: ButtonKind.Subtle;
+                clicked => { root.jump-to(appearance.y); theme-control.take-focus(); }
+            }
+            AppButton {
+                label: "图片与缓存";
+                kind: ButtonKind.Subtle;
+                clicked => { root.jump-to(cache.y); cache-control.take-focus(); }
+            }
+            AppButton {
+                label: "下载";
+                kind: ButtonKind.Subtle;
+                clicked => { root.jump-to(downloads.y); directory-control.take-focus(); }
+            }
+            AppButton {
+                label: "数据与隐私";
+                kind: ButtonKind.Subtle;
+                clicked => { root.jump-to(privacy.y); demo-control.take-focus(); }
+            }
+            AppButton {
+                label: "关于";
+                kind: ButtonKind.Subtle;
+                clicked => { root.jump-to(about.y); about-control.take-focus(); }
             }
         }
+
+        Divider { }
+    }
+
+    page := PageScroll {
+        y: header.height;
+        width: 100%;
+        height: max(0px, root.height - header.height);
+        spacing: Theme.space-3;
 
         // Notices the *shell* raises are rendered by main.slint so they are visible on
         // every page. A destructive confirmation is not a notice: it belongs to the row
         // that raised it (U22) and is drawn there, immediately under it.
 
         // ---- 账户 ----
-        SettingsCard {
+        account := SettingsCard {
             title: "账户";
             icon: "key";
-            description: "本应用不提供登录表单，也不会接触你的密码。请用系统浏览器登录 Pixiv，再把开发者工具中的 PHPSESSID 值粘贴到下方；会话只保存在本机。";
+            description: "在浏览器登录 Pixiv，再将开发者工具中的 PHPSESSID 值粘贴到下方。会话仅保存在本机。";
 
             InfoBar {
                 kind: root.authenticated ? InfoKind.Success : InfoKind.Warning;
@@ -168,7 +209,7 @@ export component SettingsPage inherits Rectangle {
                 spacing: Theme.space-2;
                 alignment: start;
 
-                AppButton {
+                account-control := AppButton {
                     label: "在浏览器中登录";
                     icon: "open";
                     kind: ButtonKind.Primary;
@@ -204,7 +245,7 @@ export component SettingsPage inherits Rectangle {
         }
 
         // ---- 外观 ----
-        SettingsCard {
+        appearance := SettingsCard {
             title: "外观";
             icon: "light";
             description: "主题跟随 Windows 的“应用模式”设置，也可以在这里固定为浅色或深色。切换立即生效。";
@@ -226,7 +267,7 @@ export component SettingsPage inherits Rectangle {
                 HorizontalLayout {
                     spacing: Theme.space-2;
                     alignment: start;
-                    SegmentedControl {
+                    theme-control := SegmentedControl {
                         // Without a label the group announced as an unnamed radio
                         // group; the switch below had the same gap.
                         label: "主题";
@@ -243,7 +284,7 @@ export component SettingsPage inherits Rectangle {
         }
 
         // ---- 图片与缓存 ----
-        SettingsCard {
+        cache := SettingsCard {
             title: "图片与缓存";
             icon: "grid";
             description: "缩略图与原图分级缓存：网格只取卡片尺寸的缩略图，只有看大图时才请求原图。";
@@ -251,7 +292,7 @@ export component SettingsPage inherits Rectangle {
                 label: "缓存占用";
                 available-width: page.body-width;
                 hint: root.cache-summary;
-                AppButton {
+                cache-control := AppButton {
                     label: "清理缓存";
                     icon: "delete";
                     clicked => { root.confirm = "cache"; }
@@ -293,7 +334,7 @@ export component SettingsPage inherits Rectangle {
         }
 
         // ---- 下载 ----
-        SettingsCard {
+        downloads := SettingsCard {
             title: "下载";
             icon: "downloads";
             description: "仅用于个人离线浏览你在账号内已经可以查看的作品。";
@@ -301,7 +342,7 @@ export component SettingsPage inherits Rectangle {
                 label: "保存目录";
                 available-width: page.body-width;
                 hint: root.download-directory;
-                AppButton {
+                directory-control := AppButton {
                     label: "更改…";
                     icon: "folder";
                     clicked => { root.choose-directory(); }
@@ -340,7 +381,7 @@ export component SettingsPage inherits Rectangle {
         }
 
         // ---- 数据与隐私 ----
-        SettingsCard {
+        privacy := SettingsCard {
             title: "数据与隐私";
             icon: "shield";
             description: "所有本地数据都在你自己的磁盘上：SQLite 数据库、缩略图缓存与会话文件。没有任何遥测。";
@@ -348,7 +389,7 @@ export component SettingsPage inherits Rectangle {
                 label: "演示模式";
                 available-width: page.body-width;
                 hint: "使用本地生成的示例数据，作品标题带 [DEMO] 前缀，完全离线";
-                ToggleSwitch {
+                demo-control := ToggleSwitch {
                     label: "演示模式";
                     checked: root.demo-mode;
                     toggled(v) => { root.toggle-demo(v); }
@@ -408,7 +449,7 @@ export component SettingsPage inherits Rectangle {
         }
 
         // ---- 关于 ----
-        SettingsCard {
+        about := SettingsCard {
             title: "关于";
             icon: "info";
             HorizontalLayout {
@@ -429,7 +470,7 @@ export component SettingsPage inherits Rectangle {
             }
             HorizontalLayout {
                 spacing: Theme.space-2;
-                AppButton {
+                about-control := AppButton {
                     label: "打开项目主页";
                     icon: "open";
                     kind: ButtonKind.Subtle;

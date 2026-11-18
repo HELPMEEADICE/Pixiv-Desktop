@@ -11,7 +11,7 @@
 // cell, so the badge, the buttons and the state glyph all share one centre line.
 
 import { Theme, Type, Emphasis, TextRole } from "../theme.slint";
-import { AppButton, IconButton, ButtonKind, Divider, StateView, StateKind, Badge, InfoBar, InfoKind, PageScroll, ProgressBar, SettingsCard, SectionHeader, IconPresenter, IconSlot, Label, BodyText } from "../components.slint";
+import { AppButton, IconButton, ButtonKind, Divider, StateView, StateKind, Badge, InfoBar, InfoKind, PageScroll, ProgressBar, SettingsCard, SettingsRow, SectionHeader, IconPresenter, IconSlot, Label, BodyText, PageHeader } from "../components.slint";
 
 export struct DownloadRow {
     id: int,
@@ -393,153 +393,100 @@ export component DownloadsPage inherits Rectangle {
         height: 100%;
         spacing: Theme.space-3;
 
-        // ---- header ----
-        header-block := VerticalLayout {
-            spacing: Theme.space-1;
-            padding-top: Theme.space-1;
+        header-block := PageHeader {
+            title: "下载管理";
+            subtitle: "进行中 " + root.active-count + " · 已完成 " + root.done-count
+                + " 项 · 失败 " + root.failed-count;
+        }
+
+        queue-card := SettingsCard {
+            title: "下载队列";
+            icon: "downloads";
 
             HorizontalLayout {
                 spacing: Theme.space-3;
-                alignment: space-between;
+                height: Theme.control-height-sm;
 
-                Label {
-                    role: TextRole.Page;
-                    emphasis: Emphasis.Semibold;
-                    text: "下载管理";
-                    color: Theme.text;
-                }
-
-                Label {
-                    role: TextRole.Small;
-                    text: "进行中 " + root.active-count + " · 已完成 " + root.done-count + " 项"
-                        + " · 失败 " + root.failed-count;
-                    color: Theme.text-tertiary;
-                }
-            }
-
-            // ---- F5: total progress, throughput, pause-all ----
-            // One 32 px row under the heading. The bar is wrapped in a full-height cell
-            // because `ProgressBar` is 3 px and a fixed-size child of a horizontal layout
-            // is aligned to the *start* of the cross axis — the defect this file already
-            // records twice at the top and the reason every control here states a
-            // `row-height`.
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                alignment: start;
-                height: Theme.control-height;
-
-                Rectangle {
+                ProgressBar {
                     width: 120px;
-                    height: 100%;
-                    ProgressBar {
-                        width: 120px;
-                        y: (parent.height - self.height) / 2;
-                        progress: root.queue-progress;
-                    }
+                    y: (parent.height - self.height) / 2;
+                    progress: root.queue-progress;
                 }
 
                 Label {
                     role: TextRole.Small;
-                    // "页", because the row counter three lines up counts rows: two
-                    // numbers labelled the same thing on one screen is a defect even
-                    // when both are true.
                     text: root.queue-total > 0
                         ? ("已下载 " + root.queue-done + " / " + root.queue-total + " 页")
                         : "队列为空";
                     color: Theme.text-secondary;
                 }
 
-                // Empty while unknown: a throughput line that reads "0 B/s" when the
-                // window has no samples yet is a lie about a stalled queue.
                 if root.throughput != "" : Label {
                     role: TextRole.Small;
                     text: root.throughput;
-                    color: Theme.text-tertiary;
-                }
-
-                // The paused chip takes the `on-accent` pair: it is the only label in
-                // this page drawn on `accent-fill`, and U23 is the record of what
-                // white-on-accent costs in dark mode.
-                if root.queue-paused : Rectangle {
-                    width: paused-badge.width;
-                    height: 100%;
-
-                    paused-badge := Badge {
-                        y: (parent.height - self.height) / 2;
-                        label: "已暂停";
-                        fill: Theme.accent-fill;
-                        ink: Theme.on-accent;
-                    }
+                    color: Theme.text-secondary;
                 }
 
                 Rectangle { horizontal-stretch: 1; }
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
 
                 AppButton {
                     label: root.queue-paused ? "全部继续" : "全部暂停";
                     icon: root.queue-paused ? "play" : "pause";
                     kind: root.queue-paused ? ButtonKind.Primary : ButtonKind.Secondary;
-                    compact: true;
-                    row-height: Theme.control-height;
                     enabled: root.active-count > 0 || root.queue-paused;
                     clicked => { root.toggle-pause-all(); }
                 }
+                AppButton {
+                    label: "重试全部失败";
+                    icon: "refresh";
+                    enabled: root.failed-count > 0;
+                    clicked => { root.retry-all(); }
+                }
+                AppButton {
+                    label: "清空已完成";
+                    icon: "delete";
+                    kind: ButtonKind.Subtle;
+                    enabled: root.done-count > 0;
+                    clicked => { root.clear-finished(); }
+                }
             }
         }
 
-        // ---- command bar ----
-        // `row-height` on each button keeps the whole strip on one centre line
-        // even though the buttons are 32px and the strip is taller.
-        command-bar := HorizontalLayout {
-            spacing: Theme.space-2;
-            alignment: start;
-            height: Theme.control-height;
-
-            AppButton {
-                label: "选择文件夹";
-                icon: "folder";
-                kind: ButtonKind.Primary;
-                clicked => { root.choose-directory(); }
-            }
-            AppButton {
-                label: "打开文件夹";
-                icon: "open";
-                clicked => { root.open-folder(); }
-            }
-            AppButton {
-                label: "重试全部失败";
-                icon: "refresh";
-                enabled: root.failed-count > 0;
-                clicked => { root.retry-all(); }
-            }
-            AppButton {
-                label: "清空已完成";
-                icon: "delete";
-                kind: ButtonKind.Subtle;
-                enabled: root.done-count > 0;
-                clicked => { root.clear-finished(); }
-            }
-        }
-
-        // ---- destination ----
         destination-card := SettingsCard {
             title: "保存位置";
-            icon: "downloads";
-            description: "仅用于个人离线浏览你在账号内已经可以查看的作品。";
+            icon: "folder";
 
-            VerticalLayout {
-                spacing: Theme.space-1;
-                Text {
-                    text: root.directory;
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-small;
-                    wrap: word-wrap;
+            SettingsRow {
+                label: "下载目录";
+                hint: root.directory;
+                control-width: 228px;
+                available-width: page.body-width;
+
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    alignment: end;
+                    AppButton {
+                        label: "更改…";
+                        icon: "folder";
+                        clicked => { root.choose-directory(); }
+                    }
+                    AppButton {
+                        label: "打开文件夹";
+                        icon: "open";
+                        clicked => { root.open-folder(); }
+                    }
                 }
-                Text {
-                    text: "文件名模板：" + root.template-text;
-                    color: Theme.text-tertiary;
-                    font-size: Theme.font-caption;
-                    wrap: word-wrap;
-                }
+            }
+
+            BodyText {
+                role: TextRole.Small;
+                text: "文件名模板：" + root.template-text;
+                color: Theme.text-secondary;
             }
         }
 
@@ -551,7 +498,7 @@ export component DownloadsPage inherits Rectangle {
                 200px,
                 page.viewport-height
                     - header-block.preferred-height
-                    - command-bar.preferred-height
+                    - queue-card.preferred-height
                     - destination-card.preferred-height
                     - page.spacing * 3
                     - page.padding-y * 2

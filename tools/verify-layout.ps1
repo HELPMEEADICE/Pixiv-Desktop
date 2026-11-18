@@ -30,7 +30,7 @@ param(
     # G32: empty means "ask tools/page-set.ps1 for the layout selection", which is resolved
     # below; an explicit -Pages, including an empty one, still wins.
     [string[]]$Pages = @(),
-    [string[]]$Sizes = @("maximize", "1024x768", "800x600"),
+    [string[]]$Sizes = @("maximize", "1024x768", "800x600", "720x520"),
     [string]$Exe     = "target\debug\pixiv-desktop.exe",
     [string]$OutDir  = "docs/screenshots/verify",
     [switch]$Dark,
@@ -42,10 +42,10 @@ $ErrorActionPreference = "Stop"
 # G32: the page list and each page's launch recipe come from tools/page-set.ps1, so this
 # matrix cannot walk a page set the verifiers and the budget do not share.
 . (Join-Path $PSScriptRoot "page-set.ps1") | Out-Null
+$env:PIXIV_DESKTOP_DEMO = "1"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-# G32: eleven pages, three of them new this round - the novel pages the shell has carried
-# since round ten and no capture set named. -Sizes is unrelated and keeps its three.
+# G32: the shared page set supplies every destination.
 if (-not $PSBoundParameters.ContainsKey("Pages")) { $Pages = @(Get-PageSet -For layout) }
 $Pages = @($Pages | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Sizes = @($Sizes | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })

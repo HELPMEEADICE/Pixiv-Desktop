@@ -142,8 +142,15 @@ export global Theme {
 
     // ---- fixed geometry ------------------------------------------------
     out property <length> topbar-height: 48px;
-    out property <length> rail-width: 232px;
+    out property <length> rail-width: 192px;
     out property <length> rail-width-compact: 52px;
+    out property <length> rail-row-gap: 2px;
+    out property <length> search-width-max: 600px;
+    out property <length> search-filters-inline-min: 700px;
+    out property <length> state-copy-max-width: 420px;
+    out property <length> detail-split-width: 800px;
+    out property <length> detail-panel-min: 304px;
+    out property <length> detail-panel-max: 360px;
     out property <length> statusbar-height: 26px;
     /// Horizontal page inset. The gallery maths in `src/layout.rs` mirrors this.
     out property <length> page-padding: 20px;
@@ -184,7 +191,7 @@ export global Theme {
     out property <length> font-body: 14px;
     out property <length> font-subhead: 14px;
     out property <length> font-title: 16px;
-    out property <length> font-page: 20px;
+    out property <length> font-page: 24px;
     out property <length> font-display: 24px;
 
     // Line-height factors, from Slint's `line-height-factor`.

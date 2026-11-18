@@ -20,6 +20,82 @@ import {
 } from "../components.slint";
 import { NovelView, NovelChapter } from "../novel-model.slint";
 
+component ChapterRow inherits Rectangle {
+    in property <NovelChapter> chapter;
+    callback open();
+    callback reveal(length, length);
+
+    height: 44px;
+    border-radius: Theme.radius-sm;
+    background: root.chapter.current ? Theme.accent-subtle
+        : (row.has-hover ? Theme.layer-alt : transparent);
+
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: root.chapter.current
+        ? "第 " + root.chapter.order + " 章：" + root.chapter.title + "（当前）"
+        : "第 " + root.chapter.order + " 章：" + root.chapter.title;
+    accessible-action-default => { root.open(); }
+    forward-focus: key-focus;
+
+    property <bool> held: key-focus.has-focus;
+    changed held => {
+        if (root.held) { root.reveal(root.absolute-position.y, root.height); }
+    }
+    border-width: root.held ? Theme.select-ring : 0px;
+    border-color: Theme.focus-ring;
+
+    key-focus := FocusScope {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        key-pressed(e) => {
+            if (e.text == "\n" || e.text == " ") {
+                root.open();
+                return EventResult.accept;
+            }
+            EventResult.reject
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-3;
+
+        // The order is a fixed 28px column so every chapter
+        // title starts on one vertical rule.
+        Label {
+            role: TextRole.Caption;
+            text: root.chapter.order;
+            color: root.chapter.current ? Theme.accent-ink : Theme.text-tertiary;
+            width: 28px;
+            horizontal-alignment: right;
+        }
+        Label {
+            role: TextRole.Body;
+            text: root.chapter.title;
+            color: root.chapter.current ? Theme.accent-ink : Theme.text;
+            horizontal-stretch: 1;
+        }
+        if root.chapter.meta != "" : Label {
+            role: TextRole.Caption;
+            text: root.chapter.meta;
+            color: Theme.text-tertiary;
+        }
+        if root.chapter.current : IconSlot {
+            name: "check";
+            slot: Theme.icon-size;
+            tint: Theme.accent-ink;
+        }
+    }
+
+    row := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open(); }
+    }
+}
+
 export component NovelPage inherits Rectangle {
     in-out property <length> scroll-y: 0px;
     in property <NovelView> view;
@@ -47,7 +123,6 @@ export component NovelPage inherits Rectangle {
             StateView {
                 kind: StateKind.Loading;
                 title: "正在载入小说…";
-                description: "Pixiv /ajax/novel/{id}";
             }
         }
     }
@@ -69,7 +144,7 @@ export component NovelPage inherits Rectangle {
         }
     }
 
-    if root.view.state == 0 : PageScroll {
+    if root.view.state == 0 : detail-scroll := PageScroll {
         scroll-y <=> root.scroll-y;
         scrolled(y) => { root.scrolled(y); }
 
@@ -247,7 +322,7 @@ export component NovelPage inherits Rectangle {
                     // flickable's `content-height`), unrelated to the chip it was
                     // supposed to hold. It is now the chip row's own height, so a
                     // taller `TagChip` can only make the band taller, never crop.
-                    if root.tags.length > 0 : Rectangle {
+                    if root.tags.length > 0 : tag-strip := Rectangle {
                         height: chip-row.preferred-height;
                         background: transparent;
 
@@ -266,7 +341,7 @@ export component NovelPage inherits Rectangle {
 
                         strip := ScrollView {
                             x: Theme.control-height-sm + Theme.space-1;
-                            width: max(0px, root.width - (Theme.control-height-sm + Theme.space-1) * 2);
+                            width: max(0px, tag-strip.width - (Theme.control-height-sm + Theme.space-1) * 2);
                             height: 100%;
                             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -289,7 +364,7 @@ export component NovelPage inherits Rectangle {
                         }
 
                         IconButton {
-                            x: root.width - Theme.control-height-sm;
+                            x: tag-strip.width - Theme.control-height-sm;
                             y: 0px;
                             icon: "chevron-right";
                             tip: "向右滚动标签";
@@ -315,8 +390,9 @@ export component NovelPage inherits Rectangle {
             }
 
             // ---------------- series ----------------
-            if root.view.series-title != "" : Rectangle {
-                height: series-card.preferred-height;
+            Rectangle {
+                visible: root.view.series-title != "";
+                height: self.visible ? series-card.preferred-height : 0px;
                 border-radius: Theme.radius-lg;
                 background: Theme.layer;
                 border-width: 1px;
@@ -330,8 +406,8 @@ export component NovelPage inherits Rectangle {
                     spacing: Theme.space-2;
 
                     SectionHeader {
-                        title: root.view.series-title;
-                        subtitle: root.view.series-meta;
+                        title: "章节目录";
+                        subtitle: root.view.series-title + (root.view.series-meta == "" ? "" : " · " + root.view.series-meta);
                     }
                     Divider { }
 
@@ -355,67 +431,16 @@ export component NovelPage inherits Rectangle {
                         color: Theme.text-tertiary;
                     }
 
-                    for c[i] in root.chapters : Rectangle {
-                        height: 44px;
-                        border-radius: Theme.radius-sm;
-                        background: c.current ? Theme.accent-subtle
-                            : (row.has-hover ? Theme.layer-alt : transparent);
-
-                        // The second of the page's two anonymous hit surfaces (U2's
-                        // evidence): the chapter row was clickable and nothing else,
-                        // so the series list could not be walked at all. Named,
-                        // actionable, and focused the way every other row is.
-                        accessible-role: AccessibleRole.list-item;
-                        accessible-label: c.current
-                            ? "第 " + c.order + " 章：" + c.title + "（当前）"
-                            : "第 " + c.order + " 章：" + c.title;
-                        accessible-action-default => { root.open-chapter(c.id); }
-
-                        chapter_focus := FocusScope {
-                            key-pressed(e) => {
-                                if (e.text == "\n" || e.text == " ") {
-                                    root.open-chapter(c.id);
-                                    return EventResult.accept;
-                                }
-                                EventResult.reject
-                            }
-                        }
-
-                        HorizontalLayout {
-                            padding-left: Theme.space-2;
-                            padding-right: Theme.space-2;
-                            spacing: Theme.space-3;
-
-                            // The order is a fixed 28px column so every chapter
-                            // title starts on one vertical rule.
-                            Label {
-                                role: TextRole.Caption;
-                                text: c.order;
-                                color: c.current ? Theme.accent-ink : Theme.text-tertiary;
-                                width: 28px;
-                                horizontal-alignment: right;
-                            }
-                            Label {
-                                role: TextRole.Body;
-                                text: c.title;
-                                color: c.current ? Theme.accent-ink : Theme.text;
-                                horizontal-stretch: 1;
-                            }
-                            if c.meta != "" : Label {
-                                role: TextRole.Caption;
-                                text: c.meta;
-                                color: Theme.text-tertiary;
-                            }
-                            if c.current : IconSlot {
-                                name: "check";
-                                slot: Theme.icon-size;
-                                tint: Theme.accent-ink;
-                            }
-                        }
-
-                        row := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.open-chapter(c.id); }
+                    for chapter in root.chapters : ChapterRow {
+                        chapter: chapter;
+                        open => { root.open-chapter(chapter.id); }
+                        reveal(y, h) => {
+                            let top = y - detail-scroll.absolute-position.y;
+                            let overflow = max(0px, detail-scroll.body-height - detail-scroll.viewport-height);
+                            let above = min(0px, top - Theme.space-2);
+                            let below = max(0px, top + h + Theme.space-2 - detail-scroll.viewport-height);
+                            detail-scroll.scroll-y = max(-overflow, min(0px,
+                                detail-scroll.scroll-y - above - below));
                         }
                     }
                 }

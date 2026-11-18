@@ -427,6 +427,14 @@ pub(crate) async fn fetch_sized(cache: &ImageCache, url: &str, target: u32) -> O
     if url.is_empty() {
         return None;
     }
+    if let Some(path) = url.strip_prefix(pixiv_demo::DEMO_SCHEME) {
+        let id = path.split('/').find_map(|segment| match segment.parse() {
+            Ok(id) => Some(Id(id)),
+            Err(_) => None,
+        })?;
+        let side = target.min(480);
+        return demo_raw(id, side, side, 0).await;
+    }
     let decoded = cache
         .load_sized(url, Priority::Visible, Some(target))
         .await

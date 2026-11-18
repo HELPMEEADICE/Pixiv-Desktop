@@ -664,6 +664,37 @@ impl App {
             self.suggest_show_base();
             return;
         }
+        if self.mode == Mode::Demo {
+            let query = self.suggest.query.to_lowercase();
+            let recent: Vec<String> = self
+                .recent_words
+                .iter()
+                .filter(|term| term.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+            let mut rows = pixiv_types::domain::history_suggestions(&recent, 5);
+            let tags = self
+                .demo
+                .trending_tags()
+                .into_iter()
+                .filter(|tag| tag.to_lowercase().contains(&query) && !recent.contains(tag))
+                .take(10 - rows.len())
+                .map(|tag| Suggestion {
+                    tag,
+                    ..Suggestion::default()
+                });
+            rows.extend(tags);
+            self.suggest.note = if rows.is_empty() {
+                "没有匹配的演示标签，按回车直接搜索".into()
+            } else {
+                String::new()
+            };
+            self.suggest.rows = rows;
+            self.suggest.active = -1;
+            self.suggest.visible = true;
+            self.publish_suggestions();
+            return;
+        }
 
         // Show the panel immediately with an explicit loading note: an empty
         // dropdown while typing reads as "no results".

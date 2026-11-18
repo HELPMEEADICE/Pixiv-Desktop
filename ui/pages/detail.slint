@@ -30,9 +30,9 @@ export component ZoomViewer inherits Rectangle {
     in property <ViewerPage> page;
     in property <bool> fit-mode: true;
     /// Multiplier applied on top of the fit scale.
-    in-out property <float> zoom: 1.0;
-    in-out property <length> pan-x: 0px;
-    in-out property <length> pan-y: 0px;
+    in property <float> zoom: 1.0;
+    in property <length> pan-x: 0px;
+    in property <length> pan-y: 0px;
     in property <bool> show-controls: true;
     /// Round nine (F1): the frame a playing ugoira is on. Slint images carry their
     /// own size, so an unset frame is `width == 0` and the viewer falls back to the
@@ -53,6 +53,7 @@ export component ZoomViewer inherits Rectangle {
     callback request-zoom(float, float, float, float, float);
     /// Pan delta (px) and the viewer's own viewport.
     callback request-pan(float, float, float, float);
+    callback viewport-changed(length, length);
     /// Toggle between fit and actual size, around the point that was clicked.
     callback request-toggle-zoom(float, float);
     callback set-fit-mode(bool);
@@ -72,6 +73,10 @@ export component ZoomViewer inherits Rectangle {
 
     clip: true;
     background: Theme.viewer-surface;
+    border-radius: Theme.radius-lg;
+
+    changed width => { root.viewport-changed(root.width, root.height); }
+    changed height => { root.viewport-changed(root.width, root.height); }
 
     // Fit scale: the largest scale that shows the whole page inside the box.
     out property <float> fit-scale:
@@ -483,99 +488,69 @@ component InfoBody inherits VerticalLayout {
         }
     }
 
-    // ---- primary actions ----
-    //
-    // F4: the bookmark is a Fluent SplitButton — the action, then a 24 px
-    // chevron column (`Theme.split-chevron`) that opens the restriction menu.
-    // Two interactive children, so two Tab stops, which is what a SplitButton
-    // is: the main half and the menu half are different verbs. Both halves are
-    // shared primitives (`AppButton`, `IconButton`), so hover, press, focus ring,
-    // role and keyboard all come from the components rather than from here.
-    // ---- primary actions: one row, one height ----
-    //
-    // The three verbs that act on *this work* share a row: bookmark (a Fluent
-    // SplitButton), save-this-page and download-all. They used to be split across
-    // three stacked rows with a Subtle text button under them, which made a 360 px
-    // column read as a list of unrelated controls and pushed the metadata below the
-    // fold. The verbs that leave the application are their own row below.
     HorizontalLayout {
         vertical-stretch: 0;
         spacing: Theme.space-2;
         alignment: start;
 
-        Rectangle {
-            // Wraps the pair so the 32 px row and the 26 px `保存本页` button
-            // beside it share one cross-axis rule: a fixed-size child of a
-            // horizontal layout is aligned to the start of the cross axis.
-            width: split.preferred-width;
-            height: 32px;
-            // G27: a fixed-height child of a horizontal row states where it goes; the
-            // 26px button beside it is aligned the same way, one step down.
-            y: 0px;
+        HorizontalLayout {
+            spacing: 0px;
 
-            split := HorizontalLayout {
-                spacing: 0px;
-                alignment: start;
+            AppButton {
+                label: root.bookmarked
+                    ? (root.bookmark-restrict == 1 ? "私密收藏" : "已收藏")
+                    : "收藏";
+                icon: "follow";
+                kind: root.bookmarked ? ButtonKind.Primary : ButtonKind.Secondary;
+                enabled: !root.busy;
+                clicked => { root.toggle-bookmark(); }
+            }
 
-                AppButton {
-                    label: root.bookmarked
-                        ? (root.bookmark-restrict == 1 ? "私密收藏" : "已收藏")
-                        : "收藏";
-                    icon: "follow";
-                    kind: root.bookmarked ? ButtonKind.Primary : ButtonKind.Secondary;
-                    enabled: !root.busy;
-                    row-height: 32px;
-                    clicked => { root.toggle-bookmark(); }
-                }
-
-                chevron := IconButton {
-                    icon: "chevron-down";
-                    tip: "收藏可见范围";
-                    size: Theme.split-chevron;
-                    row-height: 32px;
-                    enabled: !root.busy;
-                    clicked => {
-                        root.restrict-menu-at(
-                            chevron.absolute-position.x,
-                            chevron.absolute-position.y + chevron.height);
-                    }
+            chevron := IconButton {
+                icon: "chevron-down";
+                tip: "收藏可见范围";
+                size: Theme.split-chevron;
+                row-height: Theme.control-height;
+                enabled: !root.busy;
+                clicked => {
+                    root.restrict-menu-at(
+                        chevron.absolute-position.x,
+                        chevron.absolute-position.y + chevron.height);
                 }
             }
         }
 
         AppButton {
-            label: "保存本页";
+            label: root.page-count > 1 ? ("下载全部 " + root.page-count + " 页") : "下载";
             icon: "downloads";
-            clicked => { root.download-page(); }
-        }
-
-        // Download-all is a primary verb on this work, so it belongs in this row
-        // rather than alone on the next one. The label is the count when there is
-        // more than one page, and the tooltip carries the full sentence so the
-        // button can stay narrow in a 360 px column.
-        AppButton {
-            label: root.page-count > 1 ? ("全部 " + root.page-count) : "下载";
-            icon: "downloads";
-            kind: ButtonKind.Secondary;
+            kind: root.bookmarked ? ButtonKind.Secondary : ButtonKind.Primary;
             clicked => { root.download-all(); }
         }
     }
 
-    // ---- secondary actions: the verbs that leave the application ----
     HorizontalLayout {
         vertical-stretch: 0;
-        spacing: Theme.space-2;
+        spacing: Theme.space-1;
         alignment: start;
+
+        AppButton {
+            label: "保存本页";
+            icon: "downloads";
+            kind: ButtonKind.Subtle;
+            compact: true;
+            clicked => { root.download-page(); }
+        }
         AppButton {
             label: "在浏览器中打开";
             icon: "open";
             kind: ButtonKind.Subtle;
+            compact: true;
             clicked => { root.open-external(); }
         }
         if root.kind == 2 : AppButton {
             label: "导出 GIF";
-            icon: "play";
             kind: ButtonKind.Subtle;
+            compact: true;
             enabled: !root.busy;
             clicked => { root.export-ugoira(); }
         }
@@ -732,6 +707,7 @@ export component InfoPanel inherits Rectangle {
     in-out property <int> tag-cursor: 0;
 
     background: Theme.layer;
+    border-radius: Theme.radius-lg;
     border-width: 1px;
     border-color: Theme.border;
 
@@ -742,6 +718,7 @@ export component InfoPanel inherits Rectangle {
     page := PageScroll {
         width: 100%;
         height: 100%;
+        background: transparent;
         padding-x: Theme.space-4;
         padding-y: Theme.space-4;
         gutter: false;
@@ -834,11 +811,11 @@ export component DetailPage inherits Rectangle {
     in property <bool> ai: false;
 
     in property <[ViewerPage]> pages: [];
-    in-out property <int> current-page: 0;
+    in property <int> current-page: 0;
 
-    in-out property <float> zoom: 1.0;
-    in-out property <length> pan-x: 0px;
-    in-out property <length> pan-y: 0px;
+    in property <float> zoom: 1.0;
+    in property <length> pan-x: 0px;
+    in property <length> pan-y: 0px;
     in property <bool> fit-mode: true;
 
     callback back();
@@ -854,6 +831,7 @@ export component DetailPage inherits Rectangle {
     callback select-page(int);
     callback request-zoom(float, float, float, float, float);
     callback request-pan(float, float, float, float);
+    callback viewport-changed(length, length);
     callback request-toggle-zoom(float, float);
     callback set-fit-mode(bool);
     callback set-zoom(float);
@@ -922,8 +900,11 @@ export component DetailPage inherits Rectangle {
 
     /// Content box width, pushed in by the shell. Reading the window width here
     /// reports as a binding loop.
-    in property <length> available-width: 900px;
-    out property <bool> wide: root.available-width >= 900px;
+    in property <length> available-width: Theme.detail-split-width;
+    out property <bool> wide: root.available-width >= Theme.detail-split-width;
+    changed wide => {
+        if (root.restrict-open) { root.close-restrict(); }
+    }
 
     /// Height / width of the page being viewed, clamped to a usable band. The
     /// narrow layout uses it to size the viewer from the artwork instead of from a
@@ -1120,15 +1101,18 @@ export component DetailPage inherits Rectangle {
                     height: max(320px, root.body-height);
 
                     ZoomViewer {
+                        viewport-changed(w, h) => {
+                            if (root.visible) { root.viewport-changed(w, h); }
+                        }
                         horizontal-stretch: 1;
                         frame: root.film-frame;
                         masked: root.masked;
                         reveal => { root.reveal(); }
                         page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
                         fit-mode: root.fit-mode;
-                        zoom <=> root.zoom;
-                        pan-x <=> root.pan-x;
-                        pan-y <=> root.pan-y;
+                        zoom: root.zoom;
+                        pan-x: root.pan-x;
+                        pan-y: root.pan-y;
                         request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
                         request-pan(dx, dy, w, h) => { root.request-pan(dx, dy, w, h); }
                         request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
@@ -1140,9 +1124,8 @@ export component DetailPage inherits Rectangle {
                     }
 
                     Rectangle {
-                        width: Math.min(360px, root.available-width * 0.38);
-                        border-radius: Theme.radius-lg;
-                        clip: true;
+                        width: Math.max(Theme.detail-panel-min,
+                            Math.min(Theme.detail-panel-max, root.available-width * 0.38));
 
                         panel := InfoPanel {
                             width: parent.width;
@@ -1193,7 +1176,13 @@ export component DetailPage inherits Rectangle {
                 // backdrop. Sizing the box to the artwork (capped to the space available)
                 // means the embedded viewer shows the picture it was given.
                 if root.state == 0 && root.pages.length > 0 && !root.wide : VerticalLayout {
+                    padding: Theme.space-3;
+                    spacing: Theme.space-3;
+
                     ZoomViewer {
+                        viewport-changed(w, h) => {
+                            if (root.visible) { root.viewport-changed(w, h); }
+                        }
                         masked: root.masked;
                         reveal => { root.reveal(); }
                         // `available-width` is the content box, so the estimate subtracts the
@@ -1204,16 +1193,16 @@ export component DetailPage inherits Rectangle {
                         // the artwork from pushing the whole metadata column below the fold in
                         // a short window. Whichever is smaller wins.
                         height: Math.min(
-                            root.height * 0.55,
+                            root.body-height * 0.55,
                             max(200px, root.available-width - Theme.space-6) * root.viewer-aspect
                                 + Theme.space-6
                         );
                         page: root.pages[Math.min(root.current-page, root.pages.length - 1)];
                         frame: root.film-frame;
                         fit-mode: root.fit-mode;
-                        zoom <=> root.zoom;
-                        pan-x <=> root.pan-x;
-                        pan-y <=> root.pan-y;
+                        zoom: root.zoom;
+                        pan-x: root.pan-x;
+                        pan-y: root.pan-y;
                         request-zoom(px, py, dy, w, h) => { root.request-zoom(px, py, dy, w, h); }
                         request-pan(dx, dy, w, h) => { root.request-pan(dx, dy, w, h); }
                         request-toggle-zoom(px, py) => { root.request-toggle-zoom(px, py); }
@@ -1233,6 +1222,7 @@ export component DetailPage inherits Rectangle {
                     // content is the same `InfoBody` the wide layout uses.
                     Rectangle {
                         background: Theme.layer;
+                        border-radius: Theme.radius-lg;
                         border-width: 1px;
                         border-color: Theme.border;
 

@@ -259,6 +259,8 @@ export component AppButton inherits Rectangle {
     in property <length> row-height: 0px;
     callback clicked();
 
+    public function take-focus() { key_focus.focus(); }
+
     // ---- accessibility ----
     // Slint publishes an element to UI Automation only if it has an
     // `accessible-role`, and that role has to be a compile-time constant. The name
@@ -607,6 +609,8 @@ export component ToggleSwitch inherits Rectangle {
     in property <string> label: "";
     callback toggled(bool);
 
+    public function take-focus() { key_focus.focus(); }
+
     accessible-role: AccessibleRole.switch;
     accessible-label: root.label;
     accessible-checkable: true;
@@ -685,6 +689,8 @@ export component SegmentedControl inherits Rectangle {
     /// anonymous rectangles.
     in property <string> label: "";
     callback selected(int);
+
+    public function take-focus() { key_focus.focus(); }
 
     accessible-role: AccessibleRole.radio-group;
     accessible-label: root.label;
@@ -1057,6 +1063,41 @@ export component Divider inherits Rectangle {
     background: Theme.border;
 }
 
+/// Page title, context and commands share one measured row across destinations.
+export component PageHeader inherits Rectangle {
+    in property <string> title: "";
+    in property <string> subtitle: "";
+    out property <length> command-height: root.subtitle == ""
+        ? Theme.control-height-lg + Theme.space-1
+        : Theme.control-height-lg + Theme.space-4;
+
+    height: root.command-height;
+
+    HorizontalLayout {
+        spacing: Theme.space-3;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: Theme.space-1;
+            horizontal-stretch: 1;
+
+            Label {
+                role: TextRole.Page;
+                emphasis: Emphasis.Semibold;
+                text: root.title;
+                color: Theme.text;
+            }
+            if root.subtitle != "" : Label {
+                role: TextRole.Small;
+                text: root.subtitle;
+                color: Theme.text-secondary;
+            }
+        }
+
+        @children
+    }
+}
+
 /// Section heading with an optional trailing action.
 export component SectionHeader inherits Rectangle {
     in property <string> title: "";
@@ -1267,6 +1308,7 @@ export component StateView inherits Rectangle {
     in property <string> title: "";
     in property <string> description: "";
     in property <string> action-label: "";
+    in property <length> vertical-padding: Theme.space-6;
     /// Overrides the glyph derived from `kind`. A page must be able to say
     /// "nothing downloaded yet" with a download glyph instead of reusing the
     /// generic "image failed" one, which is what an empty-state here used to show.
@@ -1277,8 +1319,8 @@ export component StateView inherits Rectangle {
     VerticalLayout {
         alignment: center;
         spacing: Theme.space-3;
-        padding-top: Theme.space-6;
-        padding-bottom: Theme.space-6;
+        padding-top: root.vertical-padding;
+        padding-bottom: root.vertical-padding;
         padding-left: Theme.space-4;
         padding-right: Theme.space-4;
 
@@ -1310,13 +1352,17 @@ export component StateView inherits Rectangle {
             wrap: word-wrap;
         }
 
-        if root.description != "" : Text {
-            text: root.description;
-            color: Theme.text-secondary;
-            font-size: Theme.font-small;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-            max-width: 420px;
+        if root.description != "" : HorizontalLayout {
+            width: 100%;
+            Rectangle { horizontal-stretch: 1; }
+            BodyText {
+                max-width: Theme.state-copy-max-width;
+                role: TextRole.Small;
+                text: root.description;
+                color: Theme.text-secondary;
+                horizontal-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
         }
 
         if root.action-label != "" : HorizontalLayout {
@@ -1917,18 +1963,18 @@ export component IllustCard inherits Rectangle {
             height: Theme.card-caption-height;
 
             Label {
-                role: TextRole.Small;
-                emphasis: Emphasis.Medium;
+                role: TextRole.Body;
+                emphasis: Emphasis.Semibold;
                 x: 0px;
-                y: 4px;
+                y: Theme.space-1;
                 width: parent.width;
-                height: 18px;
+                height: Theme.space-5;
                 text: root.item.title;
                 color: Theme.text;
             }
             if root.show-author : Rectangle {
                 x: 0px;
-                y: 22px;
+                y: Theme.space-6;
                 width: parent.width;
                 height: 18px;
                 // U27 gave this row a role, a name and a *default action*; R12 takes
@@ -1956,7 +2002,7 @@ export component IllustCard inherits Rectangle {
                     border-width: 0px;
                 }
                 Label {
-                    role: TextRole.Caption;
+                    role: TextRole.Small;
                     x: 21px;
                     y: 0px;
                     // F3: the date takes the right end of this row, so the author's
@@ -1964,7 +2010,7 @@ export component IllustCard inherits Rectangle {
                     width: max(0px, parent.width - 21px - Theme.space-1
                         - (root.item.date == "" ? 0px : parent.width * 0.46));
                     text: root.item.author;
-                    color: Theme.text-tertiary;
+                    color: Theme.text-secondary;
                 }
                 // F3: the card's own date, at the right end of the author row. The dot
                 // is *inside* this branch: a separator drawn unconditionally is a dot

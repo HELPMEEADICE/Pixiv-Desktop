@@ -75,6 +75,32 @@ impl App {
             return;
         };
 
+        {
+            let mut app = shared.borrow_mut();
+            if app.mode == Mode::Demo {
+                if let Some(profile) = app.demo.profile(target) {
+                    let works = app.demo.works_by(target);
+                    let ids = works.iter().map(|work| work.id).collect();
+                    app.adopt_profile(
+                        ProfileState {
+                            user: target,
+                            profile,
+                            ids,
+                            loaded: works.len(),
+                            works,
+                            ids_error: None,
+                        },
+                        None,
+                    );
+                    return;
+                }
+                if forced_demo() {
+                    app.fail_profile("演示目录中没有该用户");
+                    return;
+                }
+            }
+        }
+
         let Some(client) = client else {
             let mut app = shared.borrow_mut();
             app.fail_profile("没有可用的网络客户端");
@@ -127,48 +153,43 @@ impl App {
                 if app.epoch != epoch || app.route != route {
                     return;
                 }
-                let mut avatar_urls: Vec<String> = Vec::new();
-                if let Some(url) = profile.avatar.clone() {
-                    avatar_urls.push(url);
-                }
-                avatar_urls.extend(
-                    works
-                        .iter()
-                        .filter_map(|illust| illust.author.avatar.clone()),
+                app.adopt_profile(
+                    ProfileState {
+                        user: target,
+                        profile,
+                        ids,
+                        loaded: first.len(),
+                        works,
+                        ids_error: None,
+                    },
+                    works_error,
                 );
-                let state = ProfileState {
-                    user: target,
-                    profile,
-                    ids,
-                    loaded: first.len(),
-                    works: works.clone(),
-                    // The bundle is one document, so there is no longer a case where
-                    // the id list failed and the header did not: one request failing
-                    // fails the whole page (`fail_profile` above). The field stays
-                    // because "the header is here and the works are not" is still a
-                    // state the page draws (T1/T2), and it is still set below.
-                    ids_error: None,
-                };
-                app.profile = Some(state);
-                app.feed_owner = Some(route);
-                app.publish_profile();
-                if let Some(message) = works_error.or_else(|| {
-                    app.profile
-                        .as_ref()
-                        .and_then(|state| state.ids_error.clone())
-                }) {
-                    // The header loaded, the works did not: say so on both bands
-                    // instead of leaving the grid on a skeleton with no way back.
-                    app.fail_profile_works(&message);
-                } else {
-                    app.render_feed(works, false);
-                }
-                app.publish_profile();
-                app.spawn_avatars(avatar_urls);
-                app.spawn_profile_background();
-                app.refresh_chrome();
             });
         });
+    }
+
+    fn adopt_profile(&mut self, state: ProfileState, works_error: Option<String>) {
+        let mut avatar_urls: Vec<String> = state.profile.avatar.iter().cloned().collect();
+        avatar_urls.extend(
+            state
+                .works
+                .iter()
+                .filter_map(|work| work.author.avatar.clone()),
+        );
+        let works = state.works.clone();
+        let error = works_error.or_else(|| state.ids_error.clone());
+        self.profile = Some(state);
+        self.feed_owner = Some(self.route);
+        self.publish_profile();
+        if let Some(message) = error {
+            self.fail_profile_works(&message);
+        } else {
+            self.render_feed(works, false);
+        }
+        self.publish_profile();
+        self.spawn_avatars(avatar_urls);
+        self.spawn_profile_background();
+        self.refresh_chrome();
     }
 }
 

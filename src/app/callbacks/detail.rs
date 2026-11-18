@@ -168,6 +168,32 @@ pub(crate) fn install(app: &Shared) {
     // past the edges of the clipped viewer and then refused to come back.
     {
         let shared = app.clone();
+        ui.on_detail_viewport_changed(move |view_w, view_h| {
+            let viewport = crate::zoom::Viewport::new(view_w, view_h);
+            let Ok(mut app) = shared.try_borrow_mut() else {
+                return;
+            };
+            if !viewport.is_usable() || app.viewer_viewport == (view_w, view_h) {
+                return;
+            }
+            app.viewer_viewport = (view_w, view_h);
+            let ui = app.ui();
+            let resolved = crate::zoom::resolve(
+                viewport,
+                current_image_size(&ui, &app),
+                ui.get_detail_fit_mode(),
+                ui.get_detail_zoom(),
+                crate::zoom::Pan {
+                    x: ui.get_detail_pan_x(),
+                    y: ui.get_detail_pan_y(),
+                },
+            );
+            ui.set_detail_pan_x(resolved.pan.x);
+            ui.set_detail_pan_y(resolved.pan.y);
+        });
+    }
+    {
+        let shared = app.clone();
         ui.on_detail_request_zoom(move |cursor_x, cursor_y, delta_y, view_w, view_h| {
             let app = shared.borrow();
             let ui = app.ui();

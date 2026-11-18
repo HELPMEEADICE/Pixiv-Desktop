@@ -413,7 +413,9 @@ impl App {
     ) -> Result<Self, pixiv_store::StoreError> {
         let tasks = Tasks::new(rt);
         let data_dir = data_dir();
-        if let Err(error) = std::fs::create_dir_all(&data_dir) {
+        let capture_demo = forced_demo();
+        let demo = DemoCatalog::new();
+        if !capture_demo && let Err(error) = std::fs::create_dir_all(&data_dir) {
             // Not fatal - the store open below reports the same directory - but a
             // permission problem that only shows up as a missing history is a mystery
             // (G41).
@@ -423,7 +425,46 @@ impl App {
         // A broken database must never stop the app from starting, and it must not
         // start silently either: the file is tried first, memory second, and the
         // failure with no fallback is *returned* rather than unwrapped (T8).
-        let (store, store_notice) = open_history_store(&data_dir.join("pixiv-desktop.db"))?;
+        let (store, store_notice) = if capture_demo {
+            // Captures include the search and reading history surfaces. Keep their
+            // data independent of the user's database and earlier captures.
+            let store = Store::open_in_memory()?;
+            for word in [
+                "女の子",
+                "オリジナル",
+                "桜",
+                "初音ミク",
+                "sky",
+                "風景画",
+                "和服",
+            ] {
+                store.push_search(word)?;
+            }
+            if let Some(novel) = demo.novel(Id(810_000_002)) {
+                let novel_id = novel.id.to_string();
+                let series_id = novel
+                    .series
+                    .map(|series| series.id.to_string())
+                    .unwrap_or_default();
+                store.record_novel_read(&pixiv_store::NovelHistoryEntry {
+                    novel_id: novel_id.clone(),
+                    title: novel.title,
+                    author: novel.author.name,
+                    cover: novel.cover.unwrap_or_default(),
+                    series_id: series_id.clone(),
+                    read_at: 1,
+                })?;
+                store.save_novel_progress(&pixiv_store::NovelProgress {
+                    novel_id,
+                    series_id,
+                    percent: 0.34,
+                    ..Default::default()
+                })?;
+            }
+            (store, None)
+        } else {
+            open_history_store(&data_dir.join("pixiv-desktop.db"))?
+        };
 
         // Cache budgets, defined once. Settings renders these numbers, and before
         // this the page showed a second hard-coded 192/1024 that merely happened to
@@ -432,14 +473,14 @@ impl App {
         let cache = ImageCache::new(CacheConfig {
             memory_budget_bytes: CACHE_MEMORY_MB * 1024 * 1024,
             disk_budget_bytes: CACHE_DISK_MB * 1024 * 1024 * 1024,
-            disk_dir: Some(data_dir.join("images")),
+            disk_dir: (!capture_demo).then(|| data_dir.join("images")),
             concurrency: COVER_CONCURRENCY,
         });
 
         let download_dir = persisted(&store, "download_dir")
             .map(PathBuf::from)
             .unwrap_or_else(downloads_dir);
-        if let Err(error) = std::fs::create_dir_all(&download_dir) {
+        if !capture_demo && let Err(error) = std::fs::create_dir_all(&download_dir) {
             // Each download reports its own failure; this line is what explains why
             // they all fail (G41).
             tracing::warn!(%error, dir = %download_dir.display(), "download directory could not be created");
@@ -495,7 +536,7 @@ impl App {
         // stored session: a screenshot baseline must never contain the signed-in
         // user's own feed, and it must not change between two runs on one tree.
         // Everything below already has a demo path, so nothing else has to know.
-        let session = if forced_demo() {
+        let session = if capture_demo {
             Session::default()
         } else {
             crate::session::load(&data_dir)
@@ -550,7 +591,7 @@ impl App {
             timers: RefCell::new(Vec::new()),
             store,
             cache,
-            demo: DemoCatalog::new(),
+            demo,
             client,
             mode,
             session,

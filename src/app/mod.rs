@@ -60,8 +60,8 @@ use pixiv_download::{DownloadConfig, DownloadManager, DownloadRequest};
 use pixiv_image::{CacheConfig, ImageCache, Priority};
 use pixiv_store::{HistoryEntry, Store};
 use pixiv_types::domain::{
-    Author, Bookmark, BookmarkRestrict, FeedSource, Illust, IllustKind, IllustStats, IllustUrls,
-    PageMeta, RankingKind, RecommendTag, RecommendUser, SearchQuery, Suggestion, UserProfile,
+    Author, Bookmark, BookmarkRestrict, Illust, IllustKind, IllustStats, IllustUrls, PageMeta,
+    RankingKind, RecommendTag, RecommendUser, SearchQuery, Suggestion, UserProfile,
 };
 use pixiv_types::{Id, PixivError};
 
@@ -330,7 +330,7 @@ impl App {
             app.remember_scroll(current, scroll);
             app.route = route;
             app.page = route.page;
-            app.leave_page(route);
+            app.leave_page(current, route);
         }
         App::load_page(shared, false);
     }
@@ -344,7 +344,7 @@ impl App {
     /// was cleared in `go` only, so Back and Forward could leave a bubble floating
     /// over a control that no longer exists (plan §2.3 R20). The caller has already
     /// moved `route` and `page` to `next` when this runs.
-    fn leave_page(&mut self, next: Route) {
+    fn leave_page(&mut self, previous: Route, next: Route) {
         self.page_cursor = 1;
         self.loading_more = false;
         self.suggest_close();
@@ -363,7 +363,7 @@ impl App {
         // Leaving the reader must not lose the place: the throttled write only
         // fires every 2s, so a quick Back would otherwise land before the last
         // write. Flushing here also covers a chapter change, which navigates.
-        if self.page == Destination::NovelReader && next.page != Destination::NovelReader {
+        if previous.page == Destination::NovelReader && !previous.same_view(next) {
             self.flush_novel_state();
             self.novel.reader.settings_open = false;
         }
@@ -435,7 +435,7 @@ impl App {
             app.page = target.page;
             // The same resets a fresh navigation runs, tooltip included: Back and
             // Forward leave a page exactly the way `go` does (plan §2.3 R20).
-            app.leave_page(target);
+            app.leave_page(current, target);
         }
         // Restoring rather than resetting: Back must land where you left off.
         App::load_page(shared, true);
