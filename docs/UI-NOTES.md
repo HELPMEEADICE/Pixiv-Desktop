@@ -1572,3 +1572,101 @@ exercised on a real display.
 
 **Bookmark / follow against a live session** - unchanged from round one: no
 credential was available.
+
+---
+
+## Round thirteen - the viewer's sign, the exit's owner, and two panels that stretched
+
+Three defects, each one measured before it was touched.
+
+### 1. Wheel-up zoomed out
+
+The sign was inverted end to end, and the unit test agreed with the inversion, which
+is why the suite stayed green. The chain is not ambiguous once it is written down:
+winit maps `WM_MOUSEWHEEL`'s positive `wParam >> 16` to `LineDelta(0.0, +value)`
+(winit-0.30.13 platform_impl/windows/event_loop.rs:1727-1744), and
+`i-slint-backend-winit` multiplies a line by 60 (winitwindowadapter.rs:1472), so
+Slint hands the app `delta-y = +60` for one detent of wheel-up. `wheel_zoom` then
+multiplied by `1.0 - delta * 0.0015`: `+60` became `0.91`, i.e. shrink.
+
+`src/zoom.rs` now steps in log space (`1.12` per notch) so a positive delta always
+increases the multiplier and in/out are exact inverses, and an outsized delta is
+damped instead of capped - a precision touchpad's inertial flick still reaches the
+bounds, but one event cannot cross the whole range.
+
+### 2. A process that outlived its window
+
+Nothing owned the teardown. At the moment `ui.run()` returned, `Rc::strong_count(app)`
+was **114**: every `ui.on_*(move |..| { let shared = app.clone(); .. })` in
+`src/app/**` owns a clone, those closures live in the `AppWindow`, and the `AppWindow`
+outlives the event loop - so the tokio runtime was still owned by 112 references
+nothing could reach. Every `slint::Timer` was leaked with `std::mem::forget` (a
+forgotten timer cannot be stopped, and its closure holds another `Rc`), and no task
+had a cancellation path.
+
+The exit is now one ordered sequence in `src/app/lifecycle.rs::shutdown`: refuse new
+work and cancel (`Tasks::begin_shutdown`), stop the timers (`App::stop_timers`), flush
+the reading position inside `SHUTDOWN_BUDGET`, release every callback closure
+(`detach_callbacks`, 109 generated detachers in `src/app/detach.rs`), then park the
+runtime (`Tasks::park`). The park lives behind a `Mutex<Option<Arc<Runtime>>>` because
+the first attempt used `Arc::try_unwrap` and therefore did nothing whenever a task
+still held a handle - which is exactly when a park matters.
+
+### 3. Two panels that distributed their own empty space
+
+The artwork detail panel and the novel recent-reading row both looked like padding
+bugs and were neither.
+
+* **Detail.** 155 px between the title and the author row, 227 px between the
+  description and the 标签 heading. Capturing the same page at 620 px tall made every
+  gap vanish, which identified the cause: layout children default to
+  `vertical-stretch: 1`, the panel is taller than the metadata, and the scroll view
+  grows its content to fill its viewport, so the leftover was shared out between the
+  children. The children now state `vertical-stretch: 0` and the body packs at the top.
+* **Novels.** A `Label` defaults to `horizontal-stretch: 1`, so the author label
+  absorbed the middle column and pushed the series marker ~600 px away from the name
+  it belongs to. The progress bar was `horizontal-stretch: 1` too, which spanned the
+  column and left the percentage at the far edge - and fixing that exposed a second
+  layer: the row's `alignment: center` then floated the pair mid-card, and the label
+  landed a line below the track. Both children are now full-height cells that centre
+  their own content.
+
+### 4. A loading state that could not end
+
+`load_novels_page` promoted any non-content state to loading whenever the result
+model was empty, so opening the page started a spinner that nothing could clear -
+nothing had been searched. Opening the page publishes the idle state with a sentence
+that says what to do; only an actual request may put the result area into loading.
+The same state also printed the internal request path (/ajax/search/novels/...) as
+its description, which is not something a reader can use.
+
+### What was verified, and how
+
+| check | result |
+|---|---|
+| `cargo test --workspace` | 594 pass, 0 fail |
+| `cargo fmt --all -- --check` | clean |
+| clippy, `-D warnings`, all targets | clean (see note) |
+| `tools/verify-zoom.ps1` | PASS - a real WM_MOUSEWHEEL at the artwork, percentage read back out of the accessibility tree |
+| `tools/verify-exit.ps1` | PASS - 5 exit scenarios, no live process left |
+| `tools/verify-layout.ps1` | PASS - gap 0 on every row |
+| `tools/verify-a11y.ps1` (detail, novels) | PASS - both meet the budget |
+| `tools/verify-visual.ps1` | 36 captures within 0.02% and 96 px of the baseline |
+| `tools/verify-visual.ps1 -Twice` | 34 of 36 states byte-identical across two captures |
+
+**A note on the lint gate.** The installed `cargo clippy` shim resolves to a different
+toolchain whose build-script host defaults to MSVC; on this machine that fails on a
+missing link.exe before clippy sees this crate at all, and pinning
+`--target x86_64-pc-windows-gnu` fails the other way because that target's std is not
+installed. Driving the toolchain's own driver is what runs the gate:
+
+    $env:RUSTC_WORKSPACE_WRAPPER = 'C:\msys64\ucrt64\bin\clippy-driver.exe'
+    $env:RUSTFLAGS = '-D warnings'
+    cargo check --workspace --all-targets
+
+**What could not be verified.** detail-error/light did not capture at all in the
+reproducibility pass, and detail-ugoira/light was not reproducible between two
+captures in one run (682 042 px, largest channel 156) while its dark counterpart was
+byte-identical. Both are states this round did not touch; the ugoira page carries a
+frame clock, so a capture that lands mid-frame is expected to differ. They are
+reported rather than hidden, and neither is counted as a pass.
