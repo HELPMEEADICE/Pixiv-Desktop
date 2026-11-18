@@ -28,9 +28,15 @@ impl App {
             return;
         };
         let manager = self.downloads.clone();
-        self.rt.spawn(async move {
+        // The worker parks on a Weak up to its watchdog interval, so it cannot stop
+        // itself the moment the manager goes away; the cancellation wrapper around
+        // every Tasks::spawn future is what actually ends it at exit.
+        let started = self.tasks.spawn(async move {
             manager.run(client).await;
         });
+        if !started {
+            tracing::warn!("the download worker was not started; the app is already closing");
+        }
     }
 }
 
@@ -294,7 +300,7 @@ impl App {
             let finished = finished_records(&self.download_rows, &tasks);
             if !finished.is_empty() {
                 let store = self.store.clone();
-                self.rt.spawn(async move {
+                self.tasks.spawn(async move {
                     for record in finished {
                         match store.insert_download(&record) {
                             Ok(_) => {}
@@ -396,7 +402,7 @@ impl App {
     /// finished rows come back, and they are patched into the model in place.
     pub(crate) fn publish_local_band(&self) {
         let store = self.store.clone();
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         rt.spawn(async move {
             let records = match store.downloads(LOCAL_BAND_ROWS) {
                 Ok(records) => records,
@@ -507,7 +513,7 @@ impl App {
         let store = self.store.clone();
         let manager = self.downloads.clone();
         let path = path.to_string();
-        self.rt.spawn(async move {
+        self.tasks.spawn(async move {
             let record = match store.downloads(LOCAL_RECORD_LIMIT) {
                 Ok(rows) => rows.into_iter().find(|row| row.file_path == path),
                 Err(error) => {
@@ -559,7 +565,7 @@ impl App {
     pub(crate) fn forget_local(&self, id: i32) {
         let store = self.store.clone();
         let id = i64::from(id);
-        self.rt.spawn(async move {
+        self.tasks.spawn(async move {
             if let Err(error) = store.delete_download(id) {
                 tracing::debug!(id, %error, "删除本地下载记录失败");
             }
@@ -918,7 +924,7 @@ impl App {
             return;
         }
         self.ui().set_detail_busy(true);
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         let dir = self.download_dir.clone();
         rt.spawn(async move {
             let outcome = async {

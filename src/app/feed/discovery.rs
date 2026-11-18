@@ -67,7 +67,7 @@ impl App {
                 app.mode,
                 app.epoch,
                 app.client.clone(),
-                app.rt.clone(),
+                app.tasks.clone(),
                 app.discovery.seen.clone(),
             )
         };

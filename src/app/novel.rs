@@ -1040,7 +1040,7 @@ impl App {
         }
         let (store, rt) = {
             let app = shared.borrow();
-            (app.store.clone(), app.rt.clone())
+            (app.store.clone(), app.tasks.clone())
         };
         rt.spawn(async move {
             // One query, not one per row: the position is joined to the entry it
@@ -1133,7 +1133,7 @@ impl App {
             }
             (app.novel.page, app.novel.epoch)
         };
-        let rt = shared.borrow().rt.clone();
+        let rt = shared.borrow().tasks.clone();
         rt.spawn(async move {
             let result = client.novel_search(&word, page).await;
             on_ui(move |shared| {
@@ -1287,7 +1287,7 @@ impl App {
         };
         let (store, rt) = {
             let app = shared.borrow();
-            (app.store.clone(), app.rt.clone())
+            (app.store.clone(), app.tasks.clone())
         };
         rt.spawn(async move {
             let result = client.novel(Id(id)).await;
@@ -1408,7 +1408,7 @@ impl App {
             self.publish_novel_view();
             return;
         };
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         rt.spawn(async move {
             let info = client.novel_series(series).await;
             let chapters = client.novel_series_chapters(series).await;
@@ -1550,7 +1550,7 @@ impl App {
         }
         let (store, rt) = {
             let app = shared.borrow();
-            (app.store.clone(), app.rt.clone())
+            (app.store.clone(), app.tasks.clone())
         };
         rt.spawn(async move {
             let result = client.novel(Id(id)).await;
@@ -1661,7 +1661,7 @@ impl App {
             read_at: 0,
         };
         let store = self.store.clone();
-        self.rt.spawn(async move {
+        self.tasks.spawn(async move {
             let _ = store.record_novel_read(&entry);
         });
         let ratio = self.novel.ratio.clamp(0.0, 1.0);
@@ -1760,10 +1760,114 @@ impl App {
         self.save_progress(false);
     }
 
-    /// Flush the reading position. Called when leaving the page and on exit.
+    /// Flush the reading position. Called when leaving the page.
     pub(crate) fn flush_novel_state(&mut self) {
         self.save_progress(true);
         self.save_prefs(true);
+    }
+
+    /// Flush the reading position *synchronously*, for application shutdown.
+    ///
+    /// The ordinary path spawns the write on the runtime and returns, which is right
+    /// for a navigation and wrong for an exit: the runtime is parked immediately
+    /// after this runs, so a spawned write would be racing the shutdown and would
+    /// usually lose. The work is one upsert and one small setting row, it is done on
+    /// the thread that is already tearing the app down, and it is bounded by the
+    /// caller's deadline so a locked database cannot hold the exit open.
+    pub(crate) fn flush_novel_state_blocking(&mut self, deadline: Duration) {
+        let Some(id) = self.novel.reader_novel else {
+            // No reader was open: there is no position to write, and saving the
+            // preferences alone would be a write on every exit for a page the user
+            // never opened.
+            return;
+        };
+        // The same construction the timer path uses, so the two cannot drift: this
+        // writes exactly what `save_progress(true)` would have written - the same
+        // block index, the same character offset, the same finished flag.
+        let progress = self.reader_progress_value(id);
+        let prefs = self.novel.prefs.to_json();
+        let store = self.store.clone();
+        // Run on the runtime's blocking pool and *wait* for it: shutdown parks the
+        // runtime immediately afterwards, so a spawned write would usually lose that
+        // race. `block_on` is safe here because this runs on the UI thread, never
+        // inside the runtime.
+        let tasks = self.tasks.clone();
+        // Both outcomes are reported, not dropped: a write that misses its deadline
+        // and a database that refuses the row are different facts, and an exit that
+        // silently loses a reading position is the bug this function exists to avoid.
+        let Some(written) = self.tasks.block_on(async move {
+            let handle = tasks.spawn_blocking(move || {
+                let progress_error = store.save_novel_progress(&progress).err();
+                let prefs_error = store.set_novel_setting(PREFS_KEY, &prefs).err();
+                (progress_error, prefs_error)
+            });
+            let Some(handle) = handle else {
+                tracing::warn!("the runtime was already parked; the reading position was not saved");
+                return false;
+            };
+            match tokio::time::timeout(deadline, handle).await {
+                Ok(Ok((progress_error, prefs_error))) => {
+                    if let Some(error) = progress_error {
+                        tracing::warn!(%error, "the reading position could not be written at exit");
+                    }
+                    if let Some(error) = prefs_error {
+                        tracing::warn!(%error, "the reader preferences could not be written at exit");
+                    }
+                    true
+                }
+                Ok(Err(join_error)) => {
+                    tracing::warn!(%join_error, "the exit write did not run to completion");
+                    false
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        deadline_ms = deadline.as_millis() as u64,
+                        "the exit write missed its deadline; the reading position was not saved"
+                    );
+                    false
+                }
+            }
+        }) else {
+            return;
+        };
+        if written {
+            tracing::debug!("reading position written at exit");
+        }
+    }
+
+    /// The progress value the current reader state means.
+    ///
+    /// Extracted so the timer path and the exit path cannot disagree about what a
+    /// reading position *is*: the shutdown flush used to write its own row and would
+    /// have drifted the moment either side changed.
+    fn reader_progress_value(&self, id: u64) -> NovelProgress {
+        let ratio = self.novel.ratio;
+        let (blocks, characters) = self
+            .novel
+            .document
+            .as_ref()
+            .map(|document| (document.blocks.len(), document.characters))
+            .unwrap_or((0, 0));
+        let block_index = if blocks == 0 {
+            0
+        } else {
+            ((ratio * blocks as f32) as usize).min(blocks - 1)
+        };
+        NovelProgress {
+            novel_id: id.to_string(),
+            series_id: self
+                .novel
+                .novel
+                .as_ref()
+                .and_then(|novel| novel.series.as_ref())
+                .map(|nav| nav.id.get().to_string())
+                .unwrap_or_default(),
+            block_index: u32::try_from(block_index).unwrap_or(0),
+            char_offset: (ratio * characters as f32) as u32,
+            percent: ratio,
+            finished: ratio >= 0.985,
+            updated_at: 0,
+        }
     }
 
     fn save_progress(&mut self, force: bool) {
@@ -1780,35 +1884,9 @@ impl App {
             return;
         }
         self.novel.saved_at = Some(now);
-        let ratio = self.novel.ratio;
-        let (blocks, characters) = self
-            .novel
-            .document
-            .as_ref()
-            .map(|document| (document.blocks.len(), document.characters))
-            .unwrap_or((0, 0));
-        let block_index = if blocks == 0 {
-            0
-        } else {
-            ((ratio * blocks as f32) as usize).min(blocks - 1)
-        };
-        let progress = NovelProgress {
-            novel_id: id.to_string(),
-            series_id: self
-                .novel
-                .novel
-                .as_ref()
-                .and_then(|novel| novel.series.as_ref())
-                .map(|nav| nav.id.get().to_string())
-                .unwrap_or_default(),
-            block_index: u32::try_from(block_index).unwrap_or(0),
-            char_offset: (ratio * characters as f32) as u32,
-            percent: ratio,
-            finished: ratio >= 0.985,
-            updated_at: 0,
-        };
+        let progress = self.reader_progress_value(id);
         let store = self.store.clone();
-        self.rt.spawn(async move {
+        self.tasks.spawn(async move {
             let _ = store.save_novel_progress(&progress);
         });
     }
@@ -1826,7 +1904,7 @@ impl App {
         self.novel.prefs_saved_at = Some(now);
         let json = self.novel.prefs.to_json();
         let store = self.store.clone();
-        self.rt.spawn(async move {
+        self.tasks.spawn(async move {
             let _ = store.set_novel_setting(PREFS_KEY, &json);
         });
     }
@@ -1853,7 +1931,7 @@ impl App {
             return;
         }
         let cache = self.cache.clone();
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         let scale = self.ui().window().scale_factor().max(1.0);
         let target =
             crate::images::target_width_up_to(640.0, scale, crate::images::BANNER_MAX_WIDTH);

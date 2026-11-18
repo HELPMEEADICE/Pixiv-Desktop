@@ -135,7 +135,7 @@ impl App {
                 app.selection.ids.clone(),
                 app.mode,
                 app.client.clone(),
-                app.rt.clone(),
+                app.tasks.clone(),
             )
         };
         if ids.is_empty() {
@@ -250,7 +250,7 @@ impl App {
                 app.selection.ids.clone(),
                 app.mode,
                 app.client.clone(),
-                app.rt.clone(),
+                app.tasks.clone(),
                 bookmark_restrict_from(stored.as_deref()),
             )
         };

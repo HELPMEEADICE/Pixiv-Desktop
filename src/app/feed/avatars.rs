@@ -262,7 +262,7 @@ impl App {
             return;
         }
         let cache = self.cache.clone();
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         let demo = self.mode == Mode::Demo;
         let scale = self.ui().window().scale_factor().max(1.0);
         // A 170px source is the largest Pixiv sends for an avatar; decoding at
@@ -424,7 +424,7 @@ impl App {
         for author in &wanted {
             self.author_avatar_lookup.insert(*author);
         }
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         rt.spawn(async move {
             for author in wanted {
                 let found = match client.user_profile(Id(author)).await {

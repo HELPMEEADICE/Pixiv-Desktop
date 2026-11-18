@@ -586,7 +586,7 @@ impl App {
             let app = shared.borrow();
             app.ui().set_busy(true);
             app.notify(0, "正在清理磁盘缓存…");
-            (app.cache.clone(), app.rt.clone())
+            (app.cache.clone(), app.tasks.clone())
         };
         rt.spawn(async move {
             let sweep = cache.clone();

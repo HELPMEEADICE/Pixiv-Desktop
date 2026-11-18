@@ -124,7 +124,7 @@ impl App {
             Mode::Real => {
                 let app = shared.borrow();
                 let client = app.client.clone();
-                let rt = app.rt.clone();
+                let rt = app.tasks.clone();
                 let word = app.search_word.clone();
                 let kind = app.ranking_kind;
                 let session = app.session.clone();
@@ -353,7 +353,7 @@ impl App {
             Mode::Real => {
                 let app = shared.borrow();
                 let client = app.client.clone();
-                let rt = app.rt.clone();
+                let rt = app.tasks.clone();
                 let word = app.search_word.clone();
                 let kind = app.ranking_kind;
                 let session = app.session.clone();
@@ -456,7 +456,7 @@ impl App {
                 app.mode,
                 epoch,
                 app.client.clone(),
-                app.rt.clone(),
+                app.tasks.clone(),
                 app.route,
             )
         };
@@ -626,7 +626,7 @@ impl App {
             app.ui().set_grid_loading_more(true);
             (
                 app.client.clone(),
-                app.rt.clone(),
+                app.tasks.clone(),
                 app.epoch,
                 app.reached_end,
             )

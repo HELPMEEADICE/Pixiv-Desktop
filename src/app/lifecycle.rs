@@ -1,4 +1,60 @@
+//! Application lifecycle: startup, and a shutdown that actually finishes.
+//!
+//! # The defect this module closes
+//!
+//! Closing the window hid it and returned from `ui.run()`, and nothing else
+//! happened. The process then tore itself down in whatever order the operating
+//! system chose:
+//!
+//! * `thread_local APP` still held an `Rc<RefCell<App>>`, and `App` owns
+//!   `Arc<Runtime>`. Tokio's multi-threaded runtime spawns worker threads that park
+//!   on a condvar; dropping the last `Arc` signals them, but only when it is
+//!   dropped, and a `thread_local` is finalised *during* thread teardown - after
+//!   `main` has returned, in an order the C runtime picks.
+//! * Every `slint::Timer` was leaked with `std::mem::forget`. A forgotten timer is
+//!   never stopped, so the 500 ms download tick could fire while the window was
+//!   already gone, and its closure holds another `Rc<RefCell<App>>` - one more
+//!   strong reference to a runtime nobody was going to shut down deliberately.
+//! * Nothing told the tokio tasks to stop. Downloads, image decodes, novel fetches
+//!   and the history writer each held their own clones of runtime-owned state and
+//!   simply kept going.
+//!
+//! The result was a process that could outlive its window: the ordering was left to
+//! chance, and under real work (a download in flight, a large decode) the process
+//! stayed behind with no window at all.
+//!
+//! # What replaces it
+//!
+//! One explicit sequence, run once, on the UI thread, before `main` returns:
+//!
+//! 1. **Stop accepting work.** `shutting_down` is set, so anything that would start
+//!    a new background task returns immediately instead.
+//! 2. **Cancel.** The shared `CancellationToken` is cancelled. Every spawned task
+//!    selects on it, so a request in flight is dropped rather than awaited.
+//! 3. **Stop the timers.** They are owned by `App` now, not forgotten, so they can be
+//!    stopped and their callbacks cannot fire again.
+//! 4. **Flush what is worth keeping.** The reading position is written, bounded by a
+//!    deadline: a state save must never be the reason an exit hangs.
+//! 5. **Drop the App and park the runtime.** The `thread_local` is cleared first, so
+//!    it cannot hold the last strong reference while the runtime is being torn down,
+//!    and `shutdown_timeout` gives the workers a bounded window to observe the
+//!    cancellation instead of leaving the process to chance.
+//!
+//! The whole thing is bounded by [`SHUTDOWN_BUDGET`]. If a step overruns, the next one
+//! still runs - a slow network call is not allowed to hold the window open.
+
 use super::*;
+
+/// How long the orderly half of shutdown may take, in total.
+///
+/// Sized from the work it covers: one SQLite write and one runtime park. Anything
+/// longer means something is stuck, and the answer to that is to finish the exit
+/// anyway rather than to wait.
+pub(crate) const SHUTDOWN_BUDGET: Duration = Duration::from_secs(3);
+
+/// How long the runtime gets to park its workers before the process leaves without
+/// waiting for them.
+const RUNTIME_PARK_BUDGET: Duration = Duration::from_millis(1500);
 
 pub fn run() -> Result<(), slint::PlatformError> {
     let rt =
@@ -127,10 +183,128 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 }
             },
         );
-        std::mem::forget(hello);
+        app.borrow().retain_timer(hello);
     }
 
-    ui.run()
+    // Closing the main window ends the application. There is no tray icon and no
+    // background residency mode, so this is the documented semantic rather than an
+    // accident of the default handler: the close is accepted, the window hides, and
+    // the event loop returns, which is what reaches the shutdown sequence below. A
+    // future tray feature has to change this line instead of silently changing what
+    // the X button does.
+    ui.window().on_close_requested(|| {
+        slint::CloseRequestResponse::HideWindow
+    });
+
+    let result = ui.run();
+    shutdown(&app);
+    result
+}
+
+/// The one exit path.
+///
+/// Runs on the UI thread after the event loop has returned. The steps are ordered by
+/// what they unblock: cancellation first (so nothing new starts), then the timers (so
+/// nothing fires again), then the flush (the only part that loses data if skipped),
+/// then the drop that ends the runtime.
+pub(crate) fn shutdown(app: &Shared) {
+    let started = std::time::Instant::now();
+    tracing::info!("shutting down");
+
+    // ---- 1 + 2: stop accepting work, and cancel what is running --------------
+    // Taken in one borrow so a task cannot slip in between the flag and the token.
+    {
+        let mut app = match app.try_borrow_mut() {
+            Ok(app) => app,
+            // A callback is mid-flight and holds the borrow. Nothing can be
+            // cancelled from here, but the teardown below still runs, and that is
+            // what ends the runtime - so the exit still completes.
+            Err(_) => {
+                tracing::warn!("shutdown ran while the app was borrowed; skipping the flush");
+                release(app, started);
+                return;
+            }
+        };
+        app.tasks.begin_shutdown();
+        app.stop_timers();
+        // The reading position is the one piece of state that is expensive to lose
+        // and cheap to write, so it is flushed here, inside the budget.
+        let deadline = SHUTDOWN_BUDGET.saturating_sub(started.elapsed());
+        app.flush_on_exit(deadline);
+    }
+
+    release(app, started);
+}
+
+/// Drop the last owners and park the runtime, in the one order that terminates.
+///
+/// Split out of the sequence above so the borrowed-app edge case cannot skip it: a
+/// missed flush costs one reading position, a missed teardown costs a process.
+fn release(app: &Shared, started: std::time::Instant) {
+    // ---- the reference chain, named ----------------------------------------
+    //
+    // At this point `Rc::strong_count(app)` is the number of *Slint callbacks* that
+    // captured a clone: every `ui.on_*(move |..| { let shared = app.clone(); .. })`
+    // in `src/app/callbacks/*` and in the modules that register their own. Measured
+    // on this tree, that is 114. They live inside the `AppWindow`, and the `AppWindow`
+    // lives until the component is dropped - which happened *after* `ui.run()`
+    // returned, so the runtime was still owned by callbacks nobody could reach, and
+    // the process's exit depended on the order the component finally unwound in.
+    //
+    // Clearing the handlers is what breaks the chain. Slint keeps them in the
+    // component's own property table, so resetting each one drops its closure - and
+    // with it the `Rc` - while the component is still alive and the UI thread is
+    // still ours. After that the App is reachable exactly once, from this function,
+    // and its drop is what parks the runtime.
+    detach_callbacks(app);
+
+    // Order matters. The thread-local is cleared *first* so the slot cannot hold the
+    // last strong reference while the runtime is being torn down. What remains is the
+    // App itself, whose drop ends the runtime.
+    APP.with(|slot| slot.borrow_mut().take());
+
+    // The task handle is taken out first, while the App is still definite, so the
+    // park below cannot be skipped by the App's own drop order.
+    let tasks = match app.try_borrow() {
+        Ok(app) => app.tasks.clone(),
+        Err(_) => {
+            tracing::warn!("the app stayed borrowed at exit; the runtime was not parked");
+            return;
+        }
+    };
+
+    // Drop every remaining owner of the App, then park the runtime.
+    //
+    // `Rc::try_unwrap` is attempted but not required: callbacks registered on pages
+    // that are constructed lazily can still hold clones, and a missed unwrap must not
+    // cost the park. Whichever way it goes, the App goes out of scope here.
+    match Rc::try_unwrap(app.clone()) {
+        Ok(cell) => drop(cell.into_inner()),
+        Err(still_shared) => {
+            tracing::warn!(
+                refs = Rc::strong_count(&still_shared),
+                "the app was still shared at exit; parking the runtime anyway"
+            );
+            drop(still_shared);
+        }
+    }
+
+    // Parked explicitly instead of being left to process teardown: shutdown_timeout
+    // gives the workers a bounded window to observe the cancellation and then abandons
+    // whatever is left, which is what keeps a stuck socket from holding the process
+    // open. This works regardless of how many `Tasks` clones a task still holds, which
+    // is the case that made the first version of this function silently do nothing.
+    let budget = RUNTIME_PARK_BUDGET.min(SHUTDOWN_BUDGET.saturating_sub(started.elapsed()));
+    // The result is reported rather than assumed: a park that did not happen means
+    // the runtime left the app while a task still held it, and that is the difference
+    // between a clean exit and a process that lingers.
+    if !tasks.park(budget) {
+        tracing::warn!("the runtime was already parked or is still owned by a task");
+    }
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "exit complete"
+    );
 }
 
 /// Honour `PIXIV_DESKTOP_SIZE=1140x886` so screenshot captures are deterministic
@@ -190,10 +364,56 @@ pub(crate) fn open_history_store(
 }
 
 impl App {
+    /// Write the state that has to survive the exit, on a deadline.
+    ///
+    /// Two things only: the reader's position and preferences (the reading page is the
+    /// one screen whose value is entirely in where you left it) and nothing else. The
+    /// history queue is deliberately *not* flushed here - its consumer is a task on
+    /// the runtime, and the runtime is parked immediately afterwards, so draining it
+    /// here would either block on a dead worker or race it. A history row is a
+    /// convenience; a lost reading position is a lost session.
+    ///
+    /// `deadline` is what is left of [`SHUTDOWN_BUDGET`]. The writes are small, so in
+    /// practice it is never approached; it exists so that a locked database file
+    /// cannot turn "close the window" into "wait".
+    pub(crate) fn flush_on_exit(&mut self, deadline: Duration) {
+        if deadline.is_zero() {
+            tracing::warn!("shutdown budget spent; the reading position was not written");
+            return;
+        }
+        let started = std::time::Instant::now();
+        self.flush_novel_state_blocking(deadline);
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "exit state flushed"
+        );
+    }
+
+    /// Hold a timer for as long as the app lives, instead of forgetting it.
+    ///
+    /// `std::mem::forget` was how the startup timers stayed alive, and it is also why
+    /// they could never be stopped: a forgotten `slint::Timer` has no handle, so
+    /// nothing can reach it and its callback keeps a strong reference to the App for
+    /// the whole life of the process.
+    pub(crate) fn retain_timer(&self, timer: slint::Timer) {
+        self.timers.borrow_mut().push(timer);
+    }
+
+    /// Stop every timer this app started, and drop them.
+    pub(crate) fn stop_timers(&self) {
+        for timer in self.timers.borrow_mut().drain(..) {
+            timer.stop();
+        }
+    }
+
+}
+
+impl App {
     pub(crate) fn new(
         ui: slint::Weak<AppWindow>,
         rt: Arc<Runtime>,
     ) -> Result<Self, pixiv_store::StoreError> {
+        let tasks = Tasks::new(rt);
         let data_dir = data_dir();
         if let Err(error) = std::fs::create_dir_all(&data_dir) {
             // Not fatal - the store open below reports the same directory - but a
@@ -261,7 +481,7 @@ impl App {
         let (view_queue, mut view_rx) = tokio::sync::mpsc::channel::<HistoryEntry>(VIEW_QUEUE);
         {
             let store = store.clone();
-            rt.spawn(async move {
+            tasks.spawn(async move {
                 while let Some(entry) = view_rx.recv().await {
                     // One history row fewer is the only consequence, which is exactly
                     // why it has to be said somewhere (G41).
@@ -328,7 +548,8 @@ impl App {
 
         let app = Self {
             ui,
-            rt,
+            tasks: tasks.clone(),
+            timers: RefCell::new(Vec::new()),
             store,
             cache,
             demo: DemoCatalog::new(),
@@ -458,7 +679,9 @@ pub(crate) fn start_timers(app: &Shared) {
                 );
             },
         );
-        std::mem::forget(trace);
+        // Owned, not forgotten: see the module docs. The trace timer is only armed
+        // under PIXIV_DESKTOP_TRACE, but it is the same lifetime question.
+        app.borrow().retain_timer(trace);
     }
 
     // The download queue is the only thing that needs polling: it is written by
@@ -473,11 +696,20 @@ pub(crate) fn start_timers(app: &Shared) {
             let Ok(app) = shared.try_borrow() else {
                 return;
             };
+            // A tick that lands between "shutdown began" and "timers stopped" must
+            // do nothing: it would take the borrow the shutdown sequence is waiting
+            // for.
+            if app.tasks.is_closing() {
+                return;
+            }
             // One `tasks()` snapshot per tick, taken inside `push_downloads`:
             // the emptiness test used to cost a second deep clone of the whole
             // queue (plan §2.3 R8).
             app.push_downloads();
         },
     );
-    std::mem::forget(tick);
+    // The 500 ms tick is the timer whose callback most needs to stop at exit: it
+    // takes the borrow and reads the download manager, and it was the one kept alive
+    // by `mem::forget` with no handle to stop it.
+    app.borrow().retain_timer(tick);
 }

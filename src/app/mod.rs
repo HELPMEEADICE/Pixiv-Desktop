@@ -20,6 +20,7 @@
 //! is no resize timer and no second source of truth to drift out of sync.
 
 mod callbacks;
+mod detach;
 mod detail;
 mod downloads;
 mod feed;
@@ -28,13 +29,16 @@ mod lifecycle;
 mod novel;
 mod palette;
 mod profile;
+mod tasks;
 mod selection;
 mod settings;
 mod ugoira;
 
 pub(crate) use self::{
-    callbacks::install_callbacks, feed::*, helpers::*, lifecycle::*, novel::NovelState,
-    palette::PaletteState, profile::*, selection::Selection, settings::*, ugoira::PlaybackState,
+    callbacks::install_callbacks, detach::detach_callbacks, feed::*, helpers::*, lifecycle::*,
+    novel::NovelState,
+    palette::PaletteState, profile::*, selection::Selection, settings::*, tasks::Tasks,
+    ugoira::PlaybackState,
 };
 
 use slint::{
@@ -90,7 +94,19 @@ const VIEWER_MAX_WIDTH: u32 = 1600;
 
 pub(crate) struct App {
     ui: slint::Weak<AppWindow>,
-    rt: Arc<Runtime>,
+    /// The runtime plus the shutdown flag and cancellation token that decide whether
+    /// it may still accept work.
+    ///
+    /// Every background task goes through this handle rather than through `rt`
+    /// directly, which is what makes "stop accepting work" a property of the runtime
+    /// boundary instead of a rule each call site has to remember.
+    tasks: crate::app::tasks::Tasks,
+    /// Every timer this app started, held so it can be stopped at exit.
+    ///
+    /// These used to be leaked with `std::mem::forget`: a forgotten timer is never
+    /// stopped, and its closure keeps a strong reference to the App, so the runtime
+    /// behind it was kept alive through process teardown.
+    timers: RefCell<Vec<slint::Timer>>,
     store: Store,
     cache: ImageCache,
     demo: DemoCatalog,

@@ -498,7 +498,7 @@ impl App {
         let epoch = self.epoch;
         let demo = self.mode == Mode::Demo;
         let cache = self.cache.clone();
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
 
         rt.spawn(async move {
             let cache_for = cache.clone();

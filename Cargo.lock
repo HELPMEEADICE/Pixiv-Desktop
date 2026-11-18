@@ -3792,6 +3792,7 @@ dependencies = [
  "slint-build",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "urlencoding",

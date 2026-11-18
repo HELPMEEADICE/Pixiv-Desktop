@@ -111,7 +111,7 @@ impl App {
             Mode::Real => {
                 let app = shared.borrow();
                 let client = app.client.clone();
-                let rt = app.rt.clone();
+                let rt = app.tasks.clone();
                 drop(app);
                 let Some(client) = client else {
                     App::fail_detail(shared, epoch, "没有可用的网络客户端。");
@@ -507,7 +507,7 @@ impl App {
 
         let mode = self.mode;
         let cache = self.cache.clone();
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         let epoch = self.detail_epoch;
         let seed = illust.id;
         rt.spawn(async move {
@@ -617,7 +617,7 @@ impl App {
                 } else {
                     BookmarkRestrict::Public
                 };
-                let rt = self.rt.clone();
+                let rt = self.tasks.clone();
                 rt.spawn(async move {
                     let result = client.set_bookmark(illust_id, next, restrict).await;
                     on_ui(move |shared| {
@@ -756,7 +756,7 @@ impl App {
         let work = illust.id;
         let epoch = self.detail_epoch;
         self.ui().set_detail_busy(true);
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         rt.spawn(async move {
             let outcome = async {
                 let current = client.follow_state(artist).await?;
@@ -1073,7 +1073,7 @@ impl App {
         }
         let mode = self.mode;
         let cache = self.cache.clone();
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         let thumb_target = self.detail_thumb_target();
         rt.spawn(async move {
             let mut stream = futures::stream::iter(requests)
@@ -1195,7 +1195,7 @@ impl App {
         // page has moved on compares against it and stops.
         self.playback.epoch = epoch;
         let mode = self.mode;
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         let client = self.client.clone();
         let target = film_width_for(&self.ui());
         rt.spawn(async move {
@@ -1276,7 +1276,7 @@ impl App {
         }
         let epoch = self.detail_epoch;
         let work = illust_id;
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         rt.spawn(async move {
             let result = client.set_bookmark(illust_id, true, restrict).await;
             on_ui(move |shared| {

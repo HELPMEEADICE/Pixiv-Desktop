@@ -37,7 +37,7 @@ pub(crate) fn verify_stored_session(app: &Shared) {
             app.client.clone(),
             app.session.clone(),
             app.data_dir.clone(),
-            app.rt.clone(),
+            app.tasks.clone(),
         )
     };
     if !stored.is_authenticated() {
@@ -311,7 +311,7 @@ impl App {
 
         self.ui().set_busy(true);
         self.notify(0, "正在向 Pixiv 验证会话…");
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         let data_dir = self.data_dir.clone();
         rt.spawn(async move {
             // Built and sealed on the runtime: the DPAPI seal, the file create, the

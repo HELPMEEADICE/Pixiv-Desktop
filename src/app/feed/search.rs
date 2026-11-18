@@ -686,7 +686,7 @@ impl App {
                     (
                         app.suggest.query.clone(),
                         app.client.clone(),
-                        app.rt.clone(),
+                        app.tasks.clone(),
                     )
                 };
                 if word.is_empty() {

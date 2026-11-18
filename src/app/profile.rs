@@ -66,7 +66,7 @@ impl App {
             }
             app.remember_scroll(route, 0.0);
             app.refresh_chrome();
-            (route, target, epoch, app.client.clone(), app.rt.clone())
+            (route, target, epoch, app.client.clone(), app.tasks.clone())
         };
 
         let Some(target) = target else {
@@ -191,7 +191,7 @@ impl App {
             return;
         }
         let cache = self.cache.clone();
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         let scale = self.ui().window().scale_factor().max(1.0);
         // Not `target_width`: its clamp is the *card* ceiling, and this image is
         // drawn across the whole header row (plan §2.2 U8).
@@ -393,7 +393,7 @@ impl App {
             };
             app.loading_more = true;
             app.ui().set_grid_loading_more(true);
-            (target, next, app.epoch, app.client.clone(), app.rt.clone())
+            (target, next, app.epoch, app.client.clone(), app.tasks.clone())
         };
         let Some(client) = client else {
             let mut app = shared.borrow_mut();
@@ -546,7 +546,7 @@ impl App {
             }
             ui.set_profile_busy(true);
         }
-        let rt = self.rt.clone();
+        let rt = self.tasks.clone();
         rt.spawn(async move {
             let outcome = async {
                 let current = client.follow_state(target).await?;
