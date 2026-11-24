@@ -96,9 +96,10 @@ slint-build = "1.18"
 # (they are compiled once and rarely change); this crate keeps level 1 so a
 # backtrace still points at a line.
 [profile.dev]
-debug = 1
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
+debug = 0
 opt-level = 2
 
 [profile.release]
